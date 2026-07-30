@@ -1,0 +1,1052 @@
+{
+  "name": "My workflow 3",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Extract URLs from SerpAPI organic results\nconst results = $input.first().json.items|| [];\nconst query = $input.first().json.search_parameters?.q || '';\n\nreturn results.map((result, index) => ({\n  url: result.link,\n  title: result.title || '',\n  snippet: result.snippet || '',\n  position: index + 1,\n  query_source: query\n}));"
+      },
+      "id": "f79278b2-c836-46e9-9fdb-251f57b2f1c8",
+      "name": "Extract URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1872,
+        512
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Extracts URLs from search results"
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/customsearch/v1",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "AIzaSyDd_4aHNL3XEX5kaN6x_4A5dQ2gvw6DyKA"
+            },
+            {
+              "name": "cx",
+              "value": "d620054ec76f1489b"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.Query }}"
+            },
+            {
+              "name": "num",
+              "value": "1"
+            },
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -2048,
+        512
+      ],
+      "id": "bacb9f03-98f9-4834-9d02-83e9bad0dc7d",
+      "name": "Google Search",
+      "retryOnFail": false,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "text": "=Extract contact details from this text:\nStore: {{ $json.sections.url }}\nHeader: ```{{ $json.sections.header }}```\nFooter: ```{{ $json.sections.footer }}```\nMain: ```{{ $json.sections.main }}```\nContact: ```{{ $json.sections.contact }}```\nAbout: ```{{ $json.sections.about }}```\nReturn a JSON object with these exact fields:\n- email: the email address (use empty string \"\" if not found)\n- phone: the phone number (use empty string \"\" if not found)\n- contact: the contact page URL (use empty string \"\" if not found)\n- additional information: additional information on how to contact the owner like social media handle and such (Use empty string \"\" if not found)\n- store_url: the store URL provided \nCRITICAL: Always return all three fields. Use \"\" (empty string) for any missing information. Never use null or omit fields. ",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"required\": [\"email\",\"phone\",\"contact\", \"additional information\", \"store url\"],\n  \"properties\": {\n    \"store url\" : { \n      \"type\": \"string\"\n    },\n    \"email\": {\n      \"type\": \"string\"\n    },\n    \"contact\": {\n      \"type\": \"string\"\n    },\n    \"additional information\": {\n      \"type\": \"string\"\n    }\n }\n}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        384,
+        576
+      ],
+      "id": "dd3f540c-ef08-4ca5-bcb2-05f03877f0e4",
+      "name": "Information Extractor"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        384,
+        752
+      ],
+      "id": "d6b4a6a5-4a28-4499-9f91-01ab8ab6dfe0",
+      "name": "OpenAI Chat Model1",
+      "credentials": {
+        "openAiApi": {
+          "id": "onwS99yAVk74Thh9",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputUrl = $input.first().json.url;\n\n// Extract protocol://domain:port\nconst match = inputUrl.match(/^(https?:\\/\\/[^\\/\\?#]+)/i);\nconst rootUrl = match ? match[1] : null;\n\nreturn {\n  json: {\n    originalUrl: inputUrl,\n    rootUrl: rootUrl\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        208
+      ],
+      "id": "b1cc3a83-3ec8-4827-805f-7c16bc512e26",
+      "name": "Check if Root URL"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.rootUrl }}/sitemap.xml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -992,
+        208
+      ],
+      "id": "3c832a1b-5b68-4571-8ca9-15e5125cfa0f",
+      "name": "Fetch SItemap",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const xml =$input.first().json.data\n// Extract all URLs between <loc> tags\nconst locPattern = /<loc>(.*?)<\\/loc>/g;\nconst sitemapUrls = [];\nlet match;\n\nwhile ((match = locPattern.exec(xml)) !== null) {\n  sitemapUrls.push(match[1]);\n}\n\n// Return as separate items for n8n to process\nreturn sitemapUrls.map(sitemapUrl => ({\n  json: {\n    sitemapUrl: sitemapUrl,\n    type: getSitemapType(sitemapUrl)\n  }\n}));\n\nfunction getSitemapType(sitemapUrl) {\n  if (sitemapUrl.includes('products')) return 'products';\n  if (sitemapUrl.includes('pages')) return 'pages';\n  if (sitemapUrl.includes('collections')) return 'collections';\n  if (sitemapUrl.includes('blogs')) return 'blogs';\n  return 'other';\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        192
+      ],
+      "id": "e9a7e702-ec78-4a20-bcf5-3950d8b07d0b",
+      "name": "Get sub maps"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.sitemapUrl }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -464,
+        576
+      ],
+      "id": "b01af776-de79-461d-8ccb-89a09756418a",
+      "name": "Get Submaps"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://production-sfo.browserless.io/content",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "2TT3AAQhjdFLPUY8d2b2caa7204960fc41b52e20f9396125f"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.url }}"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 3000
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        48,
+        576
+      ],
+      "id": "75395f48-4855-4cf4-a77b-28f7ba66ee48",
+      "name": "Fetch HTML"
+    },
+    {
+      "parameters": {
+        "jsCode": "const html =$input.first().json.data\n\nfunction extractBySection(html) {\n  const sections = {\n    header: '',\n    footer: '',\n    main: '',\n    contact: '',\n    about: '',\n    url: $('Check if Root URL').first().json.rootUrl\n  };\n  \n  // Extract header\n  const headerMatch = html.match(/<header[\\s\\S]*?<\\/header>/gi);\n  if (headerMatch) sections.header = cleanHTML(headerMatch[0]);\n  \n  // Extract footer\n  const footerMatch = html.match(/<footer[\\s\\S]*?<\\/footer>/gi);\n  if (footerMatch) sections.footer = cleanHTML(footerMatch[0]);\n  \n  // Extract main content\n  const mainMatch = html.match(/<main[\\s\\S]*?<\\/main>/gi);\n  if (mainMatch) sections.main = cleanHTML(mainMatch[0]);\n  \n  // Extract contact sections\n  const contactPatterns = [\n    /<[^>]*class=[\"'][^\"']*contact[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<[^>]*id=[\"'][^\"']*contact[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<section[^>]*>[\\s\\S]*?contact[\\s\\S]*?<\\/section>/gi\n  ];\n  \n  contactPatterns.forEach(pattern => {\n    const matches = html.match(pattern);\n    if (matches) {\n      sections.contact += ' ' + matches.map(m => cleanHTML(m)).join(' ');\n    }\n  });\n  \n  // Extract about sections\n  const aboutPatterns = [\n    /<[^>]*class=[\"'][^\"']*about[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<[^>]*id=[\"'][^\"']*about[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi\n  ];\n  \n  aboutPatterns.forEach(pattern => {\n    const matches = html.match(pattern);\n    if (matches) {\n      sections.about += ' ' + matches.map(m => cleanHTML(m)).join(' ');\n    }\n  });\n  \n  // If no specific sections found, use whole body\n  if (!sections.header && !sections.footer && !sections.main) {\n    const bodyMatch = html.match(/<body[\\s\\S]*?<\\/body>/gi);\n    if (bodyMatch) sections.main = cleanHTML(bodyMatch[0]);\n  }\n  \n  return sections;\n}\n\nfunction cleanHTML(html) {\n  let text = html;\n  \n  // Remove non-visible elements\n  text = text.replace(/<script[\\s\\S]*?<\\/script>/gi, '');\n  text = text.replace(/<style[\\s\\S]*?<\\/style>/gi, '');\n  text = text.replace(/<!--[\\s\\S]*?-->/g, '');\n  \n  // Preserve structure\n  text = text.replace(/<br[^>]*>/gi, '\\n');\n  text = text.replace(/<\\/?(p|div|h[1-6]|li)[^>]*>/gi, '\\n');\n  \n  // Remove tags\n  text = text.replace(/<[^>]+>/g, ' ');\n  \n  // Decode entities\n  text = text.replace(/&nbsp;/g, ' ')\n             .replace(/&amp;/g, '&')\n             .replace(/&lt;/g, '<')\n             .replace(/&gt;/g, '>')\n             .replace(/&quot;/g, '\"')\n             .replace(/&#39;/g, \"'\")\n             .replace(/&[#\\w]+;/g, ' ');\n  \n  // Clean whitespace\n  text = text.replace(/\\n\\s*\\n+/g, '\\n')\n             .replace(/[ \\t]+/g, ' ')\n             .trim();\n  \n  return text;\n}\n\nconst sections = extractBySection(html);\n\n// Combine sections prioritizing contact-relevant areas\nconst combinedText = [\n  sections.contact,\n  sections.footer,\n  sections.about,\n  sections.header,\n  sections.main\n].filter(s => s.length > 0).join('\\n\\n---\\n\\n');\n\nreturn {\n  json: {\n    sections: sections,\n    combinedText: combinedText,\n    contactPriority: sections.contact || sections.footer || sections.main\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        576
+      ],
+      "id": "a5932cc1-740a-47c6-9218-d5c42b1c6cf7",
+      "name": "Fetch Page Content"
+    },
+    {
+      "parameters": {
+        "content": "## Fetching URLs to fetch",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -2032,
+        704
+      ],
+      "typeVersion": 1,
+      "id": "2cf9fc72-018e-4668-b388-49ec03be7770",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Crawling sitempas",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -832,
+        352
+      ],
+      "typeVersion": 1,
+      "id": "f4f402fe-2c93-44ab-bda4-ca5bccb61295",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## Looping Over URLs",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1248,
+        560
+      ],
+      "typeVersion": 1,
+      "id": "a7508e50-7bfc-4b98-8ddb-e5c209da59ac",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## Extract HTML and Info",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        64,
+        768
+      ],
+      "typeVersion": 1,
+      "id": "5ab85dc3-78b2-437d-8271-f8c611ed3afb",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1FmcpYje7lkhwh3CckRX_mKHK3dqZ8vnyf9UrDC-2GvM",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "1883307066",
+          "mode": "id"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Contact Email ": "={{ $json.output.email }}",
+            "Contact Phone ": "=",
+            "Store Contact  ": "={{ $json.output.contact }}",
+            "Additional Information": "={{ $json.output['additional information'] }}",
+            "Store Url": "={{ $json.output['store url'] }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Store Url",
+              "displayName": "Store Url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Contact Email ",
+              "displayName": "Contact Email ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contact Phone ",
+              "displayName": "Contact Phone ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Store Contact  ",
+              "displayName": "Store Contact  ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Additional Information",
+              "displayName": "Additional Information",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        768,
+        576
+      ],
+      "id": "25de50c2-f294-4d00-b29d-b5ee263f81d2",
+      "name": "Append row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Kc0MN5pfwVAjQi4u",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://production-sfo.browserless.io/content",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "token",
+              "value": "2TSkNCZTp6v7H0245c5c17be981346c07a895daa2aa5ecf7e"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Cache-Control",
+              "value": "no-cache"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.rootUrl }} "
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -528,
+        -48
+      ],
+      "id": "41415f1b-a24e-4960-9681-b294b02ec110",
+      "name": "Fetch HTML1"
+    },
+    {
+      "parameters": {
+        "text": "=Extract contact details from this text:\nHeader: ```{{ $json.sections.header }}```\nFooter: ```{{ $json.sections.footer }}```\nMain: ```{{ $json.sections.main }}```\nContact: ```{{ $json.sections.contact }}```\nAbout: ```{{ $json.sections.about }}```\nReturn a JSON object with these exact fields:\n- email: the email address (use empty string \"\" if not found)\n- phone: the phone number (use empty string \"\" if not found)\n- contact: the contact page URL (use empty string \"\" if not found)\n- additional information: additional information on how to contact the owner like social media handle and such (Use empty string \"\" if not found)\n- store_url: the store URL provided \n\nStore: {{ $('Check if Root URL').item.json.rootUrl }}\nCRITICAL: Always return all three fields. Use \"\" (empty string) for any missing information. Never use null or omit fields. ",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"required\": [\"email\",\"phone\",\"contact\", \"additional information\", \"store url\"],\n  \"properties\": {\n    \"store url\" : { \n      \"type\": \"string\"\n    },\n    \"email\": {\n      \"type\": \"string\"\n    },\n    \"contact\": {\n      \"type\": \"string\"\n    },\n    \"additional information\": {\n      \"type\": \"string\"\n    }\n }\n}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        -112,
+        -48
+      ],
+      "id": "88a09404-168a-4ca2-8b45-24ff2f0b79cd",
+      "name": "Information Extractor1"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -112,
+        112
+      ],
+      "id": "60e056c2-35a5-46c9-970b-ba908b0b8d1e",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "onwS99yAVk74Thh9",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const html =$input.first().json.data\n\nfunction extractBySection(html) {\n  const sections = {\n    header: '',\n    footer: '',\n    main: '',\n    contact: '',\n    about: ''\n  };\n  \n  // Extract header\n  const headerMatch = html.match(/<header[\\s\\S]*?<\\/header>/gi);\n  if (headerMatch) sections.header = cleanHTML(headerMatch[0]);\n  \n  // Extract footer\n  const footerMatch = html.match(/<footer[\\s\\S]*?<\\/footer>/gi);\n  if (footerMatch) sections.footer = cleanHTML(footerMatch[0]);\n  \n  // Extract main content\n  const mainMatch = html.match(/<main[\\s\\S]*?<\\/main>/gi);\n  if (mainMatch) sections.main = cleanHTML(mainMatch[0]);\n  \n  // Extract contact sections\n  const contactPatterns = [\n    /<[^>]*class=[\"'][^\"']*contact[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<[^>]*id=[\"'][^\"']*contact[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<section[^>]*>[\\s\\S]*?contact[\\s\\S]*?<\\/section>/gi\n  ];\n  \n  contactPatterns.forEach(pattern => {\n    const matches = html.match(pattern);\n    if (matches) {\n      sections.contact += ' ' + matches.map(m => cleanHTML(m)).join(' ');\n    }\n  });\n  \n  // Extract about sections\n  const aboutPatterns = [\n    /<[^>]*class=[\"'][^\"']*about[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi,\n    /<[^>]*id=[\"'][^\"']*about[^\"']*[\"'][^>]*>[\\s\\S]*?<\\/[^>]+>/gi\n  ];\n  \n  aboutPatterns.forEach(pattern => {\n    const matches = html.match(pattern);\n    if (matches) {\n      sections.about += ' ' + matches.map(m => cleanHTML(m)).join(' ');\n    }\n  });\n  \n  // If no specific sections found, use whole body\n  if (!sections.header && !sections.footer && !sections.main) {\n    const bodyMatch = html.match(/<body[\\s\\S]*?<\\/body>/gi);\n    if (bodyMatch) sections.main = cleanHTML(bodyMatch[0]);\n  }\n  \n  return sections;\n}\n\nfunction cleanHTML(html) {\n  let text = html;\n  \n  // Remove non-visible elements\n  text = text.replace(/<script[\\s\\S]*?<\\/script>/gi, '');\n  text = text.replace(/<style[\\s\\S]*?<\\/style>/gi, '');\n  text = text.replace(/<!--[\\s\\S]*?-->/g, '');\n  \n  // Preserve structure\n  text = text.replace(/<br[^>]*>/gi, '\\n');\n  text = text.replace(/<\\/?(p|div|h[1-6]|li)[^>]*>/gi, '\\n');\n  \n  // Remove tags\n  text = text.replace(/<[^>]+>/g, ' ');\n  \n  // Decode entities\n  text = text.replace(/&nbsp;/g, ' ')\n             .replace(/&amp;/g, '&')\n             .replace(/&lt;/g, '<')\n             .replace(/&gt;/g, '>')\n             .replace(/&quot;/g, '\"')\n             .replace(/&#39;/g, \"'\")\n             .replace(/&[#\\w]+;/g, ' ');\n  \n  // Clean whitespace\n  text = text.replace(/\\n\\s*\\n+/g, '\\n')\n             .replace(/[ \\t]+/g, ' ')\n             .trim();\n  \n  return text;\n}\n\nconst sections = extractBySection(html);\n\n// Combine sections prioritizing contact-relevant areas\nconst combinedText = [\n  sections.contact,\n  sections.footer,\n  sections.about,\n  sections.header,\n  sections.main\n].filter(s => s.length > 0).join('\\n\\n---\\n\\n');\n\nreturn {\n  json: {\n    sections: sections,\n    combinedText: combinedText,\n    contactPriority: sections.contact || sections.footer || sections.main\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        -48
+      ],
+      "id": "077907eb-2c54-4ba5-ad59-a6383b31d907",
+      "name": "Fetch Page Content1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1FmcpYje7lkhwh3CckRX_mKHK3dqZ8vnyf9UrDC-2GvM",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "1883307066",
+          "mode": "id"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Contact Email ": "={{ $json.output.email }}",
+            "Contact Phone ": "=",
+            "Store Contact  ": "={{ $json.output.contact }}",
+            "Additional Information": "={{ $json.output['additional information'] }}",
+            "Store Url": "={{ $json.output['store url'] }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Store Url",
+              "displayName": "Store Url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Contact Email ",
+              "displayName": "Contact Email ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Contact Phone ",
+              "displayName": "Contact Phone ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Store Contact  ",
+              "displayName": "Store Contact  ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Additional Information",
+              "displayName": "Additional Information",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        80,
+        272
+      ],
+      "id": "8d00df70-d406-4913-a1e0-d17b13727900",
+      "name": "Append row in sheet1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Kc0MN5pfwVAjQi4u",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Fetch Main URL if no SItemap exists",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -112,
+        -176
+      ],
+      "typeVersion": 1,
+      "id": "d4316913-39a7-4d22-9847-67ceec6b7926",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        768,
+        288
+      ],
+      "id": "f5fae984-aefc-4986-9cbd-980bb64819b9",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "content": "## Merge\n",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        656,
+        160
+      ],
+      "typeVersion": 1,
+      "id": "6930c983-9132-4a24-a694-64dca49d3550",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -192,
+        320
+      ],
+      "id": "e0a9ad8f-2a45-4403-8539-c35be6390ebd",
+      "name": "Wait",
+      "webhookId": "3af199de-0bd1-4212-affd-a206ec946107"
+    },
+    {
+      "parameters": {
+        "jsCode": "/*const innerLoopContext = $('Loop Over Searches').context;\nconst innerLoopDone = innerLoopContext.noItemsLeft === true;\n\nconsole.log(`Inner loop done: ${innerLoopDone}`);\n\nif (innerLoopDone) {\n  // Return a simple completion signal for the outer loop\n  return [{\n    json: {\n      queryComplete: true\n    }\n  }];\n} else {\n  // Pass through current data for inner loop continuation\n  return $input.all();\n}\n*/\n/*\nconst innerLoopContext = $('Loop Over Searches').context;\nconst innerLoopDone = innerLoopContext.noItemsLeft === true;\n\nconsole.log(`Inner loop done: ${innerLoopDone}`);\n\nif(innerLoopContext){\n  return $input.all().map(item => ({\n  json: {\n    url: item.json.url,\n    title: item.json.title,\n    snippet: item.json.snippet,\n    position: item.json.position,\n    query_source: item.json.query_source\n  }\n}));\n}\n// ALWAYS pass through the data, just add the flag\nreturn $input.all().map(item => ({\n  json: {\n    ...item.json,\n    innerLoopDone: innerLoopDone\n  }\n})); \n */\nconst innerLoopContext = $('Loop Over Searches').context;\nconst innerLoopDone = innerLoopContext.noItemsLeft === true;\n\nconsole.log(`Inner loop done: ${innerLoopDone}`);\n\n// ALWAYS pass through the data with the innerLoopDone flag\nreturn $input.all().map(item => ({\n  json: {\n   // ...item.json,\n  //  innerLoopDone: innerLoopDone\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -752,
+        816
+      ],
+      "id": "c158062e-9b9e-49fb-971e-1a6bc834f9c5",
+      "name": "Inner Loop Done?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4b720ca4-ea77-445f-8f7c-697187ae4842",
+              "leftValue": "={{ $json.innerLoopDone }}.toString()",
+              "rightValue": "=true",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -368,
+        816
+      ],
+      "id": "83040bd6-187d-4e60-a141-9788c059a754",
+      "name": "If yes"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1312,
+        800
+      ],
+      "id": "57284c86-b360-4394-bbd1-311360b0b1fc",
+      "name": "Wait1",
+      "webhookId": "61032454-9d84-4441-b3a9-2d6576554f2a"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1552,
+        512
+      ],
+      "id": "ac0b4256-720e-48e5-84b4-88e45feec9f5",
+      "name": "Loop Over Searches"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4bc75a47-630b-41ed-aeef-7d936bbd3a1b",
+              "leftValue": "={{ $json.url }}.toString()",
+              "rightValue": "\"\"",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1744,
+        512
+      ],
+      "id": "dcfa5800-b587-4330-8131-bdbd7f39f6c4",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "Query"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2320,
+        320
+      ],
+      "id": "1af2d26c-3a81-41f6-b914-c9b4ad29910f",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "content": "## For Each Google Query",
+        "height": 80
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -2304,
+        192
+      ],
+      "typeVersion": 1,
+      "id": "ec76f8a7-b86d-4894-9241-01296e6d96a9",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "jsCode": "function isContactRelevant(pageUrl) {\n  const lowerUrl = pageUrl.toLowerCase();\n\n  // Always include homepage\n  if (lowerUrl.match(/^https?:\\/\\/[^\\/]+\\/?$/)) {\n    return true;\n  }\n\n  // Contact-relevant keywords\n  const relevantKeywords = [\n    \"contact\",\n    \"about\",\n    \"support\",\n    \"help\",\n    \"reach\",\n    \"location\",\n    \"store\",\n    \"info\",\n    \"team\",\n    \"company\",\n    \"our-story\",\n    \"who-we-are\",\n    \"get-in-touch\",\n    \"faq\",\n    \"customer-service\",\n    \"pages/contact\",\n    \"pages/about\",\n  ];\n\n  const hasRelevantKeyword = relevantKeywords.some((keyword) =>\n    lowerUrl.includes(keyword)\n  );\n\n  // Exclude non-contact pages\n  const excludePatterns = [\n    /\\/products?\\//,\n    /\\/collections?\\//,\n    /\\/cart/,\n    /\\/checkout/,\n    /\\/account/,\n    /\\/search/,\n    /\\/blogs?\\//,\n    /\\/password/,\n    /\\/login/,\n  ];\n\n  const isExcluded = excludePatterns.some((pattern) => pattern.test(lowerUrl));\n\n  return hasRelevantKeyword && !isExcluded;\n}\n\nconst xml = $input.first().json.data;\n\n// Extract all URLs\nconst urlPattern = /<url>[\\s\\S]*?<loc>(.*?)<\\/loc>[\\s\\S]*?<\\/url>/g;\nconst item = $(\"Check if Root URL\").first().json.originalUrl;\nconst pageUrls = [];\npageUrls.push({ url: item });\nlet match;\nwhile ((match = urlPattern.exec(xml)) !== null) {\n  if (isContactRelevant(match[1])) {\n    pageUrls.push({ url: match[1] });\n  }\n}\n\n// Return as a SINGLE item containing the array\nreturn pageUrls;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        576
+      ],
+      "id": "86c467d0-1455-47df-9f5b-e48aab28f2f2",
+      "name": "Fetch All Relevant routes in submap"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extract URLs": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Search": {
+      "main": [
+        [
+          {
+            "node": "Extract URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Information Extractor": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Root URL": {
+      "main": [
+        [
+          {
+            "node": "Fetch SItemap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch SItemap": {
+      "main": [
+        [
+          {
+            "node": "Get sub maps",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch HTML1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get sub maps": {
+      "main": [
+        [
+          {
+            "node": "Get Submaps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Submaps": {
+      "main": [
+        [
+          {
+            "node": "Fetch All Relevant routes in submap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch HTML": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Page Content": {
+      "main": [
+        [
+          {
+            "node": "Information Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Fetch HTML1": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page Content1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Information Extractor1": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Information Extractor1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Page Content1": {
+      "main": [
+        [
+          {
+            "node": "Information Extractor1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Inner Loop Done?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inner Loop Done?": {
+      "main": [
+        [
+          {
+            "node": "If yes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If yes": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Loop Over Searches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        []
+      ]
+    },
+    "Loop Over Searches": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check if Root URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Searches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Google Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch All Relevant routes in submap": {
+      "main": [
+        [
+          {
+            "node": "Fetch HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b6983ffa-0cf4-4268-929c-47d63d7aa058",
+  "meta": {
+    "instanceId": "e87a96ce5fc70418208761948d27ee51a65358e4a33984dda5f149e2362ce4a7"
+  },
+  "id": "6pZ4z4ILw5pN1Kld",
+  "tags": []
+}

@@ -1,0 +1,16 @@
+{
+  "name": "shopify-lead-generator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lean CSV-driven Shopify lead generation server",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "run:once": "node src/run-once.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
