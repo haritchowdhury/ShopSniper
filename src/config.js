@@ -3,6 +3,7 @@ import path from "node:path";
 
 function loadDotEnv(filePath) {
   if (!fs.existsSync(filePath)) return;
+  const externallyConfigured = new Set(Object.keys(process.env));
 
   for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -17,7 +18,7 @@ function loadDotEnv(filePath) {
     ) {
       value = value.slice(1, -1);
     }
-    if (!(key in process.env)) process.env[key] = value;
+    if (!externallyConfigured.has(key)) process.env[key] = value;
   }
 }
 
