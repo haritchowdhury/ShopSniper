@@ -3,6 +3,10 @@ import path from "node:path";
 import { stringifyCsv } from "./csv.js";
 
 export const OUTPUT_HEADERS = [
+  "shop_type",
+  "generated_query",
+  "query_score",
+  "query_generation_reason",
   "search_query",
   "google_rank",
   "google_result_url",

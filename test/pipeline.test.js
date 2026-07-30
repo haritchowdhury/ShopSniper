@@ -101,3 +101,87 @@ test("one failed query does not stop later queries", async () => {
   assert.equal(records[1].rejection_reason, "no_search_results");
   assert.equal(currentStatus.queriesProcessed, 2);
 });
+
+test("selected probe results enter the lead pipeline without another Google search", async () => {
+  let searchCalls = 0;
+  const currentStatus = status();
+  const cachedResult = {
+    query: "site:myshopify.com/products barrel jeans",
+    rank: 1,
+    url: "https://denim.myshopify.com/products/barrel-jeans",
+    title: "Barrel Jeans",
+    snippet: "",
+    rejectionReason: ""
+  };
+  const records = await runPipeline(
+    {
+      outputCsv: "/unused/output.csv",
+      storeConcurrency: 1,
+      maxPagesPerStore: 1,
+      qualificationThreshold: 0
+    },
+    currentStatus,
+    {
+      planQueries: async () => ({
+        selected: [
+          {
+            shopType: "clothing",
+            query: cachedResult.query,
+            queryScore: 91,
+            queryGenerationReason: "High store diversity",
+            results: [cachedResult]
+          }
+        ]
+      }),
+      search: async () => {
+        searchCalls += 1;
+        return [];
+      },
+      resolve: async (entry) => ({
+        ...entry,
+        html: "<html><body>Shopify barrel jeans store with enough content</body></html>",
+        finalUrl: "https://denim.example/products/barrel-jeans",
+        canonicalUrl: "",
+        myshopifyDomain: "denim.myshopify.com",
+        resolvedDomain: "denim.example",
+        allowedHostnames: ["denim.myshopify.com", "denim.example"],
+        identityConfidence: 100
+      }),
+      validate: () => ({
+        valid: true,
+        rejectionReason: "",
+        shopifyConfidence: 100,
+        relevanceScore: 100,
+        evidence: {}
+      }),
+      discoverPages: async () => ["https://denim.example/products/barrel-jeans"],
+      extractEvidence: () => ({
+        url: "https://denim.example/products/barrel-jeans",
+        storeName: "Denim",
+        emails: ["hello@denim.example"],
+        phones: [],
+        contactUrl: "",
+        socialProfiles: [],
+        snippets: []
+      }),
+      consolidate: () => ({
+        storeName: "Denim",
+        email: "hello@denim.example",
+        allEmails: ["hello@denim.example"],
+        phone: "",
+        allPhones: [],
+        contactUrl: "",
+        socialProfiles: [],
+        snippets: [],
+        emailSourceUrl: "https://denim.example/products/barrel-jeans",
+        phoneSourceUrl: ""
+      }),
+      normalizeAi: async () => null,
+      writeOutput: async () => {}
+    }
+  );
+  assert.equal(searchCalls, 0);
+  assert.equal(records[0].shop_type, "clothing");
+  assert.equal(records[0].generated_query, cachedResult.query);
+  assert.equal(records[0].query_score, 91);
+});

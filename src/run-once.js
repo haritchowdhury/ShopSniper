@@ -1,30 +1,25 @@
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
 import { runPipeline } from "./pipeline.js";
+import { createInitialStatus } from "./status.js";
 
 const config = loadConfig();
 assertRunConfig(config);
 
 const status = {
+  ...createInitialStatus(),
   state: "running",
+  stage: "reading_categories",
   startedAt: new Date().toISOString(),
-  completedAt: "",
-  queriesTotal: 0,
-  queriesProcessed: 0,
-  blankQueriesSkipped: 0,
-  storesDiscovered: 0,
-  storesQualified: 0,
-  storesRejected: 0,
-  failures: 0,
-  outputRows: 0,
-  error: ""
 };
 
 try {
   await runPipeline(config, status);
   status.state = "completed";
+  status.stage = "completed";
 } catch (error) {
   status.state = "failed";
+  status.stage = "failed";
   status.error = error instanceof Error ? error.message : String(error);
   process.exitCode = 1;
 } finally {

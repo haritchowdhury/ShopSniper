@@ -1,16 +1,16 @@
 # Shopify Lead Generator
 
 A small, dependency-free Node.js server that replaces the two n8n workflows. It reads
-search queries from a designated CSV file, discovers and qualifies Shopify stores,
-extracts evidence-backed contact details, and atomically writes one row per store to
-an output CSV.
+broad shop types from a one-column CSV, researches and generates product-oriented
+Shopify searches, probes and ranks those searches, discovers qualified stores,
+extracts evidence-backed contact details, and writes auditable CSV outputs.
 
 ## Requirements
 
 - Node.js 20 or newer
 - A Google Custom Search API key and Programmable Search Engine ID
+- An OpenAI API key for category research and candidate generation
 - Optional Browserless credentials for pages that require rendering
-- Optional OpenAI credentials for evidence normalization
 
 No `npm install` is required because the application has no runtime dependencies.
 
@@ -27,6 +27,7 @@ At minimum, set:
 ```env
 GOOGLE_API_KEY=your_new_key
 GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
+OPENAI_API_KEY=your_openai_key
 ```
 
 The Google and Browserless values found in the old n8n exports must be treated as
@@ -40,13 +41,25 @@ BROWSERLESS_TOKEN=your_new_token
 BROWSERLESS_FALLBACK_TOKEN=an_optional_second_token
 ```
 
-OpenAI is optional. Without it, deterministic email, phone, contact-page, JSON-LD,
-and social-profile extraction still runs:
+The query planner uses the Responses API with a bounded web-search operation and a
+strict JSON schema. The lead extractor can also use a separate, smaller model to
+normalize only evidence that has already been discovered:
 
 ```env
 OPENAI_API_KEY=your_key
+QUERY_GENERATION_MODEL=gpt-5.6-luna
 OPENAI_MODEL=gpt-4.1-mini
+ENABLE_AI_NORMALIZATION=false
 ```
+
+If an AI request fails during a run, the planner can fall back to built-in product
+catalogs for clothing, baby food, and kitchen utensils. The fallback does not claim
+live market evidence. A key is still required when a run starts because arbitrary
+categories depend on AI generation.
+
+Lead normalization is disabled by default so adding the query-planning key does not
+silently add one model call per store. Set `ENABLE_AI_NORMALIZATION=true` only when
+that additional cost is intentional.
 
 The service binds to `127.0.0.1` by default. Set `HOST` deliberately if another
 machine must reach it; add authentication or keep it behind a private trusted
@@ -54,19 +67,25 @@ network before exposing it.
 
 ## Input
 
-Edit `data/input.csv`. The required header is exactly `Search Query`:
+Edit `data/categories.csv`. The required header is exactly `Shop Type`:
 
 ```csv
-Search Query
-"site:myshopify.com/products ""salt free seasoning"""
-"site:myshopify.com/collections ""organic skincare"""
+Shop Type
+clothing
+baby food
+kitchen utensils
 ```
+
+Blank values are skipped, aliases such as `babyfood` and `utensils` are normalized,
+and duplicate categories are collapsed. Malformed or instruction-like rows are
+rejected into the generated-query audit instead of being sent to the model.
 
 Paths can be changed only through trusted server environment configuration:
 
 ```env
-INPUT_CSV=./data/input.csv
-OUTPUT_CSV=./data/output.csv
+INPUT_CSV=./data/categories.csv
+OUTPUT_CSV=./data/leads.csv
+GENERATED_QUERIES_CSV=./data/generated-queries.csv
 ```
 
 The API does not accept arbitrary filesystem paths.
@@ -94,26 +113,28 @@ curl http://127.0.0.1:3000/status
 ```
 
 `POST /run` returns `202 Accepted` and processes the batch asynchronously. Only one
-job can run at a time; another request returns `409 Conflict`. When `state` becomes
-`completed`, the result is available at `data/output.csv` by default.
+job can run at a time; another request returns `409 Conflict`. `GET /status` reports
+the current stage and planning counters. When `state` becomes `completed`, leads are
+available at `data/leads.csv` and query decisions at
+`data/generated-queries.csv`.
 
-If required Google configuration is missing, `POST /run` returns `503` and names the
-missing variables.
+If required Google or OpenAI configuration is missing, `POST /run` returns `503`
+and names the missing variables.
 
 ## Processing behavior
 
-For each query, the application:
+For each shop type, the application:
 
-1. Retrieves up to ten Google Custom Search results.
-2. Rejects assets and unsupported URLs.
-3. Follows redirects and reads canonical metadata.
-4. Resolves `myshopify.com` results to verified custom storefront domains.
-5. Deduplicates before Browserless or OpenAI work.
-6. Validates active Shopify evidence and category relevance.
-7. Reads direct sitemaps and sitemap indexes for high-value contact routes.
-8. Fetches normally first and uses Browserless only as a fallback.
-9. Extracts deterministic contact evidence and retains source URLs.
-10. Optionally uses OpenAI to normalize—but never create—supplied evidence.
+1. Performs one bounded, web-assisted research and candidate-generation call.
+2. Validates syntax, product intent, category fit, and duplicates in Node.js.
+3. Probes candidates against the first Google Custom Search result page.
+4. Scores relevance, distinct Shopify hosts, evidence, and pagination.
+5. Repairs a weak set up to two times and selects approximately ten diverse queries.
+6. Reuses the selected probes, so Google does not fetch those searches twice.
+7. Rejects assets, resolves canonical domains, and deduplicates stores.
+8. Validates active Shopify evidence and category relevance.
+9. Discovers contact pages and uses Browserless only as a fetch fallback.
+10. Extracts deterministic contact evidence and optionally normalizes that evidence.
 11. Scores the lead and writes one consolidated record per store.
 
 Individual search results or stores may fail without ending the batch. Qualified,
@@ -121,13 +142,40 @@ rejected, and failed outcomes remain visible in the output for auditing.
 
 ## Output
 
-The output includes discovery, domain identity, contact evidence, confidence scores,
-status, rejection reason, and error columns. Social profiles are encoded as a JSON
-array within the CSV field.
+`data/generated-queries.csv` records every selected and rejected candidate with its
+score, result count, distinct host count, pagination signal, market signal, source
+URLs, status, and rejection reason.
+
+`data/leads.csv` retains the original discovery, domain identity, contact evidence,
+confidence, status, rejection, and error fields. It also records `shop_type`,
+`generated_query`, `query_score`, and `query_generation_reason` on every lead row.
+Social profiles are encoded as a JSON array within the CSV field.
 
 The output is first written to a temporary file in the output directory and renamed
 only after the complete CSV is ready. An interrupted run therefore does not replace
 the previous completed output.
+
+## Query-planning controls
+
+The defaults favor quality while bounding spend:
+
+```env
+GENERATED_QUERY_COUNT=10
+QUERY_CANDIDATE_COUNT=25
+QUERY_REPAIR_ROUNDS=2
+QUERY_PROBE_CONCURRENCY=3
+MIN_QUERY_RESULTS=5
+MIN_QUERY_UNIQUE_HOSTS=4
+ENABLE_WEB_RESEARCH=true
+MAX_RESEARCH_SOURCES=8
+RESEARCH_GEOGRAPHY=global English-language market
+```
+
+One category normally uses one OpenAI research call and up to 25 Google probe
+requests. A weak set may add up to two OpenAI repair calls and more Google probes.
+Probe concurrency limits planning latency; `STORE_CONCURRENCY` controls the heavier
+storefront/contact stage. Google result-total estimates are recorded for audit only
+and do not drive selection.
 
 ## Test
 
@@ -135,8 +183,10 @@ the previous completed output.
 npm test
 ```
 
-The suite covers CSV behavior, domain resolution, sitemap variants, host
-restrictions, contact extraction, AI schema validation, scoring, store
-deduplication, failure isolation, and server job control.
+The suite covers category safety and aliases, strict AI request shape, fallback and
+repair behavior, candidate validation, probe scoring and caching, diversity
+selection, CSV behavior, domain resolution, sitemap variants, host restrictions,
+contact extraction, lead scoring, store deduplication, failure isolation, cached
+probe handoff, and server job control.
 
 Tests make no Google, Browserless, or OpenAI calls.

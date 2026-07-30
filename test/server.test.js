@@ -10,7 +10,8 @@ test("server exposes health, status, asynchronous run, and conflict control", as
   });
   const config = {
     googleApiKey: "test",
-    googleSearchEngineId: "test"
+    googleSearchEngineId: "test",
+    openaiApiKey: "test"
   };
   const server = createLeadServer(config, {
     pipeline: async (_config, status) => {
@@ -42,5 +43,6 @@ test("server exposes health, status, asynchronous run, and conflict control", as
   await new Promise((resolve) => setTimeout(resolve, 20));
   const finalStatus = await (await fetch(`${base}/status`)).json();
   assert.equal(finalStatus.state, "completed");
+  assert.equal(finalStatus.stage, "completed");
   assert.equal(finalStatus.queriesProcessed, 1);
 });

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { runPipeline } from "./pipeline.js";
 import { log } from "./logger.js";
+import { createInitialStatus } from "./status.js";
 
 function sendJson(response, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -14,26 +15,8 @@ function sendJson(response, statusCode, payload) {
   response.end(body);
 }
 
-function initialStatus() {
-  return {
-    state: "idle",
-    runId: "",
-    startedAt: "",
-    completedAt: "",
-    queriesTotal: 0,
-    queriesProcessed: 0,
-    blankQueriesSkipped: 0,
-    storesDiscovered: 0,
-    storesQualified: 0,
-    storesRejected: 0,
-    failures: 0,
-    outputRows: 0,
-    error: ""
-  };
-}
-
 export function createLeadServer(config, { pipeline = runPipeline } = {}) {
-  let status = initialStatus();
+  let status = createInitialStatus();
 
   return http.createServer((request, response) => {
     const requestUrl = new URL(request.url || "/", "http://localhost");
@@ -57,8 +40,9 @@ export function createLeadServer(config, { pipeline = runPipeline } = {}) {
       }
 
       status = {
-        ...initialStatus(),
+        ...createInitialStatus(),
         state: "running",
+        stage: "reading_categories",
         runId: crypto.randomUUID(),
         startedAt: new Date().toISOString()
       };
@@ -69,6 +53,7 @@ export function createLeadServer(config, { pipeline = runPipeline } = {}) {
         try {
           await pipeline(config, status);
           status.state = "completed";
+          status.stage = "completed";
           log("run_completed", {
             runId: status.runId,
             outputRows: status.outputRows,
@@ -78,6 +63,7 @@ export function createLeadServer(config, { pipeline = runPipeline } = {}) {
           });
         } catch (error) {
           status.state = "failed";
+          status.stage = "failed";
           status.error = error instanceof Error ? error.message : String(error);
           log("run_failed", { runId: status.runId, error });
         } finally {

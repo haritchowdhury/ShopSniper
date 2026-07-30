@@ -36,7 +36,7 @@ export async function normalizeWithAi(
   config,
   { request = requestText } = {}
 ) {
-  if (!config.openaiApiKey) return null;
+  if (!config.openaiApiKey || !config.enableAiNormalization) return null;
 
   const schema = {
     type: "object",

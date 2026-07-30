@@ -18,7 +18,7 @@ export function rejectionReasonForSearchUrl(value) {
   return "";
 }
 
-export async function searchGoogle(query, config, { request = requestText } = {}) {
+export async function searchGooglePage(query, config, { request = requestText } = {}) {
   const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
   url.searchParams.set("key", config.googleApiKey);
   url.searchParams.set("cx", config.googleSearchEngineId);
@@ -40,7 +40,7 @@ export async function searchGoogle(query, config, { request = requestText } = {}
     throw new Error(`Google Custom Search error: ${payload.error.message || "unknown error"}`);
   }
 
-  return (payload.items || []).map((item, index) => ({
+  const results = (payload.items || []).map((item, index) => ({
     query,
     rank: index + 1,
     url: item.link || "",
@@ -48,4 +48,18 @@ export async function searchGoogle(query, config, { request = requestText } = {}
     snippet: item.snippet || "",
     rejectionReason: rejectionReasonForSearchUrl(item.link || "")
   }));
+
+  return {
+    results,
+    estimatedTotalResults: Number.parseInt(
+      payload.searchInformation?.totalResults || "0",
+      10
+    ) || 0,
+    nextPageAvailable: Boolean(payload.queries?.nextPage?.length)
+  };
+}
+
+export async function searchGoogle(query, config, dependencies = {}) {
+  const page = await searchGooglePage(query, config, dependencies);
+  return page.results;
 }

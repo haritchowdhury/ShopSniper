@@ -1,5 +1,5 @@
-import { readQueries } from "./csv.js";
 import { searchGoogle } from "./search.js";
+import { planGeneratedQueries } from "./query-planner.js";
 import { resolveStoreIdentity } from "./domain-resolver.js";
 import { validateStorefront } from "./storefront-validator.js";
 import { discoverStorePages } from "./sitemap.js";
@@ -20,6 +20,10 @@ function messageOf(error) {
 
 function blankRecord(overrides = {}) {
   return {
+    shop_type: "",
+    generated_query: "",
+    query_score: "",
+    query_generation_reason: "",
     search_query: "",
     google_rank: "",
     google_result_url: "",
@@ -47,6 +51,10 @@ function blankRecord(overrides = {}) {
 
 function recordFromCandidate(candidate, overrides = {}) {
   return blankRecord({
+    shop_type: candidate.shopType || "",
+    generated_query: candidate.query || "",
+    query_score: candidate.queryScore ?? "",
+    query_generation_reason: candidate.queryGenerationReason || "",
     search_query: candidate.query,
     google_rank: candidate.rank,
     google_result_url: candidate.url,
@@ -183,7 +191,7 @@ async function processStore(candidate, config, dependencies) {
 }
 
 const DEFAULT_DEPENDENCIES = {
-  readQueries,
+  planQueries: planGeneratedQueries,
   search: searchGoogle,
   resolve: resolveStoreIdentity,
   validate: validateStorefront,
@@ -197,23 +205,52 @@ const DEFAULT_DEPENDENCIES = {
 
 export async function runPipeline(config, status, dependencyOverrides = {}) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  const { queries, blanksSkipped } = await dependencies.readQueries(
-    config.inputCsv,
-    config.maxQueries
-  );
-  status.queriesTotal = queries.length;
-  status.blankQueriesSkipped = blanksSkipped;
+  let queryPlans;
+  if (dependencyOverrides.readQueries) {
+    const { queries, blanksSkipped } = await dependencyOverrides.readQueries(
+      config.inputCsv,
+      config.maxQueries
+    );
+    queryPlans = queries.map((query) => ({
+      shopType: "",
+      query,
+      queryScore: "",
+      queryGenerationReason: "",
+      results: null
+    }));
+    status.queriesTotal = queries.length;
+    status.blankQueriesSkipped = blanksSkipped;
+  } else {
+    const planning = await dependencies.planQueries(
+      config,
+      status,
+      dependencyOverrides
+    );
+    queryPlans = planning.selected;
+  }
 
   const records = [];
   const resolvedStores = new Map();
+  status.stage = "discovering_stores";
 
-  for (const query of queries) {
+  for (const queryPlan of queryPlans) {
+    const query = queryPlan.query;
     let results;
     try {
-      results = await dependencies.search(query, config);
+      results = queryPlan.results || await dependencies.search(query, config);
+      results = results.map((result) => ({
+        ...result,
+        shopType: queryPlan.shopType,
+        queryScore: queryPlan.queryScore,
+        queryGenerationReason: queryPlan.queryGenerationReason
+      }));
     } catch (error) {
       records.push(
         blankRecord({
+          shop_type: queryPlan.shopType,
+          generated_query: query,
+          query_score: queryPlan.queryScore,
+          query_generation_reason: queryPlan.queryGenerationReason,
           search_query: query,
           status: "failed",
           rejection_reason: "search_failed",
@@ -229,6 +266,10 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
     if (!results.length) {
       records.push(
         blankRecord({
+          shop_type: queryPlan.shopType,
+          generated_query: query,
+          query_score: queryPlan.queryScore,
+          query_generation_reason: queryPlan.queryGenerationReason,
           search_query: query,
           status: "rejected",
           rejection_reason: "no_search_results"
@@ -271,6 +312,7 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
     status.queriesProcessed += 1;
   }
 
+  status.stage = "extracting_leads";
   const storeRecords = await mapWithConcurrency(
     [...resolvedStores.values()],
     config.storeConcurrency,
@@ -292,7 +334,9 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
   );
 
   records.push(...storeRecords);
+  status.stage = "writing_output";
   await dependencies.writeOutput(config.outputCsv, records);
   status.outputRows = records.length;
+  status.stage = "completed";
   return records;
 }
