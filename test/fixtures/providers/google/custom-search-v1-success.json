@@ -1,0 +1,13 @@
+{
+  "kind": "customsearch#search",
+  "items": [
+    {
+      "title": "Fixture Eyewear",
+      "link": "https://fixture-eyewear.myshopify.com/products/aviator-frame",
+      "snippet": "Fixture catalog entry",
+      "displayLink": "fixture-eyewear.myshopify.com"
+    }
+  ],
+  "searchInformation": { "totalResults": "12", "searchTime": 0.1 },
+  "queries": { "nextPage": [{ "startIndex": 11, "count": 10 }] }
+}

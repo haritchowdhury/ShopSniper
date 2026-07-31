@@ -276,7 +276,16 @@ test("documented API creates, polls, and returns durable-shaped results", async 
 
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(categories, [
-    { originalShopType: "Clothing brands", shopType: "clothing" }
+    {
+      originalShopType: "Clothing brands",
+      shopType: "clothing",
+      businessQualifier: "brand"
+    },
+    {
+      originalShopType: "clothes",
+      shopType: "clothing",
+      businessQualifier: "unspecified"
+    }
   ]);
 
   const running = await (

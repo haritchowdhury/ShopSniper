@@ -17,7 +17,8 @@ export const QUERY_AUDIT_HEADERS = [
   "query_generation_reason",
   "source_urls",
   "status",
-  "rejection_reason"
+  "rejection_reason",
+  "business_qualifier"
 ];
 
 export async function writeQueryAudit(filePath, records) {

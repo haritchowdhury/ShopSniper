@@ -1,4 +1,5 @@
 import { requestText } from "./http-client.js";
+import { fetchPage } from "./page-fetcher.js";
 import { extractCanonical } from "./html.js";
 import {
   isMyShopifyHostname,
@@ -17,21 +18,21 @@ function hostnameOf(value) {
 export async function resolveStoreIdentity(
   result,
   config,
-  { request = requestText } = {}
+  { request = requestText, fetch = fetchPage } = {}
 ) {
   const original = parseHttpUrl(result.url);
   let response;
   try {
-    response = await request(original, {
-      timeoutMs: config.requestTimeoutMs,
-      retries: 1
+    response = await fetch(original.href, config, {
+      request,
+      purpose: "storefront"
     });
   } catch (error) {
     const homepage = new URL("/", original);
     if (homepage.href === original.href) throw error;
-    response = await request(homepage, {
-      timeoutMs: config.requestTimeoutMs,
-      retries: 1
+    response = await fetch(homepage.href, config, {
+      request,
+      purpose: "storefront"
     });
   }
 
@@ -73,6 +74,11 @@ export async function resolveStoreIdentity(
     stableIdentity,
     allowedHostnames,
     identityConfidence,
+    initialFetch: {
+      rendered: Boolean(response.rendered),
+      renderAttempted: Boolean(response.renderAttempted),
+      assessment: response.fetchAssessment || null
+    },
     identityEvidence: {
       stableHostname: stableIdentity,
       displayHostname: resolvedDomain,

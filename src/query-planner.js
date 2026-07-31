@@ -31,11 +31,12 @@ function blankAudit(shopType, overrides = {}) {
     source_urls: [],
     status: "",
     rejection_reason: "",
+    business_qualifier: "",
     ...overrides
   };
 }
 
-function rejectedCandidateAudit(shopType, rejected) {
+function rejectedCandidateAudit(shopType, rejected, businessQualifier) {
   const candidate = rejected.candidate || {};
   return blankAudit(shopType, {
     query: rejected.query || candidate.query || "",
@@ -43,12 +44,13 @@ function rejectedCandidateAudit(shopType, rejected) {
     seasonality: candidate.seasonality || "",
     query_generation_reason: candidate.query_generation_reason || "",
     source_urls: candidate.source_urls || [],
+    business_qualifier: businessQualifier,
     status: "rejected",
     rejection_reason: rejected.rejectionReason
   });
 }
 
-function probeAudit(shopType, probe, selectedScores) {
+function probeAudit(shopType, probe, selectedScores, businessQualifier) {
   const candidate = probe.candidate;
   const selectedScore = selectedScores.get(candidate.query);
   return blankAudit(shopType, {
@@ -64,6 +66,7 @@ function probeAudit(shopType, probe, selectedScores) {
     seasonality: candidate.seasonality,
     query_generation_reason: candidate.query_generation_reason,
     source_urls: candidate.source_urls,
+    business_qualifier: businessQualifier,
     status: selectedScore == null ? "rejected" : "selected",
     rejection_reason:
       selectedScore == null ? probe.rejectionReason || "not_selected" : ""
@@ -82,6 +85,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
       selected: [],
       audits: [
         blankAudit(category.shopType, {
+          business_qualifier: category.businessQualifier || "unspecified",
           status: "failed",
           rejection_reason: "candidate_generation_failed",
           query_generation_reason: messageOf(error)
@@ -113,7 +117,11 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
   });
   status.queryCandidatesValidated += validated.accepted.length;
   const rejectedAudits = validated.rejected.map((rejected) =>
-    rejectedCandidateAudit(category.shopType, rejected)
+    rejectedCandidateAudit(
+      category.shopType,
+      rejected,
+      category.businessQualifier || "unspecified"
+    )
   );
 
   status.stage = "probing_queries";
@@ -185,7 +193,11 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     status.queryCandidatesValidated += validated.accepted.length;
     rejectedAudits.push(
       ...validated.rejected.map((rejected) =>
-        rejectedCandidateAudit(category.shopType, rejected)
+        rejectedCandidateAudit(
+          category.shopType,
+          rejected,
+          category.businessQualifier || "unspecified"
+        )
       )
     );
     status.stage = "probing_queries";
@@ -208,6 +220,8 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
   const selected = ranked.selected.map((probe) => ({
     originalShopType: category.originalShopType,
     shopType: category.shopType,
+    businessQualifier: category.businessQualifier || "unspecified",
+    categoryVocabulary,
     query: probe.candidate.query,
     queryScore: probe.queryScore,
     queryGenerationReason: probe.candidate.query_generation_reason,
@@ -221,7 +235,12 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     audits: [
       ...rejectedAudits,
       ...allProbes.map((probe) =>
-        probeAudit(category.shopType, probe, selectedScores)
+        probeAudit(
+          category.shopType,
+          probe,
+          selectedScores,
+          category.businessQualifier || "unspecified"
+        )
       )
     ]
   };
@@ -259,9 +278,12 @@ export async function planGeneratedQueries(
   status.invalidShopTypes = input.invalid.length;
   const selected = [];
   const cache = new QueryProbeCache();
-  const seenQueries = new Set();
 
   for (const category of input.categories) {
+    // Query uniqueness is category-intent scoped. The shared probe cache still
+    // prevents a repeated Google call when brand/retailer/unspecified variants
+    // generate the same product query.
+    const seenQueries = new Set();
     const result = await planCategory(
       category,
       config,

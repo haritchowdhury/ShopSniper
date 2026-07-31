@@ -30,3 +30,20 @@ The inner lead object requires exactly `store_url`, `store_name`, `email`,
 `phone`, `contact_url`, `social_profiles`, and `additional_information`.
 Unknown inner fields are rejected because the request schema sets
 `additionalProperties=false`.
+
+## Query-planning Responses contract
+
+Contract: `openai-responses-query-planning-v1`
+
+Endpoint: `POST /v1/responses`, non-streaming Responses API with
+`text.format.type=json_schema` and `strict=true`.
+
+The adapter requires a completed `status`, exactly one message item, exactly one
+non-empty `output_text` content item, and strict JSON parsing of the generated
+research/query object. Refusal content and incomplete responses are explicit
+typed failures. When web search is enabled, consumed source URLs come only from
+`output[type=web_search_call].action.sources[].url`.
+
+Additive outer provider metadata and unconsumed output item types are ignored.
+Missing or malformed consumed fields fail safely. The fixtures are fictional and
+contain no provider credentials, customer data, or collected lead values.

@@ -96,10 +96,15 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
       min: 1,
       max: 10
     }),
+    minQueryRelevantResults: integer("MIN_QUERY_RELEVANT_RESULTS", 2, {
+      min: 1,
+      max: 10
+    }),
     maxShopTypes: integer("MAX_SHOP_TYPES", 100, { max: 1000 }),
     googleResultsPerQuery: integer("GOOGLE_RESULTS_PER_QUERY", 10, { max: 10 }),
     maxQueries: integer("MAX_QUERIES", 500, { max: 10000 }),
     maxPagesPerStore: integer("MAX_PAGES_PER_STORE", 5, { max: 20 }),
+    pageFetchConcurrency: integer("PAGE_FETCH_CONCURRENCY", 2, { max: 10 }),
     storeConcurrency: integer("STORE_CONCURRENCY", 2, { max: 20 }),
     requestTimeoutMs: integer("REQUEST_TIMEOUT_MS", 20000, {
       min: 1000,

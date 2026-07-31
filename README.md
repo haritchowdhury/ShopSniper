@@ -196,6 +196,7 @@ GENERATED_QUERY_COUNT=10
 QUERY_CANDIDATE_COUNT=25
 QUERY_REPAIR_ROUNDS=2
 QUERY_PROBE_CONCURRENCY=3
+MIN_QUERY_RELEVANT_RESULTS=2
 MIN_QUERY_RESULTS=5
 MIN_QUERY_UNIQUE_HOSTS=4
 ENABLE_WEB_RESEARCH=true
@@ -205,9 +206,10 @@ RESEARCH_GEOGRAPHY=global English-language market
 
 One category normally uses one OpenAI research call and up to 25 Google probe
 requests. A weak set may add up to two OpenAI repair calls and more Google probes.
-Probe concurrency limits planning latency; `STORE_CONCURRENCY` controls the heavier
-storefront/contact stage. Google result-total estimates are recorded for audit only
-and do not drive selection.
+Probe concurrency limits planning latency; `STORE_CONCURRENCY` controls parallel
+stores and `PAGE_FETCH_CONCURRENCY` (default `2`) bounds evidence-page work within
+one store. Google result-total estimates and next-page availability are recorded
+for audit only and do not drive selection.
 
 ## Test
 

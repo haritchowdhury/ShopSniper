@@ -128,6 +128,8 @@ test("selected probe results enter the lead pipeline without another Google sear
         selected: [
           {
             shopType: "clothing",
+            businessQualifier: "brand",
+            categoryVocabulary: ["barrel jeans"],
             query: cachedResult.query,
             queryScore: 91,
             queryGenerationReason: "High store diversity",
@@ -184,8 +186,94 @@ test("selected probe results enter the lead pipeline without another Google sear
   const records = result.leads;
   assert.equal(searchCalls, 0);
   assert.equal(records[0].shop_type, "clothing");
+  assert.equal(records[0].business_qualifier, "brand");
   assert.equal(records[0].generated_query, cachedResult.query);
   assert.equal(records[0].query_score, 91);
+});
+
+test("per-store page fetching is bounded and preserves ranked discovery order", async () => {
+  let active = 0;
+  let maximumActive = 0;
+  let consolidatedUrls;
+  const urls = [
+    "https://bounded.example/",
+    "https://bounded.example/pages/contact-us",
+    "https://bounded.example/pages/about-us",
+    "https://bounded.example/collections/eyewear"
+  ];
+  const result = await runPipeline({
+    storeConcurrency: 1,
+    pageFetchConcurrency: 2,
+    qualificationThreshold: 0
+  }, status(), {
+    readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
+    search: async (query) => [{
+      query,
+      rank: 1,
+      url: "https://bounded.myshopify.com/products/frame",
+      title: "Frame",
+      snippet: ""
+    }],
+    resolve: async (entry) => ({
+      ...entry,
+      shopType: "eyewear",
+      businessQualifier: "unspecified",
+      html: "<html><body>Shopify eyewear product</body></html>",
+      finalUrl: "https://bounded.example/products/frame",
+      myshopifyDomain: "bounded.myshopify.com",
+      resolvedDomain: "bounded.example",
+      allowedHostnames: ["bounded.example", "bounded.myshopify.com"],
+      identityConfidence: 100
+    }),
+    validate: () => ({
+      valid: true,
+      rejectionReason: "",
+      shopifyConfidence: 100,
+      relevanceScore: 100,
+      evidence: {}
+    }),
+    discoverPages: async () => urls,
+    fetchPage: async (url) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, url.includes("contact") ? 15 : 2));
+      active -= 1;
+      if (url.includes("about")) throw new Error("fixture partial failure");
+      return {
+        body: `<html><body>${url} ${"Shopify eyewear ".repeat(10)}</body></html>`,
+        finalUrl: url,
+        contentType: "text/html"
+      };
+    },
+    extractEvidence: ({ url }) => ({
+      url,
+      emails: url.includes("contact") ? ["team@bounded.invalid"] : [],
+      phones: [],
+      contactUrl: url.includes("contact") ? url : "",
+      socialProfiles: [],
+      textSnippet: ""
+    }),
+    consolidate: (pages) => {
+      consolidatedUrls = pages.map(({ url }) => url);
+      return {
+        storeName: "Bounded",
+        email: "team@bounded.invalid",
+        allEmails: ["team@bounded.invalid"],
+        emailSourceUrl: urls[1],
+        phone: "",
+        allPhones: [],
+        phoneSourceUrl: "",
+        contactUrl: urls[1],
+        socialProfiles: [],
+        snippets: []
+      };
+    },
+    normalizeAi: async () => null
+  });
+  assert.equal(maximumActive, 2);
+  assert.deepEqual(consolidatedUrls, [urls[0], urls[1], urls[3]]);
+  assert.equal(result.leads[0].status, "qualified");
+  assert.match(result.leads[0].additional_information, /page_errors=\/pages\/about-us/);
 });
 
 test("manual categories reach the planner without CSV reads or writes", async () => {

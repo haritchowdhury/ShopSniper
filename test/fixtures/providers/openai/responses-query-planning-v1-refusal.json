@@ -1,0 +1,9 @@
+{
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "content": [{ "type": "refusal", "refusal": "Fixture refusal" }]
+    }
+  ]
+}

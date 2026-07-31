@@ -6,9 +6,14 @@ const CATEGORY_ALIASES = new Map([
   ["baby foods", "baby food"],
   ["utensils", "kitchen utensils"],
   ["kitchen utensil", "kitchen utensils"],
-  ["clothes", "clothing"],
-  ["clothing brand", "clothing"],
-  ["clothing brands", "clothing"]
+  ["clothes", "clothing"]
+]);
+
+const BUSINESS_QUALIFIERS = new Map([
+  ["brand", "brand"],
+  ["brands", "brand"],
+  ["retailer", "retailer"],
+  ["retailers", "retailer"]
 ]);
 
 const INSTRUCTION_LIKE =
@@ -34,14 +39,24 @@ export function normalizeShopType(value) {
     throw new Error("Shop type contains unsupported characters");
   }
 
-  const comparable = originalShopType
-    .toLocaleLowerCase("en-US")
-    .replace(/\s+brands?$/u, "")
-    .trim();
+  const normalized = originalShopType.toLocaleLowerCase("en-US");
+  const qualifierMatch = normalized.match(/\s+(brand|brands|retailer|retailers)$/u);
+  const businessQualifier = qualifierMatch
+    ? BUSINESS_QUALIFIERS.get(qualifierMatch[1])
+    : "unspecified";
+  const comparable = qualifierMatch
+    ? normalized.slice(0, qualifierMatch.index).trim()
+    : normalized;
+  if (!comparable) throw new Error("Shop type must include a product category");
   return {
     originalShopType,
-    shopType: CATEGORY_ALIASES.get(comparable) || comparable
+    shopType: CATEGORY_ALIASES.get(comparable) || comparable,
+    businessQualifier
   };
+}
+
+function categoryKey(category) {
+  return `${category.shopType}\u0000${category.businessQualifier}`;
 }
 
 export function normalizeShopTypes(values, maxShopTypes = 100) {
@@ -61,8 +76,9 @@ export function normalizeShopTypes(values, maxShopTypes = 100) {
   for (const [index, value] of values.entries()) {
     try {
       const category = normalizeShopType(value);
-      if (seen.has(category.shopType)) continue;
-      seen.add(category.shopType);
+      const key = categoryKey(category);
+      if (seen.has(key)) continue;
+      seen.add(key);
       categories.push(category);
     } catch (error) {
       invalid.push({
@@ -105,8 +121,9 @@ export async function readCategories(filePath, maxShopTypes = 100) {
     }
     try {
       const category = normalizeShopType(rawValue);
-      if (seen.has(category.shopType)) continue;
-      seen.add(category.shopType);
+      const key = categoryKey(category);
+      if (seen.has(key)) continue;
+      seen.add(key);
       categories.push(category);
     } catch (error) {
       invalid.push({

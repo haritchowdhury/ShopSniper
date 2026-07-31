@@ -1,8 +1,37 @@
+import { z } from "zod";
 import { requestText } from "./http-client.js";
+
+export const GOOGLE_SEARCH_CONTRACT_VERSION = "google-custom-search-v1";
 
 const ASSET_EXTENSIONS =
   /\.(?:pdf|jpe?g|png|gif|webp|svg|ico|css|js|map|xml|json|txt|zip|gz|mp4|webm|woff2?|ttf|eot)(?:$|[?#])/i;
 const ASSET_HOSTS = /(?:^|\.)cdn\.shopify\.com$|(?:^|\.)shopifycdn\.net$/i;
+
+const googleSearchSchema = z.object({
+  kind: z.literal("customsearch#search"),
+  items: z.array(z.object({
+    title: z.string(),
+    link: z.string(),
+    snippet: z.string()
+  }).passthrough()).optional(),
+  searchInformation: z.object({ totalResults: z.string().regex(/^\d+$/) }).passthrough(),
+  queries: z.object({
+    nextPage: z.array(z.object({ startIndex: z.number().int().positive() }).passthrough()).optional()
+  }).passthrough().optional()
+}).passthrough();
+
+export class GoogleSearchContractError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "GoogleSearchContractError";
+    this.code = code;
+    this.contractVersion = GOOGLE_SEARCH_CONTRACT_VERSION;
+  }
+}
+
+function contractError(code, message) {
+  return new GoogleSearchContractError(code, message);
+}
 
 export function rejectionReasonForSearchUrl(value) {
   let url;
@@ -18,6 +47,38 @@ export function rejectionReasonForSearchUrl(value) {
   return "";
 }
 
+export function parseGoogleSearchResponse(body, query) {
+  let payload;
+  try {
+    payload = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    throw contractError("invalid_json", "Google Custom Search payload was not valid JSON");
+  }
+  if (payload?.error) {
+    throw contractError("provider_error", "Google Custom Search returned a provider error");
+  }
+  const parsed = googleSearchSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw contractError(
+      "response_shape_mismatch",
+      "Google Custom Search payload did not match the v1 contract"
+    );
+  }
+  const results = (parsed.data.items || []).map((item, index) => ({
+    query,
+    rank: index + 1,
+    url: item.link,
+    title: item.title,
+    snippet: item.snippet,
+    rejectionReason: rejectionReasonForSearchUrl(item.link)
+  }));
+  return {
+    results,
+    estimatedTotalResults: Number.parseInt(parsed.data.searchInformation.totalResults, 10),
+    nextPageAvailable: Boolean(parsed.data.queries?.nextPage?.length)
+  };
+}
+
 export async function searchGooglePage(query, config, { request = requestText } = {}) {
   const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
   url.searchParams.set("key", config.googleApiKey);
@@ -30,36 +91,9 @@ export async function searchGooglePage(query, config, { request = requestText } 
     retries: 1,
     maxBytes: 1_000_000
   });
-  let payload;
-  try {
-    payload = JSON.parse(response.body);
-  } catch {
-    throw new Error("Google Custom Search returned invalid JSON");
-  }
-  if (payload.error) {
-    throw new Error(`Google Custom Search error: ${payload.error.message || "unknown error"}`);
-  }
-
-  const results = (payload.items || []).map((item, index) => ({
-    query,
-    rank: index + 1,
-    url: item.link || "",
-    title: item.title || "",
-    snippet: item.snippet || "",
-    rejectionReason: rejectionReasonForSearchUrl(item.link || "")
-  }));
-
-  return {
-    results,
-    estimatedTotalResults: Number.parseInt(
-      payload.searchInformation?.totalResults || "0",
-      10
-    ) || 0,
-    nextPageAvailable: Boolean(payload.queries?.nextPage?.length)
-  };
+  return parseGoogleSearchResponse(response.body, query);
 }
 
 export async function searchGoogle(query, config, dependencies = {}) {
-  const page = await searchGooglePage(query, config, dependencies);
-  return page.results;
+  return (await searchGooglePage(query, config, dependencies)).results;
 }

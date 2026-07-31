@@ -51,6 +51,7 @@ function blankRecord(overrides = {}) {
 function recordFromCandidate(candidate, overrides = {}) {
   return blankRecord({
     shop_type: candidate.shopType || "",
+    business_qualifier: candidate.businessQualifier || "unspecified",
     generated_query: candidate.query || "",
     query_score: candidate.queryScore ?? "",
     query_generation_reason: candidate.queryGenerationReason || "",
@@ -82,7 +83,7 @@ async function mapWithConcurrency(items, limit, mapper) {
 }
 
 async function processStore(candidate, config, dependencies) {
-  const validation = dependencies.validate(candidate, config);
+  let validation = dependencies.validate(candidate, config, { final: false });
   if (!validation.valid) {
     return recordFromCandidate(candidate, {
       shopify_confidence: validation.shopifyConfidence,
@@ -106,25 +107,69 @@ async function processStore(candidate, config, dependencies) {
   }
 
   const pages = [];
+  const evidencePages = [];
   const pageErrors = [];
-  for (const pageUrl of pageUrls) {
+  const fetched = await mapWithConcurrency(
+    pageUrls,
+    config.pageFetchConcurrency || 2,
+    async (pageUrl) => {
     try {
       let html;
       let evidenceUrl = pageUrl;
+      let fetchAssessment = null;
+      let rendered = false;
       if (pageUrl === candidate.finalUrl || pageUrl === candidate.url) {
         html = candidate.html;
+        fetchAssessment = candidate.initialFetch?.assessment || null;
+        rendered = Boolean(candidate.initialFetch?.rendered);
       } else {
-        const response = await dependencies.fetchPage(pageUrl, config);
+        const purpose = new URL(pageUrl).pathname === "/" ? "storefront" : "evidence";
+        const response = await dependencies.fetchPage(pageUrl, config, { purpose });
         if (!sameAllowedHostname(response.finalUrl, candidate.allowedHostnames)) {
           throw new Error("Page redirected outside the verified store hostnames");
         }
         html = response.body;
         evidenceUrl = response.finalUrl;
+        fetchAssessment = response.fetchAssessment || null;
+        rendered = Boolean(response.rendered);
       }
-      pages.push(dependencies.extractEvidence({ html, url: evidenceUrl }));
+      return {
+        page: dependencies.extractEvidence({ html, url: evidenceUrl }),
+        document: { url: evidenceUrl, html, assessment: fetchAssessment, rendered },
+        error: ""
+      };
     } catch (error) {
-      pageErrors.push(`${new URL(pageUrl).pathname}: ${messageOf(error)}`);
+      return {
+        page: null,
+        document: null,
+        error: `${new URL(pageUrl).pathname}: ${messageOf(error)}`
+      };
     }
+  });
+  for (const result of fetched) {
+    if (result.page) pages.push(result.page);
+    if (result.document) evidencePages.push(result.document);
+    if (result.error) pageErrors.push(result.error);
+  }
+
+  validation = dependencies.validate(
+    { ...candidate, evidencePages },
+    config,
+    { final: true }
+  );
+  if (!validation.valid) {
+    return recordFromCandidate(candidate, {
+      shopify_confidence: validation.shopifyConfidence,
+      relevance_score: validation.relevanceScore,
+      lead_score: scoreLead({
+        relevanceScore: validation.relevanceScore,
+        shopifyConfidence: validation.shopifyConfidence,
+        identityConfidence: candidate.identityConfidence
+      }),
+      status: "rejected",
+      rejection_reason: validation.rejectionReason,
+      additional_information: JSON.stringify(validation.evidence)
+    });
   }
 
   const evidence = dependencies.consolidate(pages);
@@ -211,6 +256,8 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
     );
     queryPlans = queries.map((query) => ({
       shopType: "",
+      businessQualifier: "unspecified",
+      categoryVocabulary: [],
       query,
       queryScore: "",
       queryGenerationReason: "",
@@ -239,6 +286,8 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       results = results.map((result) => ({
         ...result,
         shopType: queryPlan.shopType,
+        businessQualifier: queryPlan.businessQualifier || "unspecified",
+        categoryVocabulary: queryPlan.categoryVocabulary || [],
         queryScore: queryPlan.queryScore,
         queryGenerationReason: queryPlan.queryGenerationReason
       }));
