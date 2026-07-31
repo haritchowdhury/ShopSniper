@@ -10,12 +10,15 @@ Use Node.js 20 or newer. Configure the backend-only `.env`:
 
 ```env
 DATABASE_URL=postgresql://...-pooler.../neondb?sslmode=require
-DIRECT_URL=postgresql://......../neondb?sslmode=require
 GOOGLE_API_KEY=...
 GOOGLE_SEARCH_ENGINE_ID=...
 OPENAI_API_KEY=...
 BACKEND_API_TOKEN=choose-a-long-random-value
 ```
+
+The same `DATABASE_URL` is used for runtime and Prisma CLI commands. `DIRECT_URL`
+is optional because `prisma.config.ts` falls back to `DATABASE_URL`; add a direct
+Neon URL only if a future migration cannot run through the pooled connection.
 
 Apply reviewed migrations to a non-production Neon branch, generate Prisma
 Client, and start:

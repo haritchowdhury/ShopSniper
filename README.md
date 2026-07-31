@@ -29,11 +29,14 @@ At minimum, set:
 
 ```env
 DATABASE_URL=your_pooled_neon_runtime_url
-DIRECT_URL=your_direct_neon_migration_url
 GOOGLE_API_KEY=your_new_key
 GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
 OPENAI_API_KEY=your_openai_key
 ```
+
+`prisma.config.ts` uses `DATABASE_URL` for Prisma CLI commands as well as
+application runtime. A separate `DIRECT_URL` is optional and should be added only
+if a future migration requires a non-pooled connection.
 
 Apply the reviewed Prisma migration to a non-production branch before starting
 the API:

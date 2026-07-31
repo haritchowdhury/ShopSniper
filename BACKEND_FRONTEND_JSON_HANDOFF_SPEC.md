@@ -754,17 +754,19 @@ The database connection belongs only to the scraper backend:
 
 ```text
 DATABASE_URL=<pooled Neon runtime connection URL>
-DIRECT_URL=<direct Neon connection URL for Prisma CLI migrations>
+# Optional fallback for migrations only:
+DIRECT_URL=<direct Neon connection URL>
 ```
 
-- Never copy either database URL into the frontend repository or Vercel frontend
+- Never copy a database URL into the frontend repository or Vercel frontend
   environment variables.
-- `DATABASE_URL` is used by Prisma Client at runtime.
-- `DIRECT_URL` is used by `prisma.config.ts` for Prisma Migrate and other CLI
-  operations.
-- The existing local `DATABASE_URL` may be used for initial local development. A
-  pooled Neon URL and separate direct migration URL must be configured before a
-  serverless or concurrency-heavy deployment.
+- `DATABASE_URL` is used by Prisma Client at runtime and, by default, by Prisma
+  Migrate and other CLI operations.
+- `prisma.config.ts` uses `DIRECT_URL` when provided and otherwise falls back to
+  `DATABASE_URL`.
+- The confirmed first-version configuration uses only the pooled `DATABASE_URL`.
+  Add `DIRECT_URL` later only if a migration demonstrates that a non-pooled
+  connection is required.
 - Connection strings and Prisma errors must never be returned through the API.
 
 Use Prisma migrations for all schema changes. Do not use automatic destructive
