@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RunState {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+enum LeadStatus {
+  qualified
+  rejected
+  failed
+}
+
+model Run {
+  id                  String    @id
+  state               RunState
+  stage               String
+  normalizedShopTypes Json
+  createdAt           DateTime  @default(now())
+  startedAt           DateTime?
+  completedAt         DateTime?
+  progress            Json
+  resultsAvailable    Boolean   @default(false)
+  leadSummary         Json?
+  safeErrorCode       String?
+  safeErrorMessage    String?
+  leads               Lead[]
+
+  @@index([state])
+  @@index([createdAt])
+}
+
+model Lead {
+  id                       String     @id
+  runId                    String
+  run                      Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shopType                 String?
+  generatedQuery           String?
+  queryScore               Int?
+  queryGenerationReason    String?
+  searchQuery              String?
+  googleRank               Int?
+  googleResultUrl          String?
+  myshopifyDomain          String?
+  finalUrl                 String?
+  canonicalUrl             String?
+  resolvedDomain           String?
+  storeName                String?
+  email                    String?
+  emailSourceUrl           String?
+  phone                    String?
+  phoneSourceUrl           String?
+  contactUrl               String?
+  socialProfiles           String[]   @default([])
+  additionalInformation    String?
+  shopifyConfidence        Int?
+  relevanceScore           Int?
+  leadScore                Int?
+  status                   LeadStatus
+  rejectionReason          String?
+  error                    String?
+
+  @@index([runId, status])
+  @@index([runId, leadScore])
+  @@index([runId, storeName])
+  @@index([runId, shopType])
+  @@index([runId, googleRank])
+}

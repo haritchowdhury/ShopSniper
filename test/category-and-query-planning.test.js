@@ -312,6 +312,63 @@ test("planner writes accepted and rejected audit rows and retains selected probe
   assert.equal(status.stage, "selecting_queries");
 });
 
+test("manual-category planner keeps audits in memory and performs no CSV I/O", async () => {
+  const status = createInitialStatus();
+  const entry = candidate("barrel jeans");
+  let readCalled = false;
+  let writeCalled = false;
+  const planning = await planGeneratedQueries(
+    {
+      generatedQueryCount: 1,
+      queryRepairRounds: 0
+    },
+    status,
+    {
+      categories: [{ originalShopType: "Clothing", shopType: "clothing" }],
+      readCategories: async () => {
+        readCalled = true;
+        throw new Error("manual mode must not read CSV");
+      },
+      generateInitial: async () => ({
+        research: { source_urls: [] },
+        candidates: [entry],
+        mode: "ai",
+        error: ""
+      }),
+      probe: async () => [
+        {
+          candidate: entry,
+          results: [result("denim", entry.product_phrase)],
+          rawResults: 10,
+          uniqueHosts: [
+            "a.myshopify.com",
+            "b.myshopify.com",
+            "c.myshopify.com",
+            "d.myshopify.com"
+          ],
+          duplicateProducts: 0,
+          relevantResults: 10,
+          nextPageAvailable: true,
+          estimatedTotalResults: 100,
+          baseScore: 90,
+          rejectionReason: "",
+          error: ""
+        }
+      ],
+      writeAudit: async () => {
+        writeCalled = true;
+        throw new Error("manual mode must not write CSV");
+      }
+    }
+  );
+
+  assert.equal(readCalled, false);
+  assert.equal(writeCalled, false);
+  assert.equal(planning.selected.length, 1);
+  assert.equal(planning.audits.length, 1);
+  assert.equal(status.blankShopTypesSkipped, 0);
+});
+
 test("generated-query audit atomically escapes arrays, commas and quotes", async (context) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "query-audit-test-"));
   context.after(() => fs.rm(directory, { recursive: true, force: true }));

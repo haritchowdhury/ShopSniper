@@ -44,6 +44,44 @@ export function normalizeShopType(value) {
   };
 }
 
+export function normalizeShopTypes(values, maxShopTypes = 100) {
+  if (!Array.isArray(values)) {
+    throw new Error("shopTypes must be an array");
+  }
+  if (values.length < 1) {
+    throw new Error("shopTypes must contain at least one category");
+  }
+  if (values.length > maxShopTypes) {
+    throw new Error(`shopTypes must contain at most ${maxShopTypes} categories`);
+  }
+
+  const categories = [];
+  const seen = new Set();
+  const invalid = [];
+  for (const [index, value] of values.entries()) {
+    try {
+      const category = normalizeShopType(value);
+      if (seen.has(category.shopType)) continue;
+      seen.add(category.shopType);
+      categories.push(category);
+    } catch (error) {
+      invalid.push({
+        index,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  if (invalid.length) {
+    const error = new Error("One or more shop types are invalid");
+    error.validationDetails = invalid;
+    throw error;
+  }
+  if (!categories.length) {
+    throw new Error("shopTypes must contain at least one category");
+  }
+  return categories;
+}
+
 export async function readCategories(filePath, maxShopTypes = 100) {
   const rows = parseCsv(await fs.readFile(filePath, "utf8"));
   if (!rows.length) throw new Error("Input CSV is empty");

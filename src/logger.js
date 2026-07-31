@@ -1,7 +1,13 @@
 function sanitize(value) {
-  if (value instanceof Error) return { name: value.name, message: value.message };
+  if (value instanceof Error) {
+    return { name: value.name, message: sanitize(value.message) };
+  }
   if (typeof value === "string") {
     return value
+      .replace(
+        /\b(postgres(?:ql)?:\/\/)[^@\s]+@/giu,
+        "$1[credentials-redacted]@"
+      )
       .replace(/([?&](?:key|token|api_key)=)[^&\s]+/gi, "$1[redacted]")
       .replace(/(bearer\s+)[a-z0-9._-]+/gi, "$1[redacted]");
   }

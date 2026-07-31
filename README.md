@@ -1,19 +1,21 @@
 # Email Scraper
 
-A small, dependency-free Node.js Shopify email scraper and lead-generation server
-that replaces the two n8n workflows. It reads broad shop types from a one-column
-CSV, researches and generates product-oriented Shopify searches, probes and ranks
-those searches, discovers qualified stores, extracts evidence-backed contact
-details, and writes auditable CSV outputs.
+A Node.js Shopify lead-generation backend that replaces the two n8n workflows.
+The JSON API accepts manually entered shop types, researches and generates
+product-oriented Shopify searches, discovers qualified stores, extracts
+evidence-backed contacts, and durably stores run status and leads in Neon
+PostgreSQL through Prisma. A legacy foreground command still supports CSV input
+and output.
 
 ## Requirements
 
 - Node.js 20 or newer
+- A Neon PostgreSQL database
 - A Google Custom Search API key and Programmable Search Engine ID
 - An OpenAI API key for category research and candidate generation
 - Optional Browserless credentials for pages that require rendering
 
-No `npm install` is required because the application has no runtime dependencies.
+Install the pinned Prisma and Neon dependencies with `npm install`.
 
 ## Configure
 
@@ -26,9 +28,19 @@ cp .env.example .env
 At minimum, set:
 
 ```env
+DATABASE_URL=your_pooled_neon_runtime_url
+DIRECT_URL=your_direct_neon_migration_url
 GOOGLE_API_KEY=your_new_key
 GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
 OPENAI_API_KEY=your_openai_key
+```
+
+Apply the reviewed Prisma migration to a non-production branch before starting
+the API:
+
+```bash
+npm run db:migrate:deploy
+npm run db:generate
 ```
 
 The Google and Browserless values found in the old n8n exports must be treated as
@@ -66,22 +78,20 @@ The service binds to `127.0.0.1` by default. Set `HOST` deliberately if another
 machine must reach it; add authentication or keep it behind a private trusted
 network before exposing it.
 
-## Input
+## HTTP input
 
-Edit `data/categories.csv`. The required header is exactly `Shop Type`:
+The API accepts only manually entered categories in JSON:
 
-```csv
-Shop Type
-clothing
-baby food
-kitchen utensils
+```json
+{"shopTypes":["clothing","baby food","kitchen utensils"]}
 ```
 
-Blank values are skipped, aliases such as `babyfood` and `utensils` are normalized,
-and duplicate categories are collapsed. Malformed or instruction-like rows are
-rejected into the generated-query audit instead of being sent to the model.
+Aliases such as `babyfood` and `utensils` are normalized, duplicate normalized
+categories are collapsed, and blank, malformed, or instruction-like values are
+rejected atomically.
 
-Paths can be changed only through trusted server environment configuration:
+The foreground `npm run run:once` command retains the one-column CSV input and
+CSV outputs. Its paths can be changed only through trusted server environment:
 
 ```env
 INPUT_CSV=./data/categories.csv
@@ -108,16 +118,18 @@ npm run run:once
 In another terminal:
 
 ```bash
-curl http://127.0.0.1:3000/health
-curl -X POST http://127.0.0.1:3000/run
-curl http://127.0.0.1:3000/status
+curl http://127.0.0.1:3000/api/health
+curl -X POST http://127.0.0.1:3000/api/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"shopTypes":["clothing","eyewear"]}'
+curl http://127.0.0.1:3000/api/runs/{runId}
+curl 'http://127.0.0.1:3000/api/runs/{runId}/results?page=1&pageSize=100'
 ```
 
-`POST /run` returns `202 Accepted` and processes the batch asynchronously. Only one
-job can run at a time; another request returns `409 Conflict`. `GET /status` reports
-the current stage and planning counters. When `state` becomes `completed`, leads are
-available at `data/leads.csv` and query decisions at
-`data/generated-queries.csv`.
+`POST /api/runs` returns `202 Accepted` and a durable `runId` before the scraper
+work begins. Only one queued/running job is allowed across backend processes.
+Status and completed results are read by `runId`; completed result rows have no
+application expiry.
 
 If required Google or OpenAI configuration is missing, `POST /run` returns `503`
 and names the missing variables.
@@ -141,20 +153,18 @@ For each shop type, the application:
 Individual search results or stores may fail without ending the batch. Qualified,
 rejected, and failed outcomes remain visible in the output for auditing.
 
-## Output
+## Output and retention
 
-`data/generated-queries.csv` records every selected and rejected candidate with its
-score, result count, distinct host count, pagination signal, market signal, source
-URLs, status, and rejection reason.
+The HTTP path stores the complete result set transactionally in PostgreSQL and
+returns snake_case JSON fields matching the legacy lead CSV. Query-planning audits
+remain temporary and are not stored or exposed through the API.
 
-`data/leads.csv` retains the original discovery, domain identity, contact evidence,
-confidence, status, rejection, and error fields. It also records `shop_type`,
-`generated_query`, `query_score`, and `query_generation_reason` on every lead row.
-Social profiles are encoded as a JSON array within the CSV field.
+`npm run run:once` still writes `data/generated-queries.csv` and
+`data/leads.csv`. The frontend is responsible for building downloadable CSV from
+the paginated JSON results.
 
-The output is first written to a temporary file in the output directory and renamed
-only after the complete CSV is ready. An interrupted run therefore does not replace
-the previous completed output.
+See `FRONTEND_BACKEND_QUICKSTART.md` for proxy routes, TypeScript shapes,
+polling, filters, and fixture seeding.
 
 ## Query-planning controls
 
@@ -184,10 +194,13 @@ and do not drive selection.
 npm test
 ```
 
-The suite covers category safety and aliases, strict AI request shape, fallback and
+The suite covers API contract behavior, result serialization, category safety and
+aliases, strict AI request shape, fallback and
 repair behavior, candidate validation, probe scoring and caching, diversity
 selection, CSV behavior, domain resolution, sitemap variants, host restrictions,
 contact extraction, lead scoring, store deduplication, failure isolation, cached
 probe handoff, and server job control.
 
-Tests make no Google, Browserless, or OpenAI calls.
+Default tests make no Google, Browserless, OpenAI, or database calls. Database
+integration tests require both `ALLOW_DATABASE_TESTS=true` and a dedicated
+`TEST_DATABASE_URL`.

@@ -1,10 +1,5 @@
-export function createInitialStatus() {
+export function createInitialProgress() {
   return {
-    state: "idle",
-    stage: "idle",
-    runId: "",
-    startedAt: "",
-    completedAt: "",
     shopTypesTotal: 0,
     shopTypesProcessed: 0,
     blankShopTypesSkipped: 0,
@@ -16,12 +11,32 @@ export function createInitialStatus() {
     planningWarnings: 0,
     queriesTotal: 0,
     queriesProcessed: 0,
-    blankQueriesSkipped: 0,
     storesDiscovered: 0,
     storesQualified: 0,
     storesRejected: 0,
     failures: 0,
-    outputRows: 0,
+    outputRows: 0
+  };
+}
+
+export function createInitialStatus() {
+  return {
+    state: "idle",
+    stage: "idle",
+    runId: "",
+    startedAt: "",
+    completedAt: "",
+    ...createInitialProgress(),
+    blankQueriesSkipped: 0,
     error: ""
   };
+}
+
+export function progressFromStatus(status) {
+  const progress = createInitialProgress();
+  for (const key of Object.keys(progress)) {
+    const value = Number(status?.[key]);
+    progress[key] = Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+  return progress;
 }

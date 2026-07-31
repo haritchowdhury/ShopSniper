@@ -1,28 +1,43 @@
+import { fileURLToPath } from "node:url";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
+import { writeOutput } from "./output.js";
 import { runPipeline } from "./pipeline.js";
 import { createInitialStatus } from "./status.js";
 
-const config = loadConfig();
-assertRunConfig(config);
+export async function runOnce(
+  config,
+  { pipeline = runPipeline, outputWriter = writeOutput, logger = log } = {}
+) {
+  assertRunConfig(config);
+  const status = {
+    ...createInitialStatus(),
+    state: "running",
+    stage: "reading_categories",
+    startedAt: new Date().toISOString()
+  };
 
-const status = {
-  ...createInitialStatus(),
-  state: "running",
-  stage: "reading_categories",
-  startedAt: new Date().toISOString(),
-};
+  try {
+    const result = await pipeline(config, status);
+    await outputWriter(config.outputCsv, result.leads);
+    status.state = "completed";
+    status.stage = "completed";
+    return status;
+  } catch (error) {
+    status.state = "failed";
+    status.stage = "failed";
+    status.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    status.completedAt = new Date().toISOString();
+    logger("run_once_finished", status);
+  }
+}
 
-try {
-  await runPipeline(config, status);
-  status.state = "completed";
-  status.stage = "completed";
-} catch (error) {
-  status.state = "failed";
-  status.stage = "failed";
-  status.error = error instanceof Error ? error.message : String(error);
-  process.exitCode = 1;
-} finally {
-  status.completedAt = new Date().toISOString();
-  log("run_once_finished", status);
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  try {
+    await runOnce(loadConfig());
+  } catch {
+    process.exitCode = 1;
+  }
 }

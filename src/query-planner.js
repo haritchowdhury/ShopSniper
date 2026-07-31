@@ -243,10 +243,10 @@ export async function planGeneratedQueries(
 ) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
   status.stage = "reading_categories";
-  const input = await dependencies.readCategories(
-    config.inputCsv,
-    config.maxShopTypes
-  );
+  const manualCategories = dependencyOverrides.categories;
+  const input = manualCategories
+    ? { categories: manualCategories, invalid: [], blanksSkipped: 0 }
+    : await dependencies.readCategories(config.inputCsv, config.maxShopTypes);
   status.shopTypesTotal = input.categories.length;
   status.blankShopTypesSkipped = input.blanksSkipped;
 
@@ -275,7 +275,9 @@ export async function planGeneratedQueries(
     status.shopTypesProcessed += 1;
   }
 
-  await dependencies.writeAudit(config.generatedQueriesCsv, audits);
+  if (!manualCategories && dependencyOverrides.writeAudit !== false) {
+    await dependencies.writeAudit(config.generatedQueriesCsv, audits);
+  }
   status.queriesTotal = selected.length;
   return {
     selected,

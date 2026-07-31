@@ -16,7 +16,6 @@ function status() {
 }
 
 test("pipeline deduplicates results and emits one evidence-backed store row", async () => {
-  let written;
   const config = {
     inputCsv: "/unused/input.csv",
     outputCsv: "/unused/output.csv",
@@ -26,7 +25,7 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
     qualificationThreshold: 45
   };
   const currentStatus = status();
-  const records = await runPipeline(config, currentStatus, {
+  const result = await runPipeline(config, currentStatus, {
     readQueries: async () => ({ queries: ["organic spices"], blanksSkipped: 1 }),
     search: async (query) => [
       { query, rank: 1, url: "https://one.myshopify.com/products/a", title: "A", snippet: "" },
@@ -55,14 +54,17 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
       finalUrl: "https://example.com/pages/contact",
       contentType: "text/html"
     }),
-    normalizeAi: async () => null,
-    writeOutput: async (_path, rows) => {
-      written = rows;
-    }
+    normalizeAi: async () => null
   });
 
+  const records = result.leads;
   assert.equal(records.length, 1);
-  assert.equal(written.length, 1);
+  assert.deepEqual(result.summary, {
+    total: 1,
+    qualified: 1,
+    rejected: 0,
+    failed: 0
+  });
   assert.equal(records[0].email, "hello@example.com");
   assert.equal(records[0].status, "qualified");
   assert.match(records[0].additional_information, /duplicate_results=1/);
@@ -75,7 +77,7 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
 test("one failed query does not stop later queries", async () => {
   let calls = 0;
   const currentStatus = status();
-  const records = await runPipeline(
+  const result = await runPipeline(
     {
       inputCsv: "unused",
       outputCsv: "unused",
@@ -90,10 +92,10 @@ test("one failed query does not stop later queries", async () => {
         calls += 1;
         if (query === "bad") throw new Error("quota");
         return [];
-      },
-      writeOutput: async () => {}
+      }
     }
   );
+  const records = result.leads;
   assert.equal(calls, 2);
   assert.equal(records[0].status, "failed");
   assert.equal(records[0].rejection_reason, "search_failed");
@@ -113,7 +115,7 @@ test("selected probe results enter the lead pipeline without another Google sear
     snippet: "",
     rejectionReason: ""
   };
-  const records = await runPipeline(
+  const result = await runPipeline(
     {
       outputCsv: "/unused/output.csv",
       storeConcurrency: 1,
@@ -176,12 +178,48 @@ test("selected probe results enter the lead pipeline without another Google sear
         emailSourceUrl: "https://denim.example/products/barrel-jeans",
         phoneSourceUrl: ""
       }),
-      normalizeAi: async () => null,
-      writeOutput: async () => {}
+      normalizeAi: async () => null
     }
   );
+  const records = result.leads;
   assert.equal(searchCalls, 0);
   assert.equal(records[0].shop_type, "clothing");
   assert.equal(records[0].generated_query, cachedResult.query);
   assert.equal(records[0].query_score, 91);
+});
+
+test("manual categories reach the planner without CSV reads or writes", async () => {
+  const categories = [
+    { originalShopType: "Eyewear", shopType: "eyewear" }
+  ];
+  const currentStatus = status();
+  let receivedCategories;
+  const result = await runPipeline(
+    {
+      storeConcurrency: 1,
+      maxPagesPerStore: 1,
+      qualificationThreshold: 0
+    },
+    currentStatus,
+    {
+      categories,
+      planQueries: async (_config, _status, dependencies) => {
+        receivedCategories = dependencies.categories;
+        return { selected: [], audits: [] };
+      },
+      readCategories: async () => {
+        throw new Error("HTTP pipeline must not read CSV");
+      },
+      writeAudit: async () => {
+        throw new Error("HTTP pipeline must not write query audit CSV");
+      }
+    }
+  );
+
+  assert.deepEqual(receivedCategories, categories);
+  assert.deepEqual(result, {
+    leads: [],
+    summary: { total: 0, qualified: 0, rejected: 0, failed: 0 }
+  });
+  assert.equal(currentStatus.stage, "writing_results");
 });

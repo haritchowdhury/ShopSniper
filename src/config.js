@@ -48,6 +48,16 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
   const config = {
     port: integer("PORT", 3000, { max: 65535 }),
     host: process.env.HOST || "127.0.0.1",
+    databaseUrl: process.env.DATABASE_URL || "",
+    backendApiToken: process.env.BACKEND_API_TOKEN || "",
+    runRateLimitWindowMs: integer("RUN_RATE_LIMIT_WINDOW_MS", 60000, {
+      min: 1000,
+      max: 3600000
+    }),
+    runRateLimitMax: integer("RUN_RATE_LIMIT_MAX", 5, {
+      min: 1,
+      max: 1000
+    }),
     inputCsv: configuredPath(process.env.INPUT_CSV || "./data/categories.csv", cwd),
     outputCsv: configuredPath(process.env.OUTPUT_CSV || "./data/leads.csv", cwd),
     generatedQueriesCsv: configuredPath(

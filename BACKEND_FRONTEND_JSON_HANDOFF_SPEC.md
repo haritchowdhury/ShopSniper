@@ -4,23 +4,32 @@
 
 This document defines the exact backend contract required before building the
 frontend. The backend remains responsible for running the lead-generation job,
-validating and scoring results, and retaining results by run ID. The frontend is
-responsible for displaying the JSON results and generating downloadable CSV files.
+validating and scoring results, and retaining results by run ID in Neon
+PostgreSQL through Prisma ORM. The frontend is responsible for accepting manual
+category entries, displaying the JSON results, and generating downloadable CSV
+files.
 
-This specification supersedes the CSV-download portion of
-`AWS_ASYNC_DEPLOYMENT_DIRECTION.md`. The overall asynchronous job architecture in
-that document remains valid.
+This specification supersedes both the CSV-download and DynamoDB/S3 result-storage
+portions of `AWS_ASYNC_DEPLOYMENT_DIRECTION.md`. The overall asynchronous job
+architecture in that document remains valid.
 
 ## Product decision
 
 Use JSON as the source of truth between the backend and frontend.
 
 - The backend must not require the frontend to read a server-side CSV.
-- The backend must expose lead results and query-audit results as JSON.
+- The backend must expose lead results as JSON using the same logical field names
+  and order as the existing output CSV.
 - The frontend must generate CSV only when the user selects an export action.
+- Categories are entered manually in the frontend. CSV upload is not part of the
+  first frontend.
+- Query candidates and query-audit records are internal planning data. They may
+  remain in memory during a run and are discarded after the run completes.
 - A run must be addressable by an opaque `runId`.
 - Refreshing the browser must not start a new run.
 - Production results must survive an API process restart.
+- Completed runs and lead results have no application expiry and remain available
+  until they are explicitly deleted or the database itself is removed.
 - The API must never return API keys, filesystem paths, internal stack traces, or
   raw HTML collected from stores.
 
@@ -47,10 +56,10 @@ Next.js application on Vercel
   |
   | short HTTP requests through Next.js Route Handlers
   v
-Backend run API
+Backend run API and Prisma ORM
   |
   v
-Long-running scraper worker and durable result storage
+Long-running scraper worker and Neon PostgreSQL
 ```
 
 No Vercel request may remain open while the scraper runs. The start request must
@@ -110,7 +119,6 @@ app/api/health/route.ts
 app/api/runs/route.ts
 app/api/runs/[runId]/route.ts
 app/api/runs/[runId]/results/route.ts
-app/api/runs/[runId]/queries/route.ts
 ```
 
 Their responsibilities are:
@@ -121,7 +129,6 @@ Their responsibilities are:
 | `POST /api/runs` | `POST {BACKEND_API_BASE_URL}/api/runs` |
 | `GET /api/runs/{runId}` | `GET {BACKEND_API_BASE_URL}/api/runs/{runId}` |
 | `GET /api/runs/{runId}/results` | Same backend path and query string |
-| `GET /api/runs/{runId}/queries` | Same backend path and query string |
 
 Every handler must:
 
@@ -135,6 +142,10 @@ Every handler must:
 - Never include the backend token or backend response headers in an error message.
 - Validate `runId` as an opaque path value and URL-encode it before constructing
   the backend URL.
+
+For the first version, a valid run ID must match
+`^run_[A-Za-z0-9_-]{16,80}$`. The frontend must treat it as an opaque string and
+must never parse meaning from it.
 
 If `BACKEND_API_TOKEN` is configured, send it only on the server-to-server
 request:
@@ -155,7 +166,6 @@ not to the complete scraping run. Suggested limits:
 POST /api/runs                         15 seconds
 GET  /api/runs/{runId}                 10 seconds
 GET  /api/runs/{runId}/results         20 seconds
-GET  /api/runs/{runId}/queries         20 seconds
 ```
 
 If one of these calls times out, return:
@@ -300,6 +310,10 @@ Cache-Control: no-store
 }
 ```
 
+The backend health check must perform a lightweight Prisma database query. If
+PostgreSQL is unavailable, return `503 DATABASE_UNAVAILABLE` using the standard
+safe error shape. Do not include Prisma error text or connection details.
+
 ### 2. Start a run
 
 ```http
@@ -314,6 +328,10 @@ Request body:
   "shopTypes": ["clothing", "eyewear", "baby food"]
 }
 ```
+
+The frontend builds this array from manual category-entry controls. It must not
+upload or send an input CSV. `shopTypes` is the JSON equivalent of the existing
+one-column input CSV headed `Shop Type`.
 
 Validation requirements:
 
@@ -364,7 +382,9 @@ HTTP/1.1 409 Conflict
   "error": {
     "code": "RUN_ALREADY_ACTIVE",
     "message": "A lead-generation run is already active.",
-    "runId": "run_01J..."
+    "details": {
+      "runId": "run_01J..."
+    }
   }
 }
 ```
@@ -504,10 +524,14 @@ Query parameters:
 | `pageSize` | No | Integer from 1 to 200, default 100 |
 | `status` | No | `qualified`, `rejected`, or `failed` |
 | `search` | No | Case-insensitive match on store name, domain, email, or shop type |
-| `sortBy` | No | `leadScore`, `storeName`, `shopType`, or `googleRank` |
+| `sortBy` | No | `lead_score`, `store_name`, `shop_type`, or `google_rank` |
 | `sortDirection` | No | `asc` or `desc` |
 
 Do not accept arbitrary database column names for sorting.
+`search` must be trimmed, limited to 200 characters, and matched against
+`store_name`, `resolved_domain`, `myshopify_domain`, `email`, and `shop_type`.
+Reject malformed supported parameters and unknown parameters with
+`400 INVALID_QUERY_PARAMETERS`.
 
 Successful response:
 
@@ -529,32 +553,32 @@ Successful response:
   "items": [
     {
       "id": "lead_01J...",
-      "shopType": "eyewear",
-      "generatedQuery": "site:myshopify.com/products photochromic sunglasses",
-      "queryScore": 100,
-      "queryGenerationReason": "Combines a concrete product with an established adaptive-lens term.",
-      "searchQuery": "site:myshopify.com/products photochromic sunglasses",
-      "googleRank": 1,
-      "googleResultUrl": "https://example.myshopify.com/products/item",
-      "myshopifyDomain": "example.myshopify.com",
-      "finalUrl": "https://example.com/products/item",
-      "canonicalUrl": "https://example.com/products/item",
-      "resolvedDomain": "example.com",
-      "storeName": "Example Store",
+      "shop_type": "eyewear",
+      "generated_query": "site:myshopify.com/products photochromic sunglasses",
+      "query_score": 100,
+      "query_generation_reason": "Combines a concrete product with an established adaptive-lens term.",
+      "search_query": "site:myshopify.com/products photochromic sunglasses",
+      "google_rank": 1,
+      "google_result_url": "https://example.myshopify.com/products/item",
+      "myshopify_domain": "example.myshopify.com",
+      "final_url": "https://example.com/products/item",
+      "canonical_url": "https://example.com/products/item",
+      "resolved_domain": "example.com",
+      "store_name": "Example Store",
       "email": "hello@example.com",
-      "emailSourceUrl": "https://example.com/pages/contact",
+      "email_source_url": "https://example.com/pages/contact",
       "phone": null,
-      "phoneSourceUrl": null,
-      "contactUrl": "https://example.com/pages/contact",
-      "socialProfiles": [
+      "phone_source_url": null,
+      "contact_url": "https://example.com/pages/contact",
+      "social_profiles": [
         "https://www.instagram.com/example"
       ],
-      "additionalInformation": "pages_examined=5",
-      "shopifyConfidence": 100,
-      "relevanceScore": 80,
-      "leadScore": 94,
+      "additional_information": "pages_examined=5",
+      "shopify_confidence": 100,
+      "relevance_score": 80,
+      "lead_score": 94,
       "status": "qualified",
-      "rejectionReason": null,
+      "rejection_reason": null,
       "error": null
     }
   ]
@@ -564,61 +588,35 @@ Successful response:
 Results endpoint rules:
 
 - Return `409 RESULTS_NOT_READY` if the run is queued or running.
+- Return `409 RESULTS_UNAVAILABLE` if the run failed or was cancelled without a
+  successfully committed result set.
 - Return `404 RUN_NOT_FOUND` for an unknown run ID.
 - `items` must always be an array.
 - Each item must have a stable, opaque `id` suitable for a frontend table key.
 - Missing text values must be `null`, not empty strings.
 - Missing numeric values must be `null`, not empty strings.
 - Scores and ranks must be JSON numbers.
-- `socialProfiles` must always be a JSON array of strings.
+- `social_profiles` must always be a JSON array of strings.
 - `status` must be `qualified`, `rejected`, or `failed`.
 - All URLs must remain plain strings. The backend must not return HTML anchor tags.
-- The default result order should be `leadScore` descending, then `storeName`
-  ascending.
+- `id` is transport metadata for stable frontend table keys and is not included in
+  the generated CSV.
+- `summary` always describes the complete run. `pagination.totalItems` describes
+  the result set after applying the current filters.
+- The default result order must be `lead_score` descending, then `store_name`
+  ascending, then `id` ascending. Null scores sort last in both directions.
 
-### 5. Read query-audit results
+### Internal query-planning data
 
-```http
-GET /api/runs/{runId}/queries?page=1&pageSize=100&status=selected
-```
+There is no public query-audit endpoint in the first version. Query candidates,
+probe results, rankings, and rejected-query audits may remain in process memory or
+temporary worker storage while a run is active. They are not part of the
+backend-to-frontend contract and do not need to survive a process restart after
+the final lead results have been committed.
 
-This endpoint supports the same pagination shape as the lead endpoint.
-
-Allowed query statuses:
-
-```text
-selected
-rejected
-failed
-```
-
-Item schema:
-
-```json
-{
-  "id": "query_01J...",
-  "shopType": "eyewear",
-  "query": "site:myshopify.com/products photochromic sunglasses",
-  "queryScore": 100,
-  "rawResults": 10,
-  "relevantResults": 10,
-  "uniqueHosts": 10,
-  "duplicateProducts": 0,
-  "estimatedResults": 598,
-  "nextPageAvailable": true,
-  "marketSignal": "Growing adaptive-lens segment.",
-  "seasonality": "growing",
-  "queryGenerationReason": "Combines a concrete product with an established adaptive-lens term.",
-  "sourceUrls": [
-    "https://example.com/research"
-  ],
-  "status": "selected",
-  "rejectionReason": null
-}
-```
-
-`sourceUrls` must always be an array. Numeric values and booleans must use their
-native JSON types.
+The selected query metadata already present on each lead
+(`generated_query`, `query_score`, `query_generation_reason`, and `search_query`)
+must be retained with that lead in PostgreSQL.
 
 ## Standard API error shape
 
@@ -649,64 +647,157 @@ Required status codes:
 | 429 | Rate limit reached |
 | 500 | Unexpected internal error |
 | 503 | Required backend configuration or external service unavailable |
+| 502 | Next.js proxy cannot reach the backend |
+| 504 | Next.js proxy request to the backend timed out |
 
 ## Backend data model
 
-Each run record must contain at least:
+Neon PostgreSQL is the durable source of truth for run status and completed lead
+results. Prisma ORM is the only application data-access layer. The HTTP run path
+must not use an in-memory run repository, DynamoDB, S3 result objects, or local CSV
+files as its durable store.
 
-```text
-runId
-userId                    production/authenticated deployment
-state
-stage
-normalizedShopTypes
-createdAt
-startedAt
-completedAt
-progress
-resultsAvailable
-leadSummary
-safeErrorCode
-safeErrorMessage
+The database must contain a `Run` record and child `Lead` records. The Prisma
+schema must model at least:
+
+```prisma
+enum RunState {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+enum LeadStatus {
+  qualified
+  rejected
+  failed
+}
+
+model Run {
+  id                  String    @id
+  state               RunState
+  stage               String
+  normalizedShopTypes Json
+  createdAt           DateTime  @default(now())
+  startedAt           DateTime?
+  completedAt         DateTime?
+  progress            Json
+  resultsAvailable    Boolean   @default(false)
+  leadSummary         Json?
+  safeErrorCode       String?
+  safeErrorMessage    String?
+  leads               Lead[]
+
+  @@index([state])
+  @@index([createdAt])
+}
+
+model Lead {
+  id                       String     @id
+  runId                    String
+  run                      Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shopType                 String?
+  generatedQuery           String?
+  queryScore               Int?
+  queryGenerationReason    String?
+  searchQuery              String?
+  googleRank               Int?
+  googleResultUrl          String?
+  myshopifyDomain          String?
+  finalUrl                 String?
+  canonicalUrl             String?
+  resolvedDomain           String?
+  storeName                String?
+  email                    String?
+  emailSourceUrl           String?
+  phone                    String?
+  phoneSourceUrl           String?
+  contactUrl               String?
+  socialProfiles           String[]   @default([])
+  additionalInformation    String?
+  shopifyConfidence        Int?
+  relevanceScore           Int?
+  leadScore                Int?
+  status                   LeadStatus
+  rejectionReason          String?
+  error                    String?
+
+  @@index([runId, status])
+  @@index([runId, leadScore])
+  @@index([runId, storeName])
+  @@index([runId, shopType])
+  @@index([runId, googleRank])
+}
 ```
 
-Lead results and query-audit results must be associated with the `runId`.
+Exact table and column mappings may use `@map` and `@@map`, but the public JSON
+serializer must use the snake_case output names defined by this document.
 
-For local frontend development, an in-memory run repository is acceptable if this
-limitation is clearly documented. For production, use durable storage:
+There is deliberately no `expiresAt` field, TTL, lifecycle deletion, or automatic
+cleanup job. Completed results remain downloadable for as long as:
 
-- DynamoDB for run status and counters.
-- S3 JSON objects or a database for complete lead and query result sets.
-- Do not pass complete result arrays through Step Functions because of its payload
-  size limit.
+- the Neon project and database are retained;
+- the records are not explicitly deleted;
+- database migrations preserve the data; and
+- the database can be restored after an operational failure.
 
-Recommended S3 keys:
+“Indefinitely downloadable” is therefore an application retention policy, not a
+guarantee independent of the database provider. Neon backups or point-in-time
+restore, an appropriate paid plan when needed, and periodic external backups are
+operational requirements before the data becomes business-critical.
+
+### Prisma and Neon configuration
+
+The database connection belongs only to the scraper backend:
 
 ```text
-runs/{runId}/input.json
-runs/{runId}/results/leads.json
-runs/{runId}/results/queries.json
-runs/{runId}/results/summary.json
+DATABASE_URL=<pooled Neon runtime connection URL>
+DIRECT_URL=<direct Neon connection URL for Prisma CLI migrations>
 ```
 
-The bucket must be private and encrypted. API responses should read authorized
-run data and return JSON; do not expose a public bucket.
+- Never copy either database URL into the frontend repository or Vercel frontend
+  environment variables.
+- `DATABASE_URL` is used by Prisma Client at runtime.
+- `DIRECT_URL` is used by `prisma.config.ts` for Prisma Migrate and other CLI
+  operations.
+- The existing local `DATABASE_URL` may be used for initial local development. A
+  pooled Neon URL and separate direct migration URL must be configured before a
+  serverless or concurrency-heavy deployment.
+- Connection strings and Prisma errors must never be returned through the API.
+
+Use Prisma migrations for all schema changes. Do not use automatic destructive
+schema synchronization against production.
+
+### Result commit behavior
+
+After the pipeline finishes, the backend must save all lead rows and the final run
+summary in a database transaction. In the same transaction it must set
+`resultsAvailable = true`, `state = completed`, `stage = completed`, and
+`completedAt`.
+
+If that transaction fails, the run must not report completed or make a partial
+result set downloadable. Retry safely by making the result commit idempotent for
+the `runId`. Query-planning records are discarded after a successful result
+commit.
 
 ## Required changes to the current Node.js backend
 
 ### `src/server.js`
 
-Replace the single global status object with a run repository keyed by `runId`.
+Replace the single global status object with a Prisma-backed run repository keyed
+by `runId`.
 
 Add:
 
 - JSON request-body parsing with a 32 KiB limit.
+- `GET /api/health`.
 - `POST /api/runs`.
 - `GET /api/runs/:runId`.
 - `GET /api/runs/:runId/results`.
-- `GET /api/runs/:runId/queries`.
 - Standard error serialization.
-- CORS handling described below.
+- Private backend access enforcement described below.
 
 The current `/health`, `/run`, and `/status` routes may temporarily remain as
 compatibility routes, but the frontend must use the `/api` contract.
@@ -715,19 +806,18 @@ Capture the pipeline result instead of discarding it:
 
 ```js
 const result = await pipeline(runConfig, status);
-await runRepository.saveResults(runId, result);
+await runRepository.saveCompletedResults(runId, result);
 ```
 
 ### `src/pipeline.js`
 
 Stop treating CSV writing as the only terminal sink.
 
-Return both result collections:
+Return the lead collection and summary:
 
 ```js
 {
   leads: [...],
-  queries: [...],
   summary: {
     total: 0,
     qualified: 0,
@@ -740,14 +830,20 @@ Return both result collections:
 The web-server execution path must not require `OUTPUT_CSV` or
 `GENERATED_QUERIES_CSV`.
 
-The pipeline may continue using its existing internal snake_case records. Add a
-dedicated API serializer that converts them to the camelCase JSON schema and
-normalizes blank strings to `null`.
+The pipeline may continue using its existing internal snake_case records. The
+Prisma repository maps those records to its model fields, and the API serializer
+returns the snake_case JSON schema defined in this document while normalizing
+blank strings to `null`.
 
 ### `src/query-planner.js`
 
-It already returns `audits`. Ensure `runPipeline` retains that returned value and
-includes it as `queries` in the final pipeline result.
+Stop requiring the HTTP path to read categories from `config.inputCsv`. Pass the
+normalized manual `shopTypes` from the accepted run record directly into the
+planner. `readCategories` remains available only to `npm run run:once`.
+
+The planner may continue producing `audits` internally and may write a temporary
+audit for local debugging, but audits are not persisted in PostgreSQL and are not
+returned by the public API.
 
 ### `src/output.js` and `src/query-audit.js`
 
@@ -762,20 +858,23 @@ The HTTP run path must not depend on these files being writable.
 ### Suggested new modules
 
 ```text
-src/run-repository.js       Run status and result storage interface
-src/in-memory-run-store.js  Local development implementation
-src/api-serializer.js       Internal record to public JSON conversion
-src/api-errors.js           Safe typed API errors
-src/request-json.js         Size-limited JSON body parser
+prisma/schema.prisma          Run and Lead models
+prisma.config.ts              Prisma CLI and migration configuration
+src/prisma-client.js          One backend Prisma Client instance
+src/prisma-run-repository.js  Run status, result commit, filters, and pagination
+src/api-serializer.js         Internal/Prisma record to public JSON conversion
+src/api-errors.js             Safe typed API errors
+src/request-json.js           Size-limited JSON body parser
 ```
 
-Do not put storage logic, CSV formatting, and request routing into one file.
+Do not put Prisma queries, CSV formatting, and request routing into one file.
 
 ## Frontend requirements
 
 ### Run creation
 
-- Provide a category-entry field that supports multiple shop types.
+- Provide manual category-entry controls that support multiple shop types.
+- Do not provide CSV upload in the first frontend.
 - Trim client-side whitespace before submission.
 - Do not rely only on frontend validation; display backend validation errors.
 - Disable the start button while the request is being submitted.
@@ -790,6 +889,9 @@ Do not put storage logic, CSV formatting, and request routing into one file.
 - Display the current stage and the available counters.
 - Do not display a fabricated percentage when a reliable total is not yet known.
 - Fetch results only when `resultsAvailable` is `true`.
+- After completion, show that the results have no scheduled expiry and keep the
+  direct `/runs/{runId}` URL reloadable. The user can bookmark that URL to return
+  to the stored result set.
 
 ### Results screen
 
@@ -848,7 +950,7 @@ CSV implementation requirements:
 - Quote any field containing a comma, quote, carriage return, or newline.
 - Escape an embedded quote by doubling it.
 - Convert `null` and `undefined` to an empty field.
-- Serialize `socialProfiles` using `JSON.stringify`.
+- Serialize `social_profiles` using `JSON.stringify`.
 - Preserve numeric fields as numbers.
 - Protect string cells from spreadsheet formula injection. If a string begins,
   after optional whitespace, with `=`, `+`, `-`, `@`, tab, or carriage return,
@@ -866,36 +968,28 @@ To export all results from a paginated API, the frontend must fetch every page f
 the selected filter before building the file. It must show an export-in-progress
 state and must not silently export only the currently visible page.
 
-## CORS requirements
+## Network boundary, private access, and data protection
 
-If the frontend and API use different origins, the backend must handle `OPTIONS`
-preflight requests and return:
+The first version has no application user accounts and no per-user run ownership.
+It is a private-access deployment.
 
-```text
-Access-Control-Allow-Origin: value of FRONTEND_ORIGIN
-Access-Control-Allow-Methods: GET, POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type, Authorization
-Access-Control-Max-Age: 600
-Vary: Origin
-```
-
-Do not use `Access-Control-Allow-Origin: *` with authenticated requests. Reject
-origins that are not explicitly configured.
-
-## Authentication and data protection
-
-Authentication may be omitted only for local development bound to `127.0.0.1`.
-Before internet deployment:
-
-- Require a valid authenticated user for every run endpoint.
-- Associate each run with a `userId`.
-- Verify ownership on status, results, query-audit, and future cancellation calls.
-- Rate-limit run creation per user.
-- Do not place OpenAI, Google, or Browserless credentials in frontend environment
-  variables.
+- The browser communicates only with same-origin Next.js Route Handlers, so the
+  scraper backend does not need browser CORS.
+- The scraper backend must not be publicly callable. Restrict it through private
+  networking, an infrastructure allowlist, or a server-to-server
+  `BACKEND_API_TOKEN`.
+- The Next.js deployment itself must remain privately reachable through platform
+  deployment protection, a private network, or an equivalent access restriction.
+- An opaque `runId` is a lookup key, not an authentication mechanism.
+- Do not add `userId` to the first database schema. Add users and ownership checks
+  before changing the product to a public or multi-user deployment.
+- Rate-limit run creation globally even on the private deployment.
+- Do not place database, OpenAI, Google, or Browserless credentials in frontend
+  environment variables.
 - Do not log complete result payloads because they contain emails and phone
   numbers.
-- Define a retention period and delete expired run data.
+- Do not automatically expire completed runs. Any future deletion feature must be
+  explicit, auditable, and delete the associated leads transactionally.
 
 ## Required automated tests
 
@@ -919,12 +1013,23 @@ Before internet deployment:
 
 - Blank internal strings become `null`.
 - Scores and ranks are numbers or `null`.
-- `socialProfiles` and `sourceUrls` are arrays.
-- Lead and query IDs are stable within a run.
+- `social_profiles` is always an array.
+- Lead IDs are stable within a run.
 - Summary totals match the returned complete collection.
 - Status filtering returns only matching records.
 - Pagination metadata is correct for the first, middle, and last pages.
 - Unsupported sort fields are rejected.
+
+### Prisma persistence tests
+
+- Creating a run stores its normalized manual categories in PostgreSQL.
+- Status remains readable after restarting the API process.
+- Completing a run commits its leads and final status atomically.
+- A failed result transaction never exposes a partial downloadable result set.
+- Two completed runs retain separate lead collections.
+- Result filtering, sorting, and pagination are scoped by `runId`.
+- Query-planning audits are not stored in PostgreSQL.
+- Prisma errors and connection strings are never serialized to API clients.
 
 ### Frontend tests
 
@@ -946,10 +1051,11 @@ true:
 - `POST /api/runs` returns within a few seconds with a `runId`.
 - Status can be read using that specific `runId`.
 - A completed run exposes leads as typed JSON.
-- A completed run exposes query-audit records as typed JSON.
 - Results remain associated with their run and are not overwritten by a later run.
+- Completed runs and results remain readable after an API process restart.
 - The HTTP path does not depend on writing local CSV files.
-- Pagination, filtering, safe errors, and CORS are covered by tests.
+- The HTTP path receives manual categories directly and does not read an input CSV.
+- Pagination, filtering, safe errors, and Prisma persistence are covered by tests.
 - No secret or local filesystem path appears in any API response.
 
 ## Explicitly out of scope for the first frontend
@@ -958,7 +1064,22 @@ true:
 - Streaming leads into the table one at a time.
 - Editing scraped leads.
 - Sending email from the application.
+- CSV category upload.
+- Query-audit API, query-audit UI, or query-audit export.
 - Arbitrary user-provided scraper configuration.
-- Public S3 buckets.
+- Public or multi-user access.
+- Automatic result expiration or cleanup.
 - Browser access to OpenAI, Google Search, or Browserless APIs.
+- Browser or Next.js frontend access to Neon PostgreSQL.
 - Generating CSV on the backend.
+
+## Implementation references
+
+- Prisma ORM with Neon:
+  https://docs.prisma.io/docs/orm/v6/overview/databases/neon
+- Prisma PostgreSQL connector and runtime/CLI connection configuration:
+  https://docs.prisma.io/docs/orm/core-concepts/supported-databases/postgresql
+- Neon connection pooling:
+  https://neon.com/docs/connect/connection-pooling
+- Neon backup and snapshot update:
+  https://neon.com/docs/changelog/2025-10-31

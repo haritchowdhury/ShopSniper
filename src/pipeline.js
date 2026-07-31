@@ -10,7 +10,6 @@ import {
 } from "./contact-extractor.js";
 import { normalizeWithAi } from "./ai-normalizer.js";
 import { scoreLead } from "./lead-scorer.js";
-import { writeOutput } from "./output.js";
 import { sameAllowedHostname } from "./url-security.js";
 import { log } from "./logger.js";
 
@@ -199,8 +198,7 @@ const DEFAULT_DEPENDENCIES = {
   fetchPage,
   extractEvidence: extractContactEvidence,
   consolidate: consolidateEvidence,
-  normalizeAi: normalizeWithAi,
-  writeOutput
+  normalizeAi: normalizeWithAi
 };
 
 export async function runPipeline(config, status, dependencyOverrides = {}) {
@@ -334,9 +332,17 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
   );
 
   records.push(...storeRecords);
-  status.stage = "writing_output";
-  await dependencies.writeOutput(config.outputCsv, records);
+  status.stage = "writing_results";
   status.outputRows = records.length;
-  status.stage = "completed";
-  return records;
+  const summary = records.reduce(
+    (counts, record) => {
+      counts.total += 1;
+      if (record.status === "qualified") counts.qualified += 1;
+      else if (record.status === "rejected") counts.rejected += 1;
+      else if (record.status === "failed") counts.failed += 1;
+      return counts;
+    },
+    { total: 0, qualified: 0, rejected: 0, failed: 0 }
+  );
+  return { leads: records, summary };
 }
