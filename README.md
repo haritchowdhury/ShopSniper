@@ -1,9 +1,10 @@
-# Shopify Lead Generator
+# Email Scraper
 
-A small, dependency-free Node.js server that replaces the two n8n workflows. It reads
-broad shop types from a one-column CSV, researches and generates product-oriented
-Shopify searches, probes and ranks those searches, discovers qualified stores,
-extracts evidence-backed contact details, and writes auditable CSV outputs.
+A small, dependency-free Node.js Shopify email scraper and lead-generation server
+that replaces the two n8n workflows. It reads broad shop types from a one-column
+CSV, researches and generates product-oriented Shopify searches, probes and ranks
+those searches, discovers qualified stores, extracts evidence-backed contact
+details, and writes auditable CSV outputs.
 
 ## Requirements
 

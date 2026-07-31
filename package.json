@@ -1,9 +1,9 @@
 {
-  "name": "shopify-lead-generator",
+  "name": "email-scraper",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Lean AI-planned CSV-driven Shopify lead generation server",
+  "description": "Lean AI-planned CSV-driven Shopify email scraper and lead generation server",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
