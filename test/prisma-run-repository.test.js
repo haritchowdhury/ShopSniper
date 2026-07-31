@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 
@@ -82,4 +83,84 @@ test("restart recovery fails only running work and preserves queued runs", async
   assert.deepEqual(updateArguments.where, { state: "running" });
   assert.equal(updateArguments.data.state, "failed");
   assert.equal(updateArguments.data.safeErrorCode, "RUN_INTERRUPTED");
+});
+
+test("completion writes leads, audits, diagnostics, and publication in one transaction", async () => {
+  const calls = [];
+  const model = (name) => ({
+    deleteMany: async () => calls.push(`${name}.deleteMany`),
+    createMany: async () => calls.push(`${name}.createMany`)
+  });
+  const transaction = {
+    lead: model("lead"),
+    queryAudit: model("queryAudit"),
+    runDiagnostic: model("runDiagnostic"),
+    run: { update: async (arguments_) => { calls.push("run.update"); return arguments_.data; } }
+  };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback(transaction)
+  });
+  const result = await repository.saveCompletedResults("run_abcdefghijklmnop", {
+    leads: [{ resolved_domain: "fixture.example", status: "qualified", lead_score: 80 }],
+    queryAudits: [{ query: "fixture", status: "selected" }],
+    diagnostics: [{ scope: "query", code: "fixture", details: {} }],
+    summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+  });
+  assert.deepEqual(calls, [
+    "lead.deleteMany", "queryAudit.deleteMany", "runDiagnostic.deleteMany",
+    "lead.createMany", "queryAudit.createMany", "runDiagnostic.createMany", "run.update"
+  ]);
+  assert.equal(result.resultsAvailable, true);
+  assert.equal(result.pipelineVersion, 2);
+});
+
+test("owner scope is applied to audit and diagnostic repository reads", async () => {
+  const seen = [];
+  const pageable = (name) => ({
+    count: async ({ where }) => { seen.push([name, where]); return 0; },
+    findMany: async () => []
+  });
+  const repository = new PrismaRunRepository({
+    queryAudit: pageable("audit"),
+    runDiagnostic: pageable("diagnostic"),
+    $transaction: async (operations) => Promise.all(operations)
+  });
+  await repository.getQueryAuditsPage("run_abcdefghijklmnop", "user_alice", { page: 1, pageSize: 20 });
+  await repository.getDiagnosticsPage("run_abcdefghijklmnop", "user_alice", { page: 1, pageSize: 20 });
+  for (const [, where] of seen) assert.deepEqual(where.run, { ownerId: "user_alice" });
+});
+
+test("a child-write failure occurs before the publication update", async () => {
+  let published = false;
+  const noOp = { deleteMany: async () => {}, createMany: async () => {} };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      lead: noOp,
+      queryAudit: noOp,
+      runDiagnostic: {
+        deleteMany: async () => {},
+        createMany: async () => { throw new Error("injected durable write failure"); }
+      },
+      run: { update: async () => { published = true; } }
+    })
+  });
+  await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", {
+    leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
+    queryAudits: [{ query: "fixture", status: "selected" }],
+    diagnostics: [{ scope: "query", code: "fixture", details: {} }],
+    summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+  }), /injected durable write failure/u);
+  assert.equal(published, false);
+});
+
+test("G3 migration is additive and contains no historical-row rewrite", async () => {
+  const url = new URL(
+    "../prisma/migrations/20260731230000_g3_pipeline_quality/migration.sql",
+    import.meta.url
+  );
+  const sql = await fs.readFile(url, "utf8");
+  assert.doesNotMatch(sql, /^\s*(?:UPDATE|DELETE FROM|DROP TABLE)\b/imu);
+  assert.match(sql, /ADD COLUMN "pipelineVersion" INTEGER/u);
+  assert.match(sql, /CREATE TABLE "QueryAudit"/u);
+  assert.match(sql, /CREATE TABLE "RunDiagnostic"/u);
 });

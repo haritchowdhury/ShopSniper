@@ -2,6 +2,7 @@ import { createInitialProgress } from "./status.js";
 
 const TEXT_FIELDS = {
   shop_type: "shopType",
+  business_qualifier: "businessQualifier",
   generated_query: "generatedQuery",
   query_generation_reason: "queryGenerationReason",
   search_query: "searchQuery",
@@ -18,7 +19,9 @@ const TEXT_FIELDS = {
   contact_url: "contactUrl",
   additional_information: "additionalInformation",
   rejection_reason: "rejectionReason",
-  error: "error"
+  error: "error",
+  store_fit_state: "storeFitState",
+  contactability_tier: "contactabilityTier"
 };
 
 const NUMBER_FIELDS = {
@@ -26,7 +29,19 @@ const NUMBER_FIELDS = {
   google_rank: "googleRank",
   shopify_confidence: "shopifyConfidence",
   relevance_score: "relevanceScore",
-  lead_score: "leadScore"
+  lead_score: "leadScore",
+  pipeline_version: "pipelineVersion",
+  scoring_version: "scoringVersion",
+  identity_confidence: "identityConfidence"
+};
+
+const JSON_FIELDS = {
+  store_fit_evidence: "storeFitEvidence",
+  contact_evidence: "contactEvidence",
+  identity_evidence: "identityEvidence",
+  score_breakdown: "scoreBreakdown",
+  discovery_occurrences: "discoveryOccurrences",
+  matched_categories: "matchedCategories"
 };
 
 function nullableText(value) {
@@ -51,6 +66,10 @@ export function serializeLead(lead) {
     ? lead.socialProfiles.filter((value) => typeof value === "string")
     : [];
   item.status = lead.status;
+  for (const [publicName, modelName] of Object.entries(JSON_FIELDS)) {
+    item[publicName] = lead[modelName] ?? null;
+  }
+  item.score_semantics = lead.scoringVersion == null ? "legacy_v1" : "evidence_rank_v2";
   return item;
 }
 
@@ -69,6 +88,8 @@ export function serializeRun(run) {
     completedAt: run.completedAt?.toISOString() || null,
     progress,
     resultsAvailable: Boolean(run.resultsAvailable),
+    pipelineVersion: run.pipelineVersion ?? null,
+    scoringVersion: run.scoringVersion ?? null,
     error: run.safeErrorCode
       ? {
           code: run.safeErrorCode,
@@ -91,5 +112,65 @@ export function leadRecordToCreate(runId, id, record) {
   mapped.socialProfiles = Array.isArray(record.social_profiles)
     ? record.social_profiles.filter((value) => typeof value === "string")
     : [];
+  for (const [publicName, modelName] of Object.entries(JSON_FIELDS)) {
+    if (record[publicName] != null) mapped[modelName] = record[publicName];
+  }
   return mapped;
+}
+
+export function queryAuditRecordToCreate(runId, id, sequence, record) {
+  const known = new Set([
+    "shop_type", "business_qualifier", "query", "status", "rejection_reason"
+  ]);
+  return {
+    id,
+    runId,
+    sequence,
+    shopType: nullableText(record.shop_type),
+    businessQualifier: nullableText(record.business_qualifier),
+    query: nullableText(record.query),
+    status: nullableText(record.status) || "unknown",
+    rejectionReason: nullableText(record.rejection_reason),
+    details: Object.fromEntries(Object.entries(record).filter(([key]) => !known.has(key)))
+  };
+}
+
+export function diagnosticRecordToCreate(runId, id, sequence, record) {
+  return {
+    id,
+    runId,
+    sequence,
+    scope: nullableText(record.scope) || "run",
+    code: nullableText(record.code) || "unknown",
+    shopType: nullableText(record.shop_type),
+    businessQualifier: nullableText(record.business_qualifier),
+    query: nullableText(record.query),
+    resultUrl: nullableText(record.result_url),
+    details: record.details && typeof record.details === "object" ? record.details : {}
+  };
+}
+
+export function serializeQueryAudit(record) {
+  return {
+    sequence: record.sequence,
+    shop_type: record.shopType,
+    business_qualifier: record.businessQualifier,
+    query: record.query,
+    status: record.status,
+    rejection_reason: record.rejectionReason,
+    details: record.details
+  };
+}
+
+export function serializeDiagnostic(record) {
+  return {
+    sequence: record.sequence,
+    scope: record.scope,
+    code: record.code,
+    shop_type: record.shopType,
+    business_qualifier: record.businessQualifier,
+    query: record.query,
+    result_url: record.resultUrl,
+    details: record.details
+  };
 }

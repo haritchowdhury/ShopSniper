@@ -47,6 +47,26 @@ test("run serialization fills the complete progress contract", () => {
   assert.equal("blankQueriesSkipped" in serialized.progress, false);
   assert.equal(serialized.resultsAvailable, true);
   assert.equal(serialized.error, null);
+  assert.equal(serialized.pipelineVersion, null);
+});
+
+test("v2 lead evidence round-trips while unversioned rows remain explicitly legacy", () => {
+  const v2 = leadRecordToCreate("run_abcdefghijklmnop", "lead_v2", {
+    shop_type: "eyewear",
+    business_qualifier: "brand",
+    pipeline_version: 2,
+    scoring_version: 2,
+    identity_confidence: 70,
+    score_breakdown: { version: 2, components: { identity: 14 }, total: 80 },
+    discovery_occurrences: [{ query: "frames", rank: 1 }],
+    status: "qualified"
+  });
+  const serialized = serializeLead(v2);
+  assert.equal(serialized.business_qualifier, "brand");
+  assert.equal(serialized.scoring_version, 2);
+  assert.equal(serialized.score_semantics, "evidence_rank_v2");
+  assert.equal(serialized.score_breakdown.total, 80);
+  assert.equal(serializeLead({ id: "legacy", status: "rejected" }).score_semantics, "legacy_v1");
 });
 
 test("structured logging redacts PostgreSQL credentials", () => {

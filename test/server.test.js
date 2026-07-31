@@ -8,6 +8,8 @@ class TestRepository {
   constructor() {
     this.runs = new Map();
     this.items = new Map();
+    this.audits = new Map();
+    this.diagnostics = new Map();
     this.intents = new Map();
     this.healthy = true;
     this.nextRun = 0;
@@ -127,6 +129,25 @@ class TestRepository {
         error: lead.error || null
       }))
     );
+    this.audits.set(identifier, (result.queryAudits || []).map((item, sequence) => ({
+      sequence,
+      shopType: item.shop_type || null,
+      businessQualifier: item.business_qualifier || null,
+      query: item.query || null,
+      status: item.status,
+      rejectionReason: item.rejection_reason || null,
+      details: {}
+    })));
+    this.diagnostics.set(identifier, (result.diagnostics || []).map((item, sequence) => ({
+      sequence,
+      scope: item.scope,
+      code: item.code,
+      shopType: item.shop_type || null,
+      businessQualifier: item.business_qualifier || null,
+      query: item.query || null,
+      resultUrl: item.result_url || null,
+      details: item.details || {}
+    })));
   }
 
   async markFailed(identifier, safeError, status) {
@@ -176,6 +197,16 @@ class TestRepository {
         filters.page * filters.pageSize
       )
     };
+  }
+
+  async getQueryAuditsPage(identifier, _ownerId, pagination) {
+    const items = this.audits.get(identifier) || [];
+    return { totalItems: items.length, items: items.slice((pagination.page - 1) * pagination.pageSize, pagination.page * pagination.pageSize) };
+  }
+
+  async getDiagnosticsPage(identifier, _ownerId, pagination) {
+    const items = this.diagnostics.get(identifier) || [];
+    return { totalItems: items.length, items: items.slice((pagination.page - 1) * pagination.pageSize, pagination.page * pagination.pageSize) };
   }
 }
 
@@ -253,6 +284,14 @@ test("documented API creates, polls, and returns durable-shaped results", async 
             error: ""
           }
         ],
+        queryAudits: [{
+          shop_type: "clothing",
+          business_qualifier: "brand",
+          query: "site:myshopify.com/products barrel jeans",
+          status: "selected",
+          rejection_reason: ""
+        }],
+        diagnostics: [{ scope: "query", code: "probe_warning", details: {} }],
         summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
       };
     }
@@ -338,6 +377,22 @@ test("documented API creates, polls, and returns durable-shaped results", async 
   assert.equal(body.items[0].lead_score, 95);
   assert.equal(body.items[0].phone, null);
   assert.deepEqual(body.items[0].social_profiles, []);
+
+  const audits = await (await fetch(
+    `${fixture.base}/api/runs/${accepted.runId}/query-audits`,
+    { headers: { "x-user-id": "user_alice" } }
+  )).json();
+  assert.equal(audits.items[0].status, "selected");
+  const diagnostics = await (await fetch(
+    `${fixture.base}/api/runs/${accepted.runId}/diagnostics`,
+    { headers: { "x-user-id": "user_alice" } }
+  )).json();
+  assert.equal(diagnostics.items[0].code, "probe_warning");
+  const crossOwner = await fetch(
+    `${fixture.base}/api/runs/${accepted.runId}/diagnostics`,
+    { headers: { "x-user-id": "user_bob" } }
+  );
+  assert.equal(crossOwner.status, 404);
 });
 
 test("API rejects invalid bodies, unsafe parameters, and unavailable database safely", async (context) => {

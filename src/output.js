@@ -27,7 +27,19 @@ export const OUTPUT_HEADERS = [
   "lead_score",
   "status",
   "rejection_reason",
-  "error"
+  "error",
+  "business_qualifier",
+  "pipeline_version",
+  "scoring_version",
+  "store_fit_state",
+  "store_fit_evidence",
+  "contactability_tier",
+  "contact_evidence",
+  "identity_confidence",
+  "identity_evidence",
+  "score_breakdown",
+  "discovery_occurrences",
+  "matched_categories"
 ];
 
 export async function writeOutput(filePath, records) {
@@ -42,7 +54,18 @@ export async function writeOutput(filePath, records) {
     ...record,
     social_profiles: Array.isArray(record.social_profiles)
       ? JSON.stringify(record.social_profiles)
-      : record.social_profiles || ""
+      : record.social_profiles || "",
+    ...Object.fromEntries([
+      "store_fit_evidence",
+      "contact_evidence",
+      "identity_evidence",
+      "score_breakdown",
+      "discovery_occurrences",
+      "matched_categories"
+    ].map((field) => [
+      field,
+      record[field] == null || record[field] === "" ? "" : JSON.stringify(record[field])
+    ]))
   }));
 
   try {

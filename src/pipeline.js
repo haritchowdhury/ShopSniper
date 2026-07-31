@@ -9,17 +9,30 @@ import {
   extractContactEvidence
 } from "./contact-extractor.js";
 import { normalizeWithAi } from "./ai-normalizer.js";
-import { scoreLead } from "./lead-scorer.js";
+import { scoreLeadV2 } from "./lead-scorer.js";
+import { mergeDiscoveryCandidates } from "./discovery-aggregation.js";
 import { sameAllowedHostname } from "./url-security.js";
 import { log } from "./logger.js";
 
-function messageOf(error) {
-  return error instanceof Error ? error.message : String(error);
+function safeErrorType(error) {
+  return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*Error$/u.test(error.name)
+    ? error.name
+    : "Error";
 }
+
+const REJECTION_PRIORITY = new Map([
+  ["inactive_store", 0],
+  ["storefront_blocked", 1],
+  ["not_shopify", 2],
+  ["wrong_category", 3],
+  ["wrong_store_type", 4],
+  ["insufficient_store_evidence", 5]
+]);
 
 function blankRecord(overrides = {}) {
   return {
     shop_type: "",
+    business_qualifier: "unspecified",
     generated_query: "",
     query_score: "",
     query_generation_reason: "",
@@ -41,6 +54,17 @@ function blankRecord(overrides = {}) {
     shopify_confidence: "",
     relevance_score: "",
     lead_score: "",
+    pipeline_version: 2,
+    scoring_version: "",
+    store_fit_state: "",
+    store_fit_evidence: null,
+    contactability_tier: "",
+    contact_evidence: null,
+    identity_confidence: "",
+    identity_evidence: null,
+    score_breakdown: null,
+    discovery_occurrences: [],
+    matched_categories: [],
     status: "",
     rejection_reason: "",
     error: "",
@@ -88,11 +112,20 @@ async function processStore(candidate, config, dependencies) {
     return recordFromCandidate(candidate, {
       shopify_confidence: validation.shopifyConfidence,
       relevance_score: validation.relevanceScore,
-      lead_score: scoreLead({
-        relevanceScore: validation.relevanceScore,
-        shopifyConfidence: validation.shopifyConfidence,
-        identityConfidence: candidate.identityConfidence
-      }),
+      lead_score: "",
+      store_fit_state: validation.storeFit?.state || "",
+      store_fit_evidence: validation.storeFit ? [{
+        intent: {
+          shopType: candidate.shopType || "",
+          businessQualifier: candidate.businessQualifier || "unspecified"
+        },
+        ...validation.storeFit
+      }] : null,
+      contactability_tier: "none",
+      identity_confidence: candidate.identityConfidence,
+      identity_evidence: candidate.identityEvidence || null,
+      discovery_occurrences: candidate.occurrences || [],
+      matched_categories: candidate.categoryIntents || [],
       status: "rejected",
       rejection_reason: validation.rejectionReason,
       additional_information: JSON.stringify(validation.evidence)
@@ -142,7 +175,7 @@ async function processStore(candidate, config, dependencies) {
       return {
         page: null,
         document: null,
-        error: `${new URL(pageUrl).pathname}: ${messageOf(error)}`
+        error: `${new URL(pageUrl).pathname}: ${safeErrorType(error)}`
       };
     }
   });
@@ -152,20 +185,45 @@ async function processStore(candidate, config, dependencies) {
     if (result.error) pageErrors.push(result.error);
   }
 
-  validation = dependencies.validate(
-    { ...candidate, evidencePages },
-    config,
-    { final: true }
+  const intents = candidate.categoryIntents?.length
+    ? candidate.categoryIntents
+    : [{
+        shopType: candidate.shopType,
+        businessQualifier: candidate.businessQualifier || "unspecified",
+        categoryVocabulary: candidate.categoryVocabulary || []
+      }];
+  const validations = intents.map((intent) => ({
+    intent,
+    validation: dependencies.validate(
+      { ...candidate, ...intent, evidencePages },
+      config,
+      { final: true }
+    )
+  }));
+  validations.sort((left, right) =>
+    Number(right.validation.valid) - Number(left.validation.valid) ||
+    (REJECTION_PRIORITY.get(left.validation.rejectionReason) ?? 99) -
+      (REJECTION_PRIORITY.get(right.validation.rejectionReason) ?? 99) ||
+    Number(right.validation.relevanceScore || 0) - Number(left.validation.relevanceScore || 0) ||
+    `${left.intent.shopType}:${left.intent.businessQualifier}`.localeCompare(
+      `${right.intent.shopType}:${right.intent.businessQualifier}`
+    )
   );
+  ({ validation } = validations[0]);
+  const selectedIntent = validations[0].intent;
   if (!validation.valid) {
     return recordFromCandidate(candidate, {
+      shop_type: selectedIntent.shopType,
+      business_qualifier: selectedIntent.businessQualifier,
       shopify_confidence: validation.shopifyConfidence,
       relevance_score: validation.relevanceScore,
-      lead_score: scoreLead({
-        relevanceScore: validation.relevanceScore,
-        shopifyConfidence: validation.shopifyConfidence,
-        identityConfidence: candidate.identityConfidence
-      }),
+      lead_score: "",
+      store_fit_state: validation.storeFit?.state || "",
+      store_fit_evidence: validations.map(({ intent, validation: item }) => ({ intent, ...item.storeFit })),
+      identity_confidence: candidate.identityConfidence,
+      identity_evidence: candidate.identityEvidence || null,
+      discovery_occurrences: candidate.occurrences || [],
+      matched_categories: intents,
       status: "rejected",
       rejection_reason: validation.rejectionReason,
       additional_information: JSON.stringify(validation.evidence)
@@ -178,35 +236,44 @@ async function processStore(candidate, config, dependencies) {
   try {
     ai = await dependencies.normalizeAi(candidate, evidence, config);
   } catch (error) {
-    aiError = messageOf(error);
+    aiError = safeErrorType(error);
   }
 
-  const email = ai?.email || evidence.email;
-  const phone = ai?.phone || evidence.phone;
-  const contactUrl = ai?.contact_url || evidence.contactUrl;
-  const socialProfiles = ai?.social_profiles?.length
+  const proposedEmail = ai?.email || evidence.email;
+  const proposedPhone = ai?.phone || evidence.phone;
+  const proposedContactUrl = ai?.contact_url || evidence.contactUrl;
+  const proposedSocialProfiles = ai?.social_profiles?.length
     ? ai.social_profiles
     : evidence.socialProfiles;
-  const emailPage = pages.find((page) => page.emails.includes(email));
-  const phonePage = pages.find((page) => page.phones.includes(phone));
-  const leadScore = scoreLead({
+  const emailEvidence = evidence.evidence?.emails?.find(({ value }) => value === proposedEmail);
+  const phoneEvidence = evidence.evidence?.phones?.find(({ value }) => value === proposedPhone);
+  const contactPageEvidence = evidence.evidence?.contactPages?.find(
+    ({ value }) => value === proposedContactUrl
+  );
+  const validSocials = new Set((evidence.evidence?.socialProfiles || []).map(({ value }) => value));
+  const email = emailEvidence?.value || "";
+  const phone = phoneEvidence?.value || "";
+  const contactUrl = contactPageEvidence?.value || "";
+  const socialProfiles = proposedSocialProfiles.filter((value) => validSocials.has(value));
+  const contactabilityTier = email || phone
+    ? "direct"
+    : contactUrl
+      ? "indirect"
+      : socialProfiles.length || evidence.storeName
+        ? "research_only"
+        : "none";
+  const scoreBreakdown = scoreLeadV2({
     relevanceScore: validation.relevanceScore,
     shopifyConfidence: validation.shopifyConfidence,
     identityConfidence: candidate.identityConfidence,
-    email,
-    phone,
-    contactUrl,
-    socialProfiles
+    contactEvidence: { email: Boolean(email), phone: Boolean(phone), contactPage: Boolean(contactUrl) }
   });
 
-  let status = "qualified";
+  let leadStatus = "qualified";
   let rejectionReason = "";
-  if (!email && !phone && !contactUrl) {
-    status = "rejected";
-    rejectionReason = "no_contact_information";
-  } else if (leadScore < config.qualificationThreshold) {
-    status = "rejected";
-    rejectionReason = "low_lead_score";
+  if (!["direct", "indirect"].includes(contactabilityTier)) {
+    leadStatus = "rejected";
+    rejectionReason = "insufficient_contact_evidence";
   }
 
   const notes = [
@@ -217,20 +284,32 @@ async function processStore(candidate, config, dependencies) {
   ].filter(Boolean);
 
   return recordFromCandidate(candidate, {
+    shop_type: selectedIntent.shopType,
+    business_qualifier: selectedIntent.businessQualifier,
     store_name: ai?.store_name || evidence.storeName,
     email,
-    email_source_url: emailPage?.url || evidence.emailSourceUrl,
+    email_source_url: emailEvidence?.sourceUrl || "",
     phone,
-    phone_source_url: phonePage?.url || evidence.phoneSourceUrl,
+    phone_source_url: phoneEvidence?.sourceUrl || "",
     contact_url: contactUrl,
     social_profiles: socialProfiles,
     additional_information: notes.join("; "),
     shopify_confidence: validation.shopifyConfidence,
     relevance_score: validation.relevanceScore,
-    lead_score: leadScore,
-    status,
+    lead_score: leadStatus === "qualified" ? scoreBreakdown.total : "",
+    scoring_version: leadStatus === "qualified" ? 2 : "",
+    store_fit_state: validation.storeFit?.state || "",
+    store_fit_evidence: validations.map(({ intent, validation: item }) => ({ intent, ...item.storeFit })),
+    contactability_tier: contactabilityTier,
+    contact_evidence: evidence.evidence || null,
+    identity_confidence: candidate.identityConfidence,
+    identity_evidence: candidate.identityEvidence || null,
+    score_breakdown: leadStatus === "qualified" ? scoreBreakdown : null,
+    discovery_occurrences: candidate.occurrences || [],
+    matched_categories: intents,
+    status: leadStatus,
     rejection_reason: rejectionReason,
-    error: aiError ? `AI normalization failed; deterministic evidence retained: ${aiError}` : ""
+    error: aiError ? `AI normalization failed; deterministic evidence retained (${aiError})` : ""
   });
 }
 
@@ -249,6 +328,7 @@ const DEFAULT_DEPENDENCIES = {
 export async function runPipeline(config, status, dependencyOverrides = {}) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
   let queryPlans;
+  let queryAudits = [];
   if (dependencyOverrides.readQueries) {
     const { queries, blanksSkipped } = await dependencyOverrides.readQueries(
       config.inputCsv,
@@ -263,6 +343,14 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       queryGenerationReason: "",
       results: null
     }));
+    queryAudits = queries.map((query) => ({
+      shop_type: "",
+      business_qualifier: "unspecified",
+      query,
+      status: "selected",
+      rejection_reason: "",
+      source: "legacy_query_csv"
+    }));
     status.queriesTotal = queries.length;
     status.blankQueriesSkipped = blanksSkipped;
   } else {
@@ -272,10 +360,11 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       dependencyOverrides
     );
     queryPlans = planning.selected;
+    queryAudits = planning.audits || [];
   }
 
-  const records = [];
-  const resolvedStores = new Map();
+  const diagnostics = [];
+  const resolvedCandidates = [];
   status.stage = "discovering_stores";
 
   for (const queryPlan of queryPlans) {
@@ -285,83 +374,85 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       results = queryPlan.results || await dependencies.search(query, config);
       results = results.map((result) => ({
         ...result,
-        shopType: queryPlan.shopType,
-        businessQualifier: queryPlan.businessQualifier || "unspecified",
-        categoryVocabulary: queryPlan.categoryVocabulary || [],
+        shopType: queryPlan.shopType || result.shopType || "",
+        businessQualifier: queryPlan.shopType
+          ? queryPlan.businessQualifier || "unspecified"
+          : result.businessQualifier || "unspecified",
+        categoryVocabulary: queryPlan.categoryVocabulary?.length
+          ? queryPlan.categoryVocabulary
+          : result.categoryVocabulary || [],
         queryScore: queryPlan.queryScore,
         queryGenerationReason: queryPlan.queryGenerationReason
       }));
     } catch (error) {
-      records.push(
-        blankRecord({
-          shop_type: queryPlan.shopType,
-          generated_query: query,
-          query_score: queryPlan.queryScore,
-          query_generation_reason: queryPlan.queryGenerationReason,
-          search_query: query,
-          status: "failed",
-          rejection_reason: "search_failed",
-          error: messageOf(error)
-        })
-      );
+      diagnostics.push({
+        scope: "query",
+        code: "search_failed",
+        shop_type: queryPlan.shopType || "",
+        business_qualifier: queryPlan.businessQualifier || "unspecified",
+        query,
+        details: { errorType: error?.name || "Error" }
+      });
       status.failures += 1;
+      status.queryFailures = (status.queryFailures || 0) + 1;
       status.queriesProcessed += 1;
       log("query_failed", { query, error });
       continue;
     }
 
     if (!results.length) {
-      records.push(
-        blankRecord({
-          shop_type: queryPlan.shopType,
-          generated_query: query,
-          query_score: queryPlan.queryScore,
-          query_generation_reason: queryPlan.queryGenerationReason,
-          search_query: query,
-          status: "rejected",
-          rejection_reason: "no_search_results"
-        })
-      );
+      diagnostics.push({
+        scope: "query",
+        code: "no_search_results",
+        shop_type: queryPlan.shopType || "",
+        business_qualifier: queryPlan.businessQualifier || "unspecified",
+        query,
+        details: {}
+      });
     }
 
     for (const result of results) {
       if (result.rejectionReason) {
-        records.push(
-          recordFromCandidate(result, {
-            status: "rejected",
-            rejection_reason: result.rejectionReason
-          })
-        );
+        diagnostics.push({
+          scope: "occurrence",
+          code: result.rejectionReason,
+          shop_type: result.shopType || "",
+          business_qualifier: result.businessQualifier || "unspecified",
+          query: result.query || query,
+          result_url: result.url || "",
+          details: { rank: result.rank ?? null }
+        });
+        status.occurrenceFailures = (status.occurrenceFailures || 0) + 1;
         continue;
       }
       try {
         const candidate = await dependencies.resolve(result, config);
         status.storesDiscovered += 1;
-        const key = candidate.resolvedDomain;
-        if (!key) throw new Error("Could not determine a storefront domain");
-        if (resolvedStores.has(key)) {
-          resolvedStores.get(key).duplicateCount += 1;
-        } else {
-          candidate.duplicateCount = 0;
-          resolvedStores.set(key, candidate);
+        if (!candidate.stableIdentity && !candidate.resolvedDomain) {
+          throw new Error("Could not determine a storefront domain");
         }
+        resolvedCandidates.push(candidate);
       } catch (error) {
-        records.push(
-          recordFromCandidate(result, {
-            status: "failed",
-            rejection_reason: "resolution_failed",
-            error: messageOf(error)
-          })
-        );
+        diagnostics.push({
+          scope: "occurrence",
+          code: "resolution_failed",
+          shop_type: result.shopType || "",
+          business_qualifier: result.businessQualifier || "unspecified",
+          query: result.query || query,
+          result_url: result.url || "",
+          details: { errorType: error?.name || "Error", rank: result.rank ?? null }
+        });
         status.failures += 1;
+        status.occurrenceFailures = (status.occurrenceFailures || 0) + 1;
       }
     }
     status.queriesProcessed += 1;
   }
 
   status.stage = "extracting_leads";
+  const mergedStores = mergeDiscoveryCandidates(resolvedCandidates);
   const storeRecords = await mapWithConcurrency(
-    [...resolvedStores.values()],
+    mergedStores,
     config.storeConcurrency,
     async (candidate) => {
       try {
@@ -371,19 +462,24 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
         return record;
       } catch (error) {
         status.failures += 1;
+        status.storeProcessingFailures = (status.storeProcessingFailures || 0) + 1;
         return recordFromCandidate(candidate, {
+          lead_score: "",
+          identity_confidence: candidate.identityConfidence,
+          identity_evidence: candidate.identityEvidence || null,
+          discovery_occurrences: candidate.occurrences || [],
+          matched_categories: candidate.categoryIntents || [],
           status: "failed",
           rejection_reason: "processing_failed",
-          error: messageOf(error)
+          error: `Store processing failed (${safeErrorType(error)})`
         });
       }
     }
   );
 
-  records.push(...storeRecords);
   status.stage = "writing_results";
-  status.outputRows = records.length;
-  const summary = records.reduce(
+  status.outputRows = storeRecords.length;
+  const summary = storeRecords.reduce(
     (counts, record) => {
       counts.total += 1;
       if (record.status === "qualified") counts.qualified += 1;
@@ -393,5 +489,12 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
     },
     { total: 0, qualified: 0, rejected: 0, failed: 0 }
   );
-  return { leads: records, summary };
+  return {
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    leads: storeRecords,
+    queryAudits,
+    diagnostics,
+    summary
+  };
 }

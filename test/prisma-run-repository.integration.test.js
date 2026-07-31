@@ -49,6 +49,8 @@ test(
               social_profiles: []
             }
           ],
+          queryAudits: [{ query: "fixture query", status: "selected" }],
+          diagnostics: [{ scope: "query", code: "fixture_warning", details: {} }],
           summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
         },
         status
@@ -57,6 +59,7 @@ test(
       const stored = await repository.getRun(first.id, "integration_user");
       assert.equal(stored.state, "completed");
       assert.equal(stored.resultsAvailable, true);
+      assert.equal(stored.pipelineVersion, 2);
 
       await repository.saveCompletedResults(
         first.id,
@@ -70,6 +73,8 @@ test(
               social_profiles: []
             }
           ],
+          queryAudits: [{ query: "fixture query", status: "selected" }],
+          diagnostics: [{ scope: "query", code: "fixture_warning", details: {} }],
           summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
         },
         status
@@ -84,6 +89,14 @@ test(
       });
       assert.equal(page.totalItems, 1);
       assert.equal(page.items[0].storeName, "Integration Fixture");
+      const audits = await repository.getQueryAuditsPage(first.id, "integration_user", {
+        page: 1, pageSize: 20
+      });
+      const diagnostics = await repository.getDiagnosticsPage(first.id, "integration_user", {
+        page: 1, pageSize: 20
+      });
+      assert.equal(audits.totalItems, 1);
+      assert.equal(diagnostics.totalItems, 1);
     } finally {
       if (createdIds.length) {
         await prisma.run.deleteMany({ where: { id: { in: createdIds } } });

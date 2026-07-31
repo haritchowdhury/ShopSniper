@@ -1,6 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { RunIntentNotFoundError } from "./api-errors.js";
-import { leadRecordToCreate } from "./api-serializer.js";
+import {
+  diagnosticRecordToCreate,
+  leadRecordToCreate,
+  queryAuditRecordToCreate
+} from "./api-serializer.js";
 import { getPrismaClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
 
@@ -14,12 +18,12 @@ function runIntentId() {
   return `intent_${randomBytes(24).toString("base64url")}`;
 }
 
-function leadId(runIdentifier, index) {
+function childId(prefix, runIdentifier, identity) {
   const opaque = createHash("sha256")
-    .update(`${runIdentifier}:${index}`)
+    .update(`${runIdentifier}:${identity}`)
     .digest("base64url")
     .slice(0, 24);
-  return `lead_${opaque}`;
+  return `${prefix}_${opaque}`;
 }
 
 function isUniqueConstraint(error) {
@@ -84,7 +88,9 @@ export class PrismaRunRepository {
       progress: {
         ...createInitialProgress(),
         shopTypesTotal: normalizedShopTypes.length
-      }
+      },
+      pipelineVersion: 2,
+      scoringVersion: 2
     };
   }
 
@@ -237,9 +243,30 @@ export class PrismaRunRepository {
     });
   }
 
-  async saveCompletedResults(runIdentifier, { leads, summary }, status = null) {
+  async saveCompletedResults(runIdentifier, {
+    leads,
+    queryAudits = [],
+    diagnostics = [],
+    summary,
+    pipelineVersion = 2,
+    scoringVersion = 2
+  }, status = null) {
     const leadRows = leads.map((record, index) =>
-      leadRecordToCreate(runIdentifier, leadId(runIdentifier, index), record)
+      leadRecordToCreate(
+        runIdentifier,
+        childId(
+          "lead",
+          runIdentifier,
+          record.identity_evidence?.stableHostname || record.resolved_domain || index
+        ),
+        record
+      )
+    );
+    const auditRows = queryAudits.map((record, index) =>
+      queryAuditRecordToCreate(runIdentifier, childId("audit", runIdentifier, index), index, record)
+    );
+    const diagnosticRows = diagnostics.map((record, index) =>
+      diagnosticRecordToCreate(runIdentifier, childId("diag", runIdentifier, index), index, record)
     );
     const finalProgress = status
       ? { ...progressFromStatus(status), outputRows: leads.length }
@@ -247,8 +274,14 @@ export class PrismaRunRepository {
 
     return this.prisma.$transaction(async (transaction) => {
       await transaction.lead.deleteMany({ where: { runId: runIdentifier } });
+      await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
+      await transaction.runDiagnostic.deleteMany({ where: { runId: runIdentifier } });
       if (leadRows.length) {
         await transaction.lead.createMany({ data: leadRows });
+      }
+      if (auditRows.length) await transaction.queryAudit.createMany({ data: auditRows });
+      if (diagnosticRows.length) {
+        await transaction.runDiagnostic.createMany({ data: diagnosticRows });
       }
       return transaction.run.update({
         where: { id: runIdentifier },
@@ -258,6 +291,8 @@ export class PrismaRunRepository {
           completedAt: new Date(),
           resultsAvailable: true,
           leadSummary: summary,
+          pipelineVersion,
+          scoringVersion,
           ...(finalProgress ? { progress: finalProgress } : {}),
           safeErrorCode: null,
           safeErrorMessage: null
@@ -299,6 +334,26 @@ export class PrismaRunRepository {
         skip,
         take: filters.pageSize
       })
+    ]);
+    return { totalItems, items };
+  }
+
+  async getQueryAuditsPage(runIdentifier, ownerId, { page, pageSize }) {
+    const where = { runId: runIdentifier, run: { ownerId } };
+    const skip = (page - 1) * pageSize;
+    const [totalItems, items] = await this.prisma.$transaction([
+      this.prisma.queryAudit.count({ where }),
+      this.prisma.queryAudit.findMany({ where, orderBy: { sequence: "asc" }, skip, take: pageSize })
+    ]);
+    return { totalItems, items };
+  }
+
+  async getDiagnosticsPage(runIdentifier, ownerId, { page, pageSize }) {
+    const where = { runId: runIdentifier, run: { ownerId } };
+    const skip = (page - 1) * pageSize;
+    const [totalItems, items] = await this.prisma.$transaction([
+      this.prisma.runDiagnostic.count({ where }),
+      this.prisma.runDiagnostic.findMany({ where, orderBy: { sequence: "asc" }, skip, take: pageSize })
     ]);
     return { totalItems, items };
   }

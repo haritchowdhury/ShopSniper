@@ -15,6 +15,9 @@ export function createInitialProgress() {
     storesQualified: 0,
     storesRejected: 0,
     failures: 0,
+    queryFailures: 0,
+    occurrenceFailures: 0,
+    storeProcessingFailures: 0,
     outputRows: 0
   };
 }

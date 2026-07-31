@@ -146,7 +146,8 @@ The private backend contract also provides:
 - `POST /api/run-intents/{intentId}/claim` to atomically and idempotently attach
   that search to the authenticated user and create its queued run;
 - `GET /api/runs?page=1&pageSize=20` to list only the requesting user's runs; and
-- owner-filtered `GET /api/runs/{runId}` and `/results` endpoints.
+- owner-filtered `GET /api/runs/{runId}`, `/results`, `/query-audits`, and
+  `/diagnostics` endpoints.
 
 The browser must never send or choose `X-User-Id`. Only the private Next.js BFF
 derives it from a verified Neon Auth session and forwards it with the service
@@ -162,23 +163,28 @@ For each shop type, the application:
 1. Performs one bounded, web-assisted research and candidate-generation call.
 2. Validates syntax, product intent, category fit, and duplicates in Node.js.
 3. Probes candidates against the first Google Custom Search result page.
-4. Scores relevance, distinct Shopify hosts, evidence, and pagination.
+4. Scores meaningful query coverage and distinct usable Shopify hosts.
 5. Repairs a weak set up to two times and selects approximately ten diverse queries.
 6. Reuses the selected probes, so Google does not fetch those searches twice.
-7. Rejects assets, resolves canonical domains, and deduplicates stores.
+7. Rejects assets, resolves verified identities, and merges all store occurrences
+   without losing category/query provenance.
 8. Validates active Shopify evidence and category relevance.
 9. Discovers contact pages and uses Browserless only as a fetch fallback.
 10. Extracts deterministic contact evidence and optionally normalizes that evidence.
-11. Scores the lead and writes one consolidated record per store.
+11. Applies mandatory store/contactability gates, calculates explainable score v2
+    only for qualified stores, and writes one consolidated record per store.
 
 Individual search results or stores may fail without ending the batch. Qualified,
-rejected, and failed outcomes remain visible in the output for auditing.
+rejected, and store-processing failed outcomes remain visible in the lead output.
+Query and unresolved-occurrence failures are separate diagnostics and do not
+inflate lead counts.
 
 ## Output and retention
 
-The HTTP path stores the complete result set transactionally in PostgreSQL and
-returns snake_case JSON fields matching the legacy lead CSV. Query-planning audits
-remain temporary and are not stored or exposed through the API.
+The HTTP path stores leads, query audits, diagnostics, versions, summary, and the
+publication flag in one PostgreSQL transaction. It returns backward-compatible
+snake_case lead fields plus versioned evidence and score breakdowns. Historical
+unversioned rows remain readable as legacy score-v1 records.
 
 `npm run run:once` still writes `data/generated-queries.csv` and
 `data/leads.csv`. The frontend is responsible for building downloadable CSV from

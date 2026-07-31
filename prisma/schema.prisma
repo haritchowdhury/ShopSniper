@@ -35,7 +35,11 @@ model Run {
   leadSummary         Json?
   safeErrorCode       String?
   safeErrorMessage    String?
+  pipelineVersion     Int?
+  scoringVersion      Int?
   leads               Lead[]
+  queryAudits         QueryAudit[]
+  diagnostics         RunDiagnostic[]
 
   @@index([state])
   @@index([createdAt])
@@ -58,6 +62,7 @@ model Lead {
   runId                    String
   run                      Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
   shopType                 String?
+  businessQualifier        String?
   generatedQuery           String?
   queryScore               Int?
   queryGenerationReason    String?
@@ -79,6 +84,17 @@ model Lead {
   shopifyConfidence        Int?
   relevanceScore           Int?
   leadScore                Int?
+  pipelineVersion          Int?
+  scoringVersion           Int?
+  storeFitState            String?
+  storeFitEvidence         Json?
+  contactabilityTier       String?
+  contactEvidence          Json?
+  identityConfidence       Int?
+  identityEvidence         Json?
+  scoreBreakdown           Json?
+  discoveryOccurrences     Json?
+  matchedCategories        Json?
   status                   LeadStatus
   rejectionReason          String?
   error                    String?
@@ -88,4 +104,37 @@ model Lead {
   @@index([runId, storeName])
   @@index([runId, shopType])
   @@index([runId, googleRank])
+}
+
+model QueryAudit {
+  id                    String   @id
+  runId                 String
+  run                   Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence              Int
+  shopType              String?
+  businessQualifier     String?
+  query                 String?
+  status                String
+  rejectionReason       String?
+  details               Json
+
+  @@unique([runId, sequence])
+  @@index([runId, status])
+}
+
+model RunDiagnostic {
+  id                    String   @id
+  runId                 String
+  run                   Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence              Int
+  scope                 String
+  code                  String
+  shopType              String?
+  businessQualifier     String?
+  query                 String?
+  resultUrl             String?
+  details               Json
+
+  @@unique([runId, sequence])
+  @@index([runId, scope, code])
 }

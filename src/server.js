@@ -1,7 +1,12 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { ApiError, RunIntentNotFoundError, errorPayload } from "./api-errors.js";
-import { serializeLead, serializeRun } from "./api-serializer.js";
+import {
+  serializeDiagnostic,
+  serializeLead,
+  serializeQueryAudit,
+  serializeRun
+} from "./api-serializer.js";
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
@@ -110,6 +115,21 @@ function requestedRunId(pathname, suffix = "") {
     ? /^\/api\/runs\/([^/]+)\/results$/u
     : /^\/api\/runs\/([^/]+)$/u;
   const match = pathname.match(expression);
+  if (!match) return null;
+  let identifier;
+  try {
+    identifier = decodeURIComponent(match[1]);
+  } catch {
+    throw new ApiError(400, "INVALID_RUN_ID", "The run ID is invalid.");
+  }
+  if (!RUN_ID_PATTERN.test(identifier)) {
+    throw new ApiError(400, "INVALID_RUN_ID", "The run ID is invalid.");
+  }
+  return identifier;
+}
+
+function requestedRunCollection(pathname, collection) {
+  const match = pathname.match(new RegExp(`^/api/runs/([^/]+)/${collection}$`, "u"));
   if (!match) return null;
   let identifier;
   try {
@@ -493,6 +513,32 @@ export function createLeadServer(
             totalPages: Math.ceil(page.totalItems / pagination.pageSize)
           },
           items: page.items.map(serializeRun)
+        });
+      }
+
+      for (const collection of ["query-audits", "diagnostics"]) {
+        const identifier = requestedRunCollection(requestUrl.pathname, collection);
+        if (!identifier) continue;
+        const ownerId = trustedUserId(request);
+        const pagination = parseRunListPagination(requestUrl.searchParams);
+        const run = await repository.getRun(identifier, ownerId);
+        if (!run) {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        if (!run.resultsAvailable) {
+          throw new ApiError(409, "RESULTS_UNAVAILABLE", "Results are unavailable for this run.");
+        }
+        const page = collection === "query-audits"
+          ? await repository.getQueryAuditsPage(identifier, ownerId, pagination)
+          : await repository.getDiagnosticsPage(identifier, ownerId, pagination);
+        return sendJson(response, 200, {
+          runId: identifier,
+          pagination: {
+            ...pagination,
+            totalItems: page.totalItems,
+            totalPages: Math.ceil(page.totalItems / pagination.pageSize)
+          },
+          items: page.items.map(collection === "query-audits" ? serializeQueryAudit : serializeDiagnostic)
         });
       }
 

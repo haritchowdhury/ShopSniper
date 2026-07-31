@@ -8,7 +8,7 @@ import {
   normalizePhone,
   validateEmailCandidate
 } from "../src/contact-extractor.js";
-import { scoreLead } from "../src/lead-scorer.js";
+import { scoreLead, scoreLeadV2 } from "../src/lead-scorer.js";
 import {
   AiNormalizationContractError,
   normalizeWithAi,
@@ -281,4 +281,21 @@ test("lead score uses the documented 100-point weighting", () => {
     }),
     100
   );
+});
+
+test("score v2 exposes exact components and gives social profiles no points", () => {
+  const score = scoreLeadV2({
+    relevanceScore: 80,
+    shopifyConfidence: 80,
+    identityConfidence: 70,
+    contactEvidence: { email: true, phone: false, contactPage: true, social: true }
+  });
+  assert.deepEqual(score.components, {
+    identity: 14,
+    shopifyValidation: 20,
+    categoryFit: 24,
+    contactEvidence: 17
+  });
+  assert.equal(score.total, 75);
+  assert.equal(Object.values(score.components).reduce((sum, value) => sum + value, 0), score.total);
 });
