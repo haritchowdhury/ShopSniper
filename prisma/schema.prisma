@@ -23,6 +23,7 @@ enum LeadStatus {
 
 model Run {
   id                  String    @id
+  ownerId             String?
   state               RunState
   stage               String
   normalizedShopTypes Json
@@ -38,6 +39,18 @@ model Run {
 
   @@index([state])
   @@index([createdAt])
+  @@index([ownerId, createdAt])
+}
+
+model RunIntent {
+  id                  String   @id
+  normalizedShopTypes Json
+  createdAt           DateTime @default(now())
+  expiresAt           DateTime
+  claimedByUserId     String?
+  claimedRunId        String?  @unique
+
+  @@index([expiresAt])
 }
 
 model Lead {

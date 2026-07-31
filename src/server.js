@@ -1,6 +1,6 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
-import { ActiveRunError, ApiError, errorPayload } from "./api-errors.js";
+import { ApiError, RunIntentNotFoundError, errorPayload } from "./api-errors.js";
 import { serializeLead, serializeRun } from "./api-serializer.js";
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
@@ -11,6 +11,8 @@ import { readJsonBody } from "./request-json.js";
 import { createInitialStatus } from "./status.js";
 
 export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{16,80}$/u;
+export const RUN_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
+const RUN_LIST_PARAMETERS = new Set(["page", "pageSize"]);
 const RESULT_PARAMETERS = new Set([
   "page",
   "pageSize",
@@ -121,6 +123,42 @@ function requestedRunId(pathname, suffix = "") {
   return identifier;
 }
 
+function requestedIntentId(pathname) {
+  const match = pathname.match(/^\/api\/run-intents\/([^/]+)\/claim$/u);
+  if (!match) return null;
+  let identifier;
+  try {
+    identifier = decodeURIComponent(match[1]);
+  } catch {
+    throw new ApiError(400, "INVALID_RUN_INTENT_ID", "The run intent ID is invalid.");
+  }
+  if (!RUN_INTENT_ID_PATTERN.test(identifier)) {
+    throw new ApiError(400, "INVALID_RUN_INTENT_ID", "The run intent ID is invalid.");
+  }
+  return identifier;
+}
+
+function parseRunListPagination(searchParams) {
+  const unknown = [...searchParams.keys()].filter(
+    (name) => !RUN_LIST_PARAMETERS.has(name)
+  );
+  const duplicate = [...RUN_LIST_PARAMETERS].filter(
+    (name) => searchParams.getAll(name).length > 1
+  );
+  const page = parsePositiveInteger(searchParams.get("page"), 1);
+  const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 20, {
+    max: 100
+  });
+  if (unknown.length || duplicate.length || page == null || pageSize == null) {
+    throw new ApiError(
+      400,
+      "INVALID_QUERY_PARAMETERS",
+      "One or more run-list query parameters are invalid."
+    );
+  }
+  return { page, pageSize };
+}
+
 function validateRunRequest(payload, maxShopTypes) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new ApiError(
@@ -153,6 +191,44 @@ function validateRunRequest(payload, maxShopTypes) {
 function hasAccess(request, token) {
   if (!token) return true;
   return request.headers.authorization === `Bearer ${token}`;
+}
+
+function trustedUserId(request) {
+  const distinct = request.headersDistinct?.["x-user-id"];
+  const values = Array.isArray(distinct)
+    ? distinct
+    : request.headers["x-user-id"] == null
+      ? []
+      : Array.isArray(request.headers["x-user-id"])
+        ? request.headers["x-user-id"]
+        : [request.headers["x-user-id"]];
+  if (values.length !== 1) {
+    throw new ApiError(
+      401,
+      "USER_CONTEXT_REQUIRED",
+      "Authenticated user context is required."
+    );
+  }
+  const value = values[0].trim();
+  if (!value || value.length > 255 || /[,\r\n\0]/u.test(value)) {
+    throw new ApiError(
+      401,
+      "USER_CONTEXT_REQUIRED",
+      "Authenticated user context is required."
+    );
+  }
+  return value;
+}
+
+function startRunPayload(run) {
+  const statusUrl = `/api/runs/${encodeURIComponent(run.id)}`;
+  return {
+    runId: run.id,
+    state: "queued",
+    statusUrl,
+    resultsUrl: `${statusUrl}/results`,
+    createdAt: safeDate(run.createdAt)
+  };
 }
 
 function createProgressTracker(repository, identifier, status) {
@@ -205,7 +281,6 @@ async function executeRun({
   const tracker = createProgressTracker(repository, identifier, baseStatus);
 
   try {
-    await repository.markRunning(identifier);
     const result = await pipeline(config, tracker.status, { categories });
     tracker.status.stage = "writing_results";
     tracker.status.outputRows = result.leads.length;
@@ -250,6 +325,73 @@ export function createLeadServer(
   } = {}
 ) {
   const acceptedRunTimes = [];
+  let drainScheduled = false;
+  let draining = false;
+  let drainRequested = false;
+
+  function checkRunConfiguration() {
+    try {
+      assertRunConfig(config);
+    } catch {
+      throw new ApiError(
+        503,
+        "BACKEND_CONFIGURATION_UNAVAILABLE",
+        "The backend is not configured to start runs."
+      );
+    }
+  }
+
+  function checkRunRateLimit() {
+    const cutoff = now() - (config.runRateLimitWindowMs || 60000);
+    while (acceptedRunTimes.length && acceptedRunTimes[0] <= cutoff) {
+      acceptedRunTimes.shift();
+    }
+    if (acceptedRunTimes.length >= (config.runRateLimitMax || 5)) {
+      throw new ApiError(
+        429,
+        "RUN_RATE_LIMITED",
+        "Too many runs were started recently. Please try again later."
+      );
+    }
+  }
+
+  async function drainQueue() {
+    if (draining) return;
+    draining = true;
+    try {
+      do {
+        drainRequested = false;
+        let run;
+        while ((run = await repository.claimNextQueuedRun())) {
+          const categories = Array.isArray(run.normalizedShopTypes)
+            ? run.normalizedShopTypes
+            : [];
+          await executeRun({
+            config,
+            identifier: run.id,
+            categories,
+            pipeline,
+            repository,
+            logger
+          });
+        }
+      } while (drainRequested);
+    } catch (error) {
+      logger("queue_drain_failed", { error });
+    } finally {
+      draining = false;
+    }
+  }
+
+  function queueDrain() {
+    drainRequested = true;
+    if (draining || drainScheduled) return;
+    drainScheduled = true;
+    schedule(() => {
+      drainScheduled = false;
+      void drainQueue();
+    });
+  }
 
   async function handle(request, response) {
     const requestUrl = new URL(request.url || "/", "http://localhost");
@@ -276,78 +418,89 @@ export function createLeadServer(
       }
     }
 
-    if (request.method === "POST" && requestUrl.pathname === "/api/runs") {
+    if (request.method === "POST" && requestUrl.pathname === "/api/run-intents") {
       const payload = await readJsonBody(request);
       const categories = validateRunRequest(payload, config.maxShopTypes || 100);
-      try {
-        assertRunConfig(config);
-      } catch {
-        throw new ApiError(
-          503,
-          "BACKEND_CONFIGURATION_UNAVAILABLE",
-          "The backend is not configured to start runs."
-        );
-      }
+      const expiresAt = new Date(now() + 60 * 60 * 1000);
+      const intent = await repository.createRunIntent(categories, expiresAt);
+      void repository.deleteExpiredRunIntents?.(new Date(now())).catch(() => {});
+      return sendJson(response, 201, {
+        intentId: intent.id,
+        expiresAt: safeDate(intent.expiresAt)
+      });
+    }
 
-      const cutoff = now() - (config.runRateLimitWindowMs || 60000);
-      while (acceptedRunTimes.length && acceptedRunTimes[0] <= cutoff) {
-        acceptedRunTimes.shift();
-      }
-      if (acceptedRunTimes.length >= (config.runRateLimitMax || 5)) {
-        throw new ApiError(
-          429,
-          "RUN_RATE_LIMITED",
-          "Too many runs were started recently. Please try again later."
-        );
-      }
-
-      let run;
-      try {
-        run = await repository.createRun(categories);
-      } catch (error) {
-        if (error instanceof ActiveRunError) {
-          throw new ApiError(
-            409,
-            "RUN_ALREADY_ACTIVE",
-            "A lead-generation run is already active.",
-            error.runId ? { runId: error.runId } : undefined
+    if (request.method === "POST") {
+      const intentIdentifier = requestedIntentId(requestUrl.pathname);
+      if (intentIdentifier) {
+        const ownerId = trustedUserId(request);
+        checkRunConfiguration();
+        let claimed;
+        try {
+          claimed = await repository.claimRunIntent(
+            intentIdentifier,
+            ownerId,
+            new Date(now())
           );
+        } catch (error) {
+          if (error instanceof RunIntentNotFoundError) {
+            throw new ApiError(
+              404,
+              "RUN_INTENT_NOT_FOUND",
+              "The pending search was not found or has expired."
+            );
+          }
+          throw error;
         }
-        throw error;
+        if (claimed.created) acceptedRunTimes.push(now());
+        queueDrain();
+        const payload = startRunPayload(claimed.run);
+        return sendJson(response, claimed.created ? 201 : 200, payload, {
+          location: payload.statusUrl
+        });
       }
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/runs") {
+      const ownerId = trustedUserId(request);
+      const payload = await readJsonBody(request);
+      const categories = validateRunRequest(payload, config.maxShopTypes || 100);
+      checkRunConfiguration();
+      checkRunRateLimit();
+      const run = await repository.createRun(ownerId, categories);
       acceptedRunTimes.push(now());
 
-      const statusUrl = `/api/runs/${encodeURIComponent(run.id)}`;
+      const startPayload = startRunPayload(run);
       sendJson(
         response,
         202,
-        {
-          runId: run.id,
-          state: "queued",
-          statusUrl,
-          resultsUrl: `${statusUrl}/results`,
-          createdAt: safeDate(run.createdAt)
-        },
-        { location: statusUrl }
+        startPayload,
+        { location: startPayload.statusUrl }
       );
-      schedule(() => {
-        void executeRun({
-          config,
-          identifier: run.id,
-          categories,
-          pipeline,
-          repository,
-          logger
-        });
-      });
+      queueDrain();
       return;
     }
 
     if (request.method === "GET") {
+      if (requestUrl.pathname === "/api/runs") {
+        const ownerId = trustedUserId(request);
+        const pagination = parseRunListPagination(requestUrl.searchParams);
+        const page = await repository.listRuns(ownerId, pagination);
+        return sendJson(response, 200, {
+          pagination: {
+            ...pagination,
+            totalItems: page.totalItems,
+            totalPages: Math.ceil(page.totalItems / pagination.pageSize)
+          },
+          items: page.items.map(serializeRun)
+        });
+      }
+
       const resultsIdentifier = requestedRunId(requestUrl.pathname, "results");
       if (resultsIdentifier) {
+        const ownerId = trustedUserId(request);
         const filters = parseResultFilters(requestUrl.searchParams);
-        const run = await repository.getRun(resultsIdentifier);
+        const run = await repository.getRun(resultsIdentifier, ownerId);
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
@@ -365,7 +518,11 @@ export function createLeadServer(
             "Results are unavailable for this run."
           );
         }
-        const page = await repository.getResultsPage(resultsIdentifier, filters);
+        const page = await repository.getResultsPage(
+          resultsIdentifier,
+          ownerId,
+          filters
+        );
         const summary = run.leadSummary || {
           total: 0,
           qualified: 0,
@@ -387,7 +544,8 @@ export function createLeadServer(
 
       const statusIdentifier = requestedRunId(requestUrl.pathname);
       if (statusIdentifier) {
-        const run = await repository.getRun(statusIdentifier);
+        const ownerId = trustedUserId(request);
+        const run = await repository.getRun(statusIdentifier, ownerId);
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
@@ -398,7 +556,7 @@ export function createLeadServer(
     throw new ApiError(404, "NOT_FOUND", "The requested endpoint was not found.");
   }
 
-  return http.createServer((request, response) => {
+  const server = http.createServer((request, response) => {
     void handle(request, response).catch((error) => {
       if (!(error instanceof ApiError)) {
         logger("api_request_failed", {
@@ -415,9 +573,15 @@ export function createLeadServer(
       }
     });
   });
+
+  queueDrain();
+  return server;
 }
 
 export async function startServer(config = loadConfig()) {
+  if (process.env.NODE_ENV === "production" && !config.backendApiToken) {
+    throw new Error("BACKEND_API_TOKEN is required in production");
+  }
   const repository = createPrismaRunRepository();
   try {
     const recovered = await repository.recoverInterruptedRuns();

@@ -1,5 +1,10 @@
 # Frontend Backend Quick Start
 
+> Authentication update: the current owner-scoped contract is documented in
+> `AUTH_AND_RUN_OWNERSHIP_IMPLEMENTATION_PLAN.md` and
+> `../frontend/README.md`. The older unauthenticated examples below are retained
+> as historical v0.1 reference and must not be exposed publicly.
+
 This backend implements the JSON contract in
 `BACKEND_FRONTEND_JSON_HANDOFF_SPEC.md`. It accepts manual categories, persists
 runs and leads in Neon PostgreSQL, and does not use CSV files in the HTTP path.
@@ -36,11 +41,14 @@ For frontend work without Google/OpenAI calls, point `DATABASE_URL` at a
 non-production migrated database and run:
 
 ```bash
-FRONTEND_SEED_CONFIRM=non-production npm run seed:frontend
+FRONTEND_SEED_CONFIRM=non-production \
+FRONTEND_SEED_OWNER_ID=the-neon-auth-user-id \
+npm run seed:frontend
 ```
 
 The command prints a completed fixture `runId` containing qualified, rejected,
-and failed rows. The guard refuses to run in `NODE_ENV=production`.
+and failed rows owned by that exact auth user. The guard refuses to run in
+`NODE_ENV=production`.
 
 ## Next.js server-only environment
 

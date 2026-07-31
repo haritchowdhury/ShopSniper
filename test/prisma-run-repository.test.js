@@ -26,7 +26,7 @@ for (const [sortBy, modelField] of [
   test(`repository maps the ${sortBy} sort to a fixed Prisma field`, async () => {
     const fake = fakePrisma();
     const repository = new PrismaRunRepository(fake.prisma);
-    await repository.getResultsPage("run_abcdefghijklmnop", {
+    await repository.getResultsPage("run_abcdefghijklmnop", "user_alice", {
       page: 2,
       pageSize: 25,
       status: "qualified",
@@ -37,6 +37,7 @@ for (const [sortBy, modelField] of [
 
     const query = fake.arguments();
     assert.equal(query.where.runId, "run_abcdefghijklmnop");
+    assert.equal(query.where.run.ownerId, "user_alice");
     assert.equal(query.where.status, "qualified");
     assert.equal(query.where.OR.length, 5);
     assert.deepEqual(query.orderBy[0], {
@@ -51,7 +52,7 @@ for (const [sortBy, modelField] of [
 test("repository default ordering is deterministic with null scores last", async () => {
   const fake = fakePrisma();
   const repository = new PrismaRunRepository(fake.prisma);
-  await repository.getResultsPage("run_abcdefghijklmnop", {
+  await repository.getResultsPage("run_abcdefghijklmnop", "user_alice", {
     page: 1,
     pageSize: 100,
     status: null,
@@ -64,4 +65,21 @@ test("repository default ordering is deterministic with null scores last", async
     { storeName: { sort: "asc", nulls: "last" } },
     { id: "asc" }
   ]);
+});
+
+test("restart recovery fails only running work and preserves queued runs", async () => {
+  let updateArguments;
+  const repository = new PrismaRunRepository({
+    run: {
+      updateMany: async (arguments_) => {
+        updateArguments = arguments_;
+        return { count: 1 };
+      }
+    }
+  });
+
+  await repository.recoverInterruptedRuns();
+  assert.deepEqual(updateArguments.where, { state: "running" });
+  assert.equal(updateArguments.data.state, "failed");
+  assert.equal(updateArguments.data.safeErrorCode, "RUN_INTERRUPTED");
 });

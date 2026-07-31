@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { ActiveRunError } from "./api-errors.js";
+import { RunIntentNotFoundError } from "./api-errors.js";
 import { leadRecordToCreate } from "./api-serializer.js";
 import { getPrismaClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
@@ -8,6 +8,10 @@ const ACTIVE_STATES = ["queued", "running"];
 
 function runId() {
   return `run_${randomBytes(18).toString("base64url")}`;
+}
+
+function runIntentId() {
+  return `intent_${randomBytes(24).toString("base64url")}`;
 }
 
 function leadId(runIdentifier, index) {
@@ -22,8 +26,8 @@ function isUniqueConstraint(error) {
   return error?.code === "P2002" || error?.cause?.code === "23505";
 }
 
-function resultWhere(runIdentifier, filters) {
-  const where = { runId: runIdentifier };
+function resultWhere(runIdentifier, ownerId, filters) {
+  const where = { runId: runIdentifier, run: { ownerId } };
   if (filters.status) where.status = filters.status;
   if (filters.search) {
     where.OR = [
@@ -70,36 +74,155 @@ export class PrismaRunRepository {
     await this.prisma.run.count();
   }
 
-  async createRun(normalizedShopTypes) {
-    try {
-      return await this.prisma.run.create({
+  runCreateData(ownerId, normalizedShopTypes, identifier = runId()) {
+    return {
+      id: identifier,
+      ownerId,
+      state: "queued",
+      stage: "queued",
+      normalizedShopTypes,
+      progress: {
+        ...createInitialProgress(),
+        shopTypesTotal: normalizedShopTypes.length
+      }
+    };
+  }
+
+  async createRun(ownerId, normalizedShopTypes) {
+    return this.prisma.run.create({
+      data: this.runCreateData(ownerId, normalizedShopTypes)
+    });
+  }
+
+  async createRunIntent(normalizedShopTypes, expiresAt) {
+    return this.prisma.runIntent.create({
+      data: {
+        id: runIntentId(),
+        normalizedShopTypes,
+        expiresAt
+      }
+    });
+  }
+
+  async claimRunIntent(intentIdentifier, ownerId, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      const intent = await transaction.runIntent.findUnique({
+        where: { id: intentIdentifier }
+      });
+      if (!intent || intent.expiresAt <= now) {
+        throw new RunIntentNotFoundError();
+      }
+      if (intent.claimedRunId) {
+        if (intent.claimedByUserId !== ownerId) {
+          throw new RunIntentNotFoundError();
+        }
+        const existingRun = await transaction.run.findFirst({
+          where: { id: intent.claimedRunId, ownerId }
+        });
+        if (!existingRun) throw new RunIntentNotFoundError();
+        return { run: existingRun, created: false };
+      }
+
+      const identifier = runId();
+      const claimed = await transaction.runIntent.updateMany({
+        where: {
+          id: intentIdentifier,
+          claimedRunId: null,
+          claimedByUserId: null,
+          expiresAt: { gt: now }
+        },
         data: {
-          id: runId(),
-          state: "queued",
-          stage: "queued",
-          normalizedShopTypes,
-          progress: {
-            ...createInitialProgress(),
-            shopTypesTotal: normalizedShopTypes.length
-          }
+          claimedByUserId: ownerId,
+          claimedRunId: identifier
         }
       });
+      if (claimed.count !== 1) {
+        const concurrent = await transaction.runIntent.findUnique({
+          where: { id: intentIdentifier }
+        });
+        if (
+          concurrent?.claimedByUserId === ownerId &&
+          concurrent.claimedRunId
+        ) {
+          const existingRun = await transaction.run.findFirst({
+            where: { id: concurrent.claimedRunId, ownerId }
+          });
+          if (existingRun) return { run: existingRun, created: false };
+        }
+        throw new RunIntentNotFoundError();
+      }
+
+      const run = await transaction.run.create({
+        data: this.runCreateData(
+          ownerId,
+          intent.normalizedShopTypes,
+          identifier
+        )
+      });
+      return { run, created: true };
+    });
+  }
+
+  async claimNextQueuedRun() {
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        const next = await transaction.run.findFirst({
+          where: { state: "queued" },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }]
+        });
+        if (!next) return null;
+        const claimed = await transaction.run.updateMany({
+          where: { id: next.id, state: "queued" },
+          data: {
+            state: "running",
+            stage: "reading_categories",
+            startedAt: new Date(),
+            safeErrorCode: null,
+            safeErrorMessage: null
+          }
+        });
+        if (claimed.count !== 1) return null;
+        return transaction.run.findUnique({ where: { id: next.id } });
+      });
     } catch (error) {
-      if (!isUniqueConstraint(error)) throw error;
-      const active = await this.getActiveRun().catch(() => null);
-      throw new ActiveRunError(active?.id || null);
+      if (isUniqueConstraint(error)) return null;
+      throw error;
     }
   }
 
-  async markRunning(runIdentifier) {
-    return this.prisma.run.update({
-      where: { id: runIdentifier },
-      data: {
-        state: "running",
-        stage: "reading_categories",
-        startedAt: new Date(),
-        safeErrorCode: null,
-        safeErrorMessage: null
+  async listRuns(ownerId, { page, pageSize }) {
+    const where = { ownerId };
+    const skip = (page - 1) * pageSize;
+    const [totalItems, items] = await this.prisma.$transaction([
+      this.prisma.run.count({ where }),
+      this.prisma.run.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip,
+        take: pageSize
+      })
+    ]);
+    return { totalItems, items };
+  }
+
+  async getRun(runIdentifier, ownerId) {
+    return this.prisma.run.findFirst({
+      where: { id: runIdentifier, ownerId }
+    });
+  }
+
+  async getActiveRunForOwner(ownerId) {
+    return this.prisma.run.findFirst({
+      where: { ownerId, state: { in: ACTIVE_STATES } },
+      orderBy: { createdAt: "asc" }
+    });
+  }
+
+  async deleteExpiredRunIntents(now = new Date()) {
+    return this.prisma.runIntent.deleteMany({
+      where: {
+        expiresAt: { lte: now },
+        claimedRunId: null
       }
     });
   }
@@ -165,19 +288,8 @@ export class PrismaRunRepository {
     });
   }
 
-  async getRun(runIdentifier) {
-    return this.prisma.run.findUnique({ where: { id: runIdentifier } });
-  }
-
-  async getActiveRun() {
-    return this.prisma.run.findFirst({
-      where: { state: { in: ACTIVE_STATES } },
-      orderBy: { createdAt: "asc" }
-    });
-  }
-
-  async getResultsPage(runIdentifier, filters) {
-    const where = resultWhere(runIdentifier, filters);
+  async getResultsPage(runIdentifier, ownerId, filters) {
+    const where = resultWhere(runIdentifier, ownerId, filters);
     const skip = (filters.page - 1) * filters.pageSize;
     const [totalItems, items] = await this.prisma.$transaction([
       this.prisma.lead.count({ where }),
@@ -193,7 +305,7 @@ export class PrismaRunRepository {
 
   async recoverInterruptedRuns() {
     return this.prisma.run.updateMany({
-      where: { state: { in: ACTIVE_STATES } },
+      where: { state: "running" },
       data: {
         state: "failed",
         stage: "failed",

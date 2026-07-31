@@ -1,5 +1,10 @@
 # Backend-to-Frontend JSON Handoff Specification
 
+> Superseded for authentication, ownership, and queue semantics by
+> `AUTH_AND_RUN_OWNERSHIP_IMPLEMENTATION_PLAN.md`. Runs are now owner-scoped,
+> multiple rows may be queued, and only the Next.js BFF may forward a trusted
+> `X-User-Id`.
+
 ## Purpose
 
 This document defines the exact backend contract required before building the

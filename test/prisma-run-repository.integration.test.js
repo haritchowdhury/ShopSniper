@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActiveRunError } from "../src/api-errors.js";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 import { createInitialStatus } from "../src/status.js";
@@ -19,16 +18,14 @@ test(
 
     try {
       await repository.recoverInterruptedRuns();
-      const first = await repository.createRun([
+      const first = await repository.createRun("integration_user", [
         { originalShopType: "clothing", shopType: "clothing" }
       ]);
       createdIds.push(first.id);
-      await assert.rejects(
-        repository.createRun([
-          { originalShopType: "eyewear", shopType: "eyewear" }
-        ]),
-        ActiveRunError
-      );
+      const second = await repository.createRun("integration_user", [
+        { originalShopType: "eyewear", shopType: "eyewear" }
+      ]);
+      createdIds.push(second.id);
 
       const status = {
         ...createInitialStatus(),
@@ -37,7 +34,8 @@ test(
         queriesProcessed: 1,
         outputRows: 1
       };
-      await repository.markRunning(first.id);
+      const claimed = await repository.claimNextQueuedRun();
+      assert.equal(claimed.id, first.id);
       await repository.updateProgress(first.id, status);
       await repository.saveCompletedResults(
         first.id,
@@ -56,7 +54,7 @@ test(
         status
       );
 
-      const stored = await repository.getRun(first.id);
+      const stored = await repository.getRun(first.id, "integration_user");
       assert.equal(stored.state, "completed");
       assert.equal(stored.resultsAvailable, true);
 
@@ -76,7 +74,7 @@ test(
         },
         status
       );
-      const page = await repository.getResultsPage(first.id, {
+      const page = await repository.getResultsPage(first.id, "integration_user", {
         page: 1,
         pageSize: 100,
         status: "qualified",

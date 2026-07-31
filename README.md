@@ -32,6 +32,7 @@ DATABASE_URL=your_pooled_neon_runtime_url
 GOOGLE_API_KEY=your_new_key
 GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
 OPENAI_API_KEY=your_openai_key
+BACKEND_API_TOKEN=one-long-random-service-token
 ```
 
 `prisma.config.ts` uses `DATABASE_URL` for Prisma CLI commands as well as
@@ -78,8 +79,9 @@ silently add one model call per store. Set `ENABLE_AI_NORMALIZATION=true` only w
 that additional cost is intentional.
 
 The service binds to `127.0.0.1` by default. Set `HOST` deliberately if another
-machine must reach it; add authentication or keep it behind a private trusted
-network before exposing it.
+machine must reach it. `BACKEND_API_TOKEN` is mandatory when `NODE_ENV=production`;
+keep the service behind a private network and let only the Next.js BFF send this
+token.
 
 ## HTTP input
 
@@ -123,16 +125,32 @@ In another terminal:
 ```bash
 curl http://127.0.0.1:3000/api/health
 curl -X POST http://127.0.0.1:3000/api/runs \
+  -H 'Authorization: Bearer your-service-token' \
+  -H 'X-User-Id: user-id-derived-by-the-frontend' \
   -H 'Content-Type: application/json' \
   -d '{"shopTypes":["clothing","eyewear"]}'
-curl http://127.0.0.1:3000/api/runs/{runId}
-curl 'http://127.0.0.1:3000/api/runs/{runId}/results?page=1&pageSize=100'
+curl -H 'Authorization: Bearer your-service-token' \
+  -H 'X-User-Id: user-id-derived-by-the-frontend' \
+  http://127.0.0.1:3000/api/runs/{runId}
 ```
 
 `POST /api/runs` returns `202 Accepted` and a durable `runId` before the scraper
-work begins. Only one queued/running job is allowed across backend processes.
-Status and completed results are read by `runId`; completed result rows have no
-application expiry.
+work begins. Multiple owned runs may wait in PostgreSQL, while a partial unique
+index and atomic claim permit only one `running` row at a time. Status, result,
+and list reads require the same trusted `X-User-Id`; foreign and missing run IDs
+both return `404`. Completed result rows have no application expiry.
+
+The private backend contract also provides:
+
+- `POST /api/run-intents` to validate and store an anonymous search for one hour;
+- `POST /api/run-intents/{intentId}/claim` to atomically and idempotently attach
+  that search to the authenticated user and create its queued run;
+- `GET /api/runs?page=1&pageSize=20` to list only the requesting user's runs; and
+- owner-filtered `GET /api/runs/{runId}` and `/results` endpoints.
+
+The browser must never send or choose `X-User-Id`. Only the private Next.js BFF
+derives it from a verified Neon Auth session and forwards it with the service
+token.
 
 If required Google or OpenAI configuration is missing, `POST /run` returns `503`
 and names the missing variables.

@@ -8,11 +8,10 @@ export class ApiError extends Error {
   }
 }
 
-export class ActiveRunError extends Error {
-  constructor(runId = null) {
-    super("A run is already active");
-    this.name = "ActiveRunError";
-    this.runId = runId;
+export class RunIntentNotFoundError extends Error {
+  constructor() {
+    super("Run intent not found");
+    this.name = "RunIntentNotFoundError";
   }
 }
 

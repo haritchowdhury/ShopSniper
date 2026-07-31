@@ -3,6 +3,7 @@ import { createPrismaRunRepository } from "./prisma-run-repository.js";
 import { createInitialStatus } from "./status.js";
 
 const config = loadConfig();
+const ownerId = process.env.FRONTEND_SEED_OWNER_ID?.trim();
 
 if (
   process.env.NODE_ENV === "production" ||
@@ -12,13 +13,18 @@ if (
     "Refusing to seed. Set FRONTEND_SEED_CONFIRM=non-production and use a non-production DATABASE_URL."
   );
 }
+if (!ownerId || ownerId.length > 255) {
+  throw new Error(
+    "Set FRONTEND_SEED_OWNER_ID to the Neon Auth user ID that should own the fixture."
+  );
+}
 
 const repository = createPrismaRunRepository();
 const categories = [
   { originalShopType: "clothing", shopType: "clothing" },
   { originalShopType: "eyewear", shopType: "eyewear" }
 ];
-const run = await repository.createRun(categories);
+const run = await repository.createRun(ownerId, categories);
 const status = {
   ...createInitialStatus(),
   state: "running",
@@ -35,7 +41,7 @@ const status = {
   outputRows: 3
 };
 
-await repository.markRunning(run.id);
+await repository.claimNextQueuedRun();
 await repository.saveCompletedResults(
   run.id,
   {
