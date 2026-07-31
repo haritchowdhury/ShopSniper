@@ -1,0 +1,14 @@
+{
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"store_url\":\"https://fictional-optics.dev/\",\"store_name\":\"Fictional Optics\",\"email\":\"\",\"phone\":\"\",\"contact_url\":\"\",\"social_profiles\":[],\"additional_information\":\"\",\"unexpected\":true}",
+        "refusal": null
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": "Fixture refusal"
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

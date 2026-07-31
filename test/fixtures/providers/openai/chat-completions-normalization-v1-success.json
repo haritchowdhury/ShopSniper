@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl_fixture_success",
+  "object": "chat.completion",
+  "created": 0,
+  "model": "fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"store_url\":\"https://fictional-optics.dev/\",\"store_name\":\"Fictional Optics\",\"email\":\"hello@fictional-optics.dev\",\"phone\":\"\",\"contact_url\":\"https://fictional-optics.dev/pages/contact-us\",\"social_profiles\":[\"https://instagram.com/fictionaloptics\"],\"additional_information\":\"Fixture-only normalized evidence\"}",
+        "refusal": null,
+        "annotations": []
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1,
+    "completion_tokens": 1,
+    "total_tokens": 2
+  },
+  "fixture_extension": "ignored-by-v1-adapter"
+}

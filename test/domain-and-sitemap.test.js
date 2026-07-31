@@ -34,8 +34,53 @@ test("myshopify result resolves to a custom redirect domain", async () => {
   assert.equal(candidate.myshopifyDomain, "sample.myshopify.com");
   assert.equal(candidate.resolvedDomain, "shop.example");
   assert.equal(candidate.identityConfidence, 100);
+  assert.equal(candidate.stableIdentity, "sample.myshopify.com");
+  assert.equal(candidate.identityEvidence.canonical.trusted, true);
   assert(candidate.allowedHostnames.includes("sample.myshopify.com"));
   assert(candidate.allowedHostnames.includes("shop.example"));
+});
+
+test("cross-domain canonical remains evidence-only and outside fetch scope", async () => {
+  const candidate = await resolveStoreIdentity(
+    { url: "https://fixture-store.myshopify.com/products/item" },
+    { requestTimeoutMs: 1000 },
+    {
+      request: async () => ({
+        body: '<link rel="canonical" href="https://unrelated-canonical.dev/products/item">',
+        finalUrl: "https://fixture-store.myshopify.com/products/item",
+        status: 200,
+        contentType: "text/html"
+      })
+    }
+  );
+  assert.equal(candidate.resolvedDomain, "fixture-store.myshopify.com");
+  assert.equal(candidate.stableIdentity, "fixture-store.myshopify.com");
+  assert.equal(candidate.identityConfidence, 70);
+  assert.deepEqual(candidate.allowedHostnames, ["fixture-store.myshopify.com"]);
+  assert.equal(candidate.identityEvidence.canonical.hostname, "unrelated-canonical.dev");
+  assert.equal(candidate.identityEvidence.canonical.trusted, false);
+  assert.equal(
+    candidate.identityEvidence.canonical.reason,
+    "cross_domain_canonical_unverified"
+  );
+});
+
+test("same-host canonical remains usable without widening fetch scope", async () => {
+  const candidate = await resolveStoreIdentity(
+    { url: "https://fictional-shop.dev/products/item" },
+    { requestTimeoutMs: 1000 },
+    {
+      request: async () => ({
+        body: '<link rel="canonical" href="https://fictional-shop.dev/products/canonical-item">',
+        finalUrl: "https://fictional-shop.dev/products/item",
+        status: 200,
+        contentType: "text/html"
+      })
+    }
+  );
+  assert.equal(candidate.resolvedDomain, "fictional-shop.dev");
+  assert.deepEqual(candidate.allowedHostnames, ["fictional-shop.dev"]);
+  assert.equal(candidate.identityEvidence.canonical.trusted, true);
 });
 
 test("sitemap parser supports indexes and direct urlsets", () => {
@@ -60,4 +105,22 @@ test("contact links stay on verified hosts", () => {
     ["shop.example"]
   );
   assert.deepEqual(links, ["https://shop.example/pages/contact"]);
+});
+
+test("contact discovery uses the strict route classifier", () => {
+  const links = contactLinksFromHtml(
+    `
+      <a href="/products/customer-support-widget">Product</a>
+      <a href="/collections/contact-lenses">Collection</a>
+      <a href="/cdn/theme-support.js">Asset</a>
+      <a href="/pages/about-us">About</a>
+      <a href="/fr/pages/contact-us">Contact</a>
+    `,
+    "https://shop.example/",
+    ["shop.example"]
+  );
+  assert.deepEqual(links, [
+    "https://shop.example/pages/about-us",
+    "https://shop.example/fr/pages/contact-us"
+  ]);
 });

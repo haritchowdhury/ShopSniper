@@ -50,7 +50,7 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
     }),
     discoverPages: async () => ["https://example.com/pages/contact"],
     fetchPage: async () => ({
-      body: '<a href="mailto:hello@example.com">Email</a>',
+      body: '<a href="mailto:hello@fictional-pipeline.dev">Email</a>',
       finalUrl: "https://example.com/pages/contact",
       contentType: "text/html"
     }),
@@ -65,7 +65,7 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
     rejected: 0,
     failed: 0
   });
-  assert.equal(records[0].email, "hello@example.com");
+  assert.equal(records[0].email, "hello@fictional-pipeline.dev");
   assert.equal(records[0].status, "qualified");
   assert.match(records[0].additional_information, /duplicate_results=1/);
   assert.equal(currentStatus.storesDiscovered, 2);

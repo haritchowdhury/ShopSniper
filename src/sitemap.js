@@ -1,9 +1,7 @@
 import { requestText } from "./http-client.js";
 import { decodeHtml, extractAttributeUrls } from "./html.js";
 import { normalizeHostname, parseHttpUrl, sameAllowedHostname } from "./url-security.js";
-
-const CONTACT_PATH =
-  /(?:^|[/_-])(?:contact|about|support|help|customer[-_]?service|company|team|location|locations|find[-_]?us|our[-_]?story|legal|privacy)(?:[/_.-]|$)/i;
+import { classifyStorePageUrl } from "./contact-evidence.js";
 
 export function parseSitemap(xml) {
   const type = /<\s*(?:\w+:)?sitemapindex\b/i.test(xml)
@@ -32,7 +30,7 @@ function acceptedPageUrl(value, baseUrl, allowedHostnames) {
 export function contactLinksFromHtml(html, baseUrl, allowedHostnames) {
   return extractAttributeUrls(html)
     .map((value) => acceptedPageUrl(value, baseUrl, allowedHostnames))
-    .filter((value) => value && CONTACT_PATH.test(new URL(value).pathname));
+    .filter((value) => value && classifyStorePageUrl(value, { allowedHostnames }).accepted);
 }
 
 export async function discoverStorePages(
@@ -86,7 +84,11 @@ export async function discoverStorePages(
       pages.push(
         ...pageUrls
           .map((value) => acceptedPageUrl(value, rootResponse.finalUrl, candidate.allowedHostnames))
-          .filter((value) => value && CONTACT_PATH.test(new URL(value).pathname))
+          .filter(
+            (value) => value && classifyStorePageUrl(value, {
+              allowedHostnames: candidate.allowedHostnames
+            }).accepted
+          )
       );
     }
   } catch {
