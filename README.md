@@ -134,11 +134,19 @@ curl -H 'Authorization: Bearer your-service-token' \
   http://127.0.0.1:3000/api/runs/{runId}
 ```
 
-`POST /api/runs` returns `202 Accepted` and a durable `runId` before the scraper
-work begins. Multiple owned runs may wait in PostgreSQL, while a partial unique
-index and atomic claim permit only one `running` row at a time. Status, result,
-and list reads require the same trusted `X-User-Id`; foreign and missing run IDs
-both return `404`. Completed result rows have no application expiry.
+`POST /api/runs` returns `202 Accepted` and a durable `runId`, then performs only
+query planning. The selected queries and bounded probe evidence are stored as
+editable PostgreSQL rows. When status reaches
+`awaiting_query_confirmation`, the frontend reads and replaces revisions through
+`GET/PUT /api/runs/{runId}/queries`, then locks the saved revision with
+`POST /api/runs/{runId}/start`. Store discovery and lead extraction begin only
+after that final sanity check passes.
+
+Multiple owned runs may wait in PostgreSQL, while a partial unique index and
+atomic claim permit only one `running` row at a time. A run waiting for query
+review holds no worker lease. Status, query, result, and list reads require the
+same trusted `X-User-Id`; foreign and missing run IDs both return `404`.
+Editable drafts and completed result rows have no application expiry.
 
 The HTTP service is a long-running Node worker. Each database claim carries an
 opaque owner/token lease, and progress, heartbeat, failure, and completion writes
@@ -153,7 +161,7 @@ The private backend contract also provides:
 - `POST /api/run-intents/{intentId}/claim` to atomically and idempotently attach
   that search to the authenticated user and create its queued run;
 - `GET /api/runs?page=1&pageSize=20` to list only the requesting user's runs; and
-- owner-filtered `GET /api/runs/{runId}`, `/results`, `/query-audits`, and
+- owner-filtered `GET /api/runs/{runId}`, `/queries`, `/results`, `/query-audits`, and
   `/diagnostics` endpoints.
 
 The browser must never send or choose `X-User-Id`. Only the private Next.js BFF

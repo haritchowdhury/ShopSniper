@@ -3,22 +3,31 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   ApiError,
+  QueryRevisionConflictError,
   RunAdmissionRejectedError,
   RunIntentNotFoundError,
   RunLeaseLostError,
+  RunNotAwaitingQueryConfirmationError,
   errorPayload
 } from "./api-errors.js";
 import {
   serializeDiagnostic,
   serializeLead,
+  serializeEditableQueries,
   serializeQueryAudit,
   serializeRun
 } from "./api-serializer.js";
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
-import { runPipeline } from "./pipeline.js";
+import {
+  planQueriesForReview,
+  runDiscoveryFromQueryPlans,
+  runPipeline,
+  validateConfirmedQueries
+} from "./pipeline.js";
 import { createPrismaRunRepository } from "./prisma-run-repository.js";
+import { validateEditableQueryList } from "./query-review.js";
 import { readJsonBody } from "./request-json.js";
 import { createInitialStatus } from "./status.js";
 
@@ -129,8 +138,8 @@ export function parseResultFilters(searchParams) {
 }
 
 function requestedRunId(pathname, suffix = "") {
-  const expression = suffix === "results"
-    ? /^\/api\/runs\/([^/]+)\/results$/u
+  const expression = suffix
+    ? new RegExp(`^/api/runs/([^/]+)/${suffix}$`, "u")
     : /^\/api\/runs\/([^/]+)$/u;
   const match = pathname.match(expression);
   if (!match) return null;
@@ -226,6 +235,59 @@ function validateRunRequest(payload, maxShopTypes) {
   }
 }
 
+function validateRevision(value) {
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function validateQueryListRequest(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new ApiError(400, "INVALID_REQUEST_BODY", "Request body must be a JSON object.");
+  }
+  const unknown = Object.keys(payload).filter((key) => !["revision", "queries"].includes(key));
+  if (unknown.length || validateRevision(payload.revision) == null || !Array.isArray(payload.queries)) {
+    throw new ApiError(
+      400,
+      "INVALID_REQUEST_BODY",
+      "The request must contain only a non-negative revision and a queries array.",
+      unknown.length ? { fields: unknown } : undefined
+    );
+  }
+  return payload;
+}
+
+function validateStartRequest(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new ApiError(400, "INVALID_REQUEST_BODY", "Request body must be a JSON object.");
+  }
+  if (Object.keys(payload).some((key) => key !== "revision") || validateRevision(payload.revision) == null) {
+    throw new ApiError(
+      400,
+      "INVALID_REQUEST_BODY",
+      "The request must contain only a non-negative revision."
+    );
+  }
+  return payload.revision;
+}
+
+function throwQueryLifecycleApiError(error) {
+  if (error instanceof QueryRevisionConflictError) {
+    throw new ApiError(
+      409,
+      "QUERY_REVISION_CONFLICT",
+      "The query list changed. Reload it before continuing.",
+      { currentRevision: error.currentRevision }
+    );
+  }
+  if (error instanceof RunNotAwaitingQueryConfirmationError) {
+    throw new ApiError(
+      409,
+      "RUN_NOT_AWAITING_QUERY_CONFIRMATION",
+      "This run is not currently editable."
+    );
+  }
+  throw error;
+}
+
 function hasAccess(request, token) {
   if (!token) return true;
   return request.headers.authorization === `Bearer ${token}`;
@@ -262,8 +324,11 @@ function startRunPayload(run) {
   const statusUrl = `/api/runs/${encodeURIComponent(run.id)}`;
   return {
     runId: run.id,
-    state: "queued",
+    state: run.state,
+    phase: run.phase || "query_planning",
+    stage: run.stage || "queued_query_planning",
     statusUrl,
+    queriesUrl: `${statusUrl}/queries`,
     resultsUrl: `${statusUrl}/results`,
     createdAt: safeDate(run.createdAt)
   };
@@ -360,6 +425,9 @@ async function executeRun({
   categories,
   lease,
   pipeline,
+  planningPipeline,
+  queryValidationPipeline,
+  discoveryPipeline,
   repository,
   logger,
   now,
@@ -371,9 +439,11 @@ async function executeRun({
   const baseStatus = {
     ...createInitialStatus(),
     state: "running",
-    stage: "reading_categories",
+    stage: categories.phase === "scraping"
+      ? "validating_confirmed_queries"
+      : "reading_categories",
     runId: identifier,
-    shopTypesTotal: categories.length,
+    shopTypesTotal: categories.items.length,
     startedAt: new Date().toISOString()
   };
   let leaseLoss = null;
@@ -397,7 +467,72 @@ async function executeRun({
   });
 
   try {
-    const result = await pipeline(config, tracker.status, { categories });
+    const supportsReview = typeof repository.saveGeneratedQueryPlan === "function";
+    let result;
+    if (supportsReview && categories.phase === "query_planning") {
+      const planning = await planningPipeline(config, tracker.status, {
+        categories: categories.items
+      });
+      await tracker.flush();
+      if (leaseLoss) throw leaseLoss;
+      await heartbeat.renew();
+      await heartbeat.stop();
+      await repository.saveGeneratedQueryPlan(
+        identifier,
+        lease,
+        {
+          ...planning,
+          categories: categories.items,
+          config
+        },
+        tracker.status,
+        currentDate(now)
+      );
+      logger("query_plan_ready", {
+        runId: identifier,
+        revision: 1,
+        queries: planning.selected.length
+      });
+      return;
+    }
+    if (supportsReview && categories.phase === "scraping") {
+      const rows = await repository.loadConfirmedQueryPlans(
+        identifier,
+        lease,
+        currentDate(now)
+      );
+      const validation = await queryValidationPipeline(config, tracker.status, {
+        rows,
+        categories: categories.items,
+        now: currentDate(now)
+      });
+      await repository.saveQueryValidation(
+        identifier,
+        lease,
+        validation.rows,
+        currentDate(now)
+      );
+      await tracker.flush();
+      if (!validation.valid) {
+        await heartbeat.stop();
+        await repository.returnRunToQueryReview(
+          identifier,
+          lease,
+          tracker.status,
+          currentDate(now)
+        );
+        logger("query_confirmation_rejected", {
+          runId: identifier,
+          invalidQueries: validation.rows.filter((row) => row.validationState === "invalid").length
+        });
+        return;
+      }
+      result = await discoveryPipeline(config, tracker.status, {
+        queryPlans: validation.queryPlans
+      });
+    } else {
+      result = await pipeline(config, tracker.status, { categories: categories.items });
+    }
     tracker.status.stage = "writing_results";
     tracker.status.outputRows = result.leads.length;
     await tracker.flush();
@@ -459,6 +594,9 @@ export function createLeadServer(
   config,
   {
     pipeline = runPipeline,
+    planningPipeline = planQueriesForReview,
+    queryValidationPipeline = validateConfirmedQueries,
+    discoveryPipeline = runDiscoveryFromQueryPlans,
     repository = createPrismaRunRepository(),
     schedule = setImmediate,
     logger = log,
@@ -472,6 +610,7 @@ export function createLeadServer(
   } = {}
 ) {
   const acceptedRunTimes = [];
+  const acceptedConfirmationTimes = [];
   let admissionTail = Promise.resolve();
   let drainScheduled = false;
   let draining = false;
@@ -502,6 +641,22 @@ export function createLeadServer(
       "RUN_RATE_LIMITED",
       "Too many runs were started recently. Please try again later."
     );
+  }
+
+  function enforceConfirmationRateLimit() {
+    const timestamp = now();
+    const cutoff = timestamp - (config.queryConfirmRateLimitWindowMs || 60000);
+    while (acceptedConfirmationTimes.length && acceptedConfirmationTimes[0] <= cutoff) {
+      acceptedConfirmationTimes.shift();
+    }
+    if (acceptedConfirmationTimes.length >= (config.queryConfirmRateLimitMax || 10)) {
+      throw new ApiError(
+        429,
+        "QUERY_CONFIRMATION_RATE_LIMITED",
+        "Too many query confirmations were attempted recently. Please try again later."
+      );
+    }
+    acceptedConfirmationTimes.push(timestamp);
   }
 
   async function admitRun(operation) {
@@ -552,9 +707,12 @@ export function createLeadServer(
           await executeRun({
             config,
             identifier: run.run.id,
-            categories,
+            categories: { items: categories, phase: run.run.phase || "scraping" },
             lease: run.lease,
             pipeline,
+            planningPipeline,
+            queryValidationPipeline,
+            discoveryPipeline,
             repository,
             logger,
             now,
@@ -676,6 +834,125 @@ export function createLeadServer(
       return;
     }
 
+    if (request.method === "PUT") {
+      const identifier = requestedRunId(requestUrl.pathname, "queries");
+      if (identifier) {
+        const ownerId = trustedUserId(request);
+        if (typeof repository.getEditableQueries !== "function") {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        const payload = validateQueryListRequest(await readJsonBody(request, 128 * 1024));
+        const run = await repository.getEditableQueries(identifier, ownerId);
+        if (!run) {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        if (run.state !== "awaiting_query_confirmation" || run.phase !== "query_review") {
+          throw new ApiError(
+            409,
+            "RUN_NOT_AWAITING_QUERY_CONFIRMATION",
+            "This run is not currently editable."
+          );
+        }
+        const categories = Array.isArray(run.normalizedShopTypes)
+          ? run.normalizedShopTypes
+          : [];
+        const categoryVocabularyByIndex = categories.map((_, categoryIndex) => [
+          ...new Set((run.queries || [])
+            .filter((row) => row.categoryIndex === categoryIndex)
+            .flatMap((row) => Array.isArray(row.categoryVocabulary) ? row.categoryVocabulary : []))
+        ]);
+        const checked = validateEditableQueryList(payload.queries, categories, {
+          maxQueries: config.maxQueries || 500,
+          categoryVocabularyByIndex
+        });
+        if (!checked.valid) {
+          throw new ApiError(
+            422,
+            "QUERY_LIST_INVALID",
+            "One or more queries are invalid.",
+            { errors: checked.errors }
+          );
+        }
+        try {
+          const updated = await repository.replaceEditableQueries(
+            identifier,
+            ownerId,
+            payload.revision,
+            checked.queries,
+            currentDate(now)
+          );
+          if (!updated) {
+            throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+          }
+          return sendJson(response, 200, serializeEditableQueries(updated));
+        } catch (error) {
+          throwQueryLifecycleApiError(error);
+        }
+      }
+    }
+
+    if (request.method === "POST") {
+      const identifier = requestedRunId(requestUrl.pathname, "start");
+      if (identifier) {
+        const ownerId = trustedUserId(request);
+        enforceConfirmationRateLimit();
+        const revision = validateStartRequest(await readJsonBody(request));
+        if (typeof repository.confirmQueryRevision !== "function") {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        try {
+          const current = await repository.getEditableQueries(identifier, ownerId);
+          if (!current) {
+            throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+          }
+          const categories = Array.isArray(current.normalizedShopTypes)
+            ? current.normalizedShopTypes
+            : [];
+          const categoryVocabularyByIndex = categories.map((_, categoryIndex) => [
+            ...new Set((current.queries || [])
+              .filter((row) => row.categoryIndex === categoryIndex)
+              .flatMap((row) => Array.isArray(row.categoryVocabulary) ? row.categoryVocabulary : []))
+          ]);
+          const checked = validateEditableQueryList(
+            (current.queries || []).map(({ id, categoryIndex, query }) => ({
+              id,
+              categoryIndex,
+              query
+            })),
+            categories,
+            { maxQueries: config.maxQueries || 500, categoryVocabularyByIndex }
+          );
+          if (!checked.valid) {
+            throw new ApiError(
+              422,
+              "QUERY_LIST_INVALID",
+              "One or more queries are invalid.",
+              { errors: checked.errors }
+            );
+          }
+          const run = await repository.confirmQueryRevision(
+            identifier,
+            ownerId,
+            revision,
+            currentDate(now)
+          );
+          if (!run) {
+            throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+          }
+          queueDrain();
+          return sendJson(response, 202, {
+            runId: run.id,
+            state: run.state,
+            phase: run.phase,
+            stage: run.stage,
+            revision: run.confirmedQueryRevision
+          });
+        } catch (error) {
+          throwQueryLifecycleApiError(error);
+        }
+      }
+    }
+
     if (request.method === "GET") {
       if (requestUrl.pathname === "/api/runs") {
         const ownerId = trustedUserId(request);
@@ -689,6 +966,26 @@ export function createLeadServer(
           },
           items: page.items.map(serializeRun)
         });
+      }
+
+      const queriesIdentifier = requestedRunId(requestUrl.pathname, "queries");
+      if (queriesIdentifier) {
+        const ownerId = trustedUserId(request);
+        if (typeof repository.getEditableQueries !== "function") {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        const run = await repository.getEditableQueries(queriesIdentifier, ownerId);
+        if (!run) {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        if (run.queryRevision < 1) {
+          throw new ApiError(
+            409,
+            "QUERY_CONFIRMATION_IN_PROGRESS",
+            "The query plan is not ready yet."
+          );
+        }
+        return sendJson(response, 200, serializeEditableQueries(run));
       }
 
       for (const collection of ["query-audits", "diagnostics"]) {
@@ -725,7 +1022,11 @@ export function createLeadServer(
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
-        if (!run.resultsAvailable && ["queued", "running"].includes(run.state)) {
+        if (!run.resultsAvailable && [
+          "queued",
+          "running",
+          "awaiting_query_confirmation"
+        ].includes(run.state)) {
           throw new ApiError(
             409,
             "RESULTS_NOT_READY",

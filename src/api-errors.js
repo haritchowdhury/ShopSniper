@@ -36,6 +36,21 @@ export class RunLeaseLostError extends Error {
   }
 }
 
+export class QueryRevisionConflictError extends Error {
+  constructor(currentRevision) {
+    super("The query list has changed since it was loaded");
+    this.name = "QueryRevisionConflictError";
+    this.currentRevision = currentRevision;
+  }
+}
+
+export class RunNotAwaitingQueryConfirmationError extends Error {
+  constructor() {
+    super("The run is not awaiting query confirmation");
+    this.name = "RunNotAwaitingQueryConfirmationError";
+  }
+}
+
 export function errorPayload(error) {
   if (error instanceof ApiError) {
     return {

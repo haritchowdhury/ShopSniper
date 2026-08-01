@@ -58,6 +58,15 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
       min: 1,
       max: 1000
     }),
+    queryConfirmRateLimitWindowMs: integer(
+      "QUERY_CONFIRM_RATE_LIMIT_WINDOW_MS",
+      60000,
+      { min: 1000, max: 3600000 }
+    ),
+    queryConfirmRateLimitMax: integer("QUERY_CONFIRM_RATE_LIMIT_MAX", 10, {
+      min: 1,
+      max: 1000
+    }),
     inputCsv: configuredPath(process.env.INPUT_CSV || "./data/categories.csv", cwd),
     outputCsv: configuredPath(process.env.OUTPUT_CSV || "./data/leads.csv", cwd),
     generatedQueriesCsv: configuredPath(
@@ -91,6 +100,10 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     queryCandidateCount: integer("QUERY_CANDIDATE_COUNT", 25, { max: 40 }),
     queryRepairRounds: integer("QUERY_REPAIR_ROUNDS", 2, { min: 0, max: 5 }),
     queryProbeConcurrency: integer("QUERY_PROBE_CONCURRENCY", 3, { max: 10 }),
+    queryProbeFreshnessMs: integer("QUERY_PROBE_FRESHNESS_MS", 86400000, {
+      min: 60000,
+      max: 604800000
+    }),
     minQueryResults: integer("MIN_QUERY_RESULTS", 5, { min: 1, max: 10 }),
     minQueryUniqueHosts: integer("MIN_QUERY_UNIQUE_HOSTS", 4, {
       min: 1,

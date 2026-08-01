@@ -10,9 +10,29 @@ datasource db {
 enum RunState {
   queued
   running
+  awaiting_query_confirmation
   completed
   failed
   cancelled
+}
+
+enum RunPhase {
+  query_planning
+  query_review
+  scraping
+  finished
+}
+
+enum RunQuerySource {
+  generated
+  user_added
+  user_edited
+}
+
+enum RunQueryValidationState {
+  pending
+  valid
+  invalid
 }
 
 enum LeadStatus {
@@ -22,36 +42,69 @@ enum LeadStatus {
 }
 
 model Run {
-  id                  String          @id
-  ownerId             String?
-  state               RunState
-  stage               String
-  normalizedShopTypes Json
-  createdAt           DateTime        @default(now())
-  startedAt           DateTime?
-  completedAt         DateTime?
-  progress            Json
-  resultsAvailable    Boolean         @default(false)
-  leadSummary         Json?
-  safeErrorCode       String?
-  safeErrorMessage    String?
-  pipelineVersion     Int?
-  scoringVersion      Int?
-  resultFingerprint   String?
-  leaseOwner          String?
-  leaseToken          String?         @unique
-  leaseAcquiredAt     DateTime?
-  leaseExpiresAt      DateTime?
-  lastHeartbeatAt     DateTime?
-  leaseAttempt        Int             @default(0)
-  leads               Lead[]
-  queryAudits         QueryAudit[]
-  diagnostics         RunDiagnostic[]
+  id                     String          @id
+  ownerId                String?
+  state                  RunState
+  phase                  RunPhase        @default(query_planning)
+  stage                  String
+  normalizedShopTypes    Json
+  createdAt              DateTime        @default(now())
+  startedAt              DateTime?
+  completedAt            DateTime?
+  progress               Json
+  resultsAvailable       Boolean         @default(false)
+  leadSummary            Json?
+  safeErrorCode          String?
+  safeErrorMessage       String?
+  pipelineVersion        Int?
+  scoringVersion         Int?
+  resultFingerprint      String?
+  queryRevision          Int             @default(0)
+  confirmedQueryRevision Int?
+  queryPlanReadyAt       DateTime?
+  queriesConfirmedAt     DateTime?
+  leaseOwner             String?
+  leaseToken             String?         @unique
+  leaseAcquiredAt        DateTime?
+  leaseExpiresAt         DateTime?
+  lastHeartbeatAt        DateTime?
+  leaseAttempt           Int             @default(0)
+  leads                  Lead[]
+  queryAudits            QueryAudit[]
+  diagnostics            RunDiagnostic[]
+  queries                RunQuery[]
 
   @@index([state])
   @@index([state, leaseExpiresAt])
   @@index([createdAt])
   @@index([ownerId, createdAt])
+}
+
+model RunQuery {
+  id                   String                  @id
+  runId                String
+  run                  Run                     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  categoryIndex        Int
+  sequence             Int
+  query                String
+  source               RunQuerySource
+  validationState      RunQueryValidationState @default(pending)
+  rejectionReason      String?
+  queryScore           Float?
+  generationReason     String?
+  sourceUrls           String[]                @default([])
+  categoryVocabulary   Json?
+  probeSummary         Json?
+  probeResults         Json?
+  probeContractVersion String?
+  probeFingerprint     String?
+  probedAt             DateTime?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  @@unique([runId, sequence])
+  @@index([runId, categoryIndex, sequence])
+  @@index([runId, validationState])
 }
 
 model RunIntent {

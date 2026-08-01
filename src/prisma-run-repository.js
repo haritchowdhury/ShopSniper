@@ -3,7 +3,9 @@ import {
   RunAdmissionRejectedError,
   RunIntentNotFoundError,
   RunLeaseLostError,
-  RunTerminalConflictError
+  RunTerminalConflictError,
+  QueryRevisionConflictError,
+  RunNotAwaitingQueryConfirmationError
 } from "./api-errors.js";
 import {
   diagnosticRecordToCreate,
@@ -12,6 +14,11 @@ import {
 } from "./api-serializer.js";
 import { getPrismaClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
+import {
+  GOOGLE_PROBE_CONTRACT_VERSION,
+  normalizeProbeResults,
+  queryProbeFingerprint
+} from "./query-review.js";
 
 const ACTIVE_STATES = ["queued", "running"];
 
@@ -25,6 +32,14 @@ function runIntentId() {
 
 function leaseToken() {
   return `lease_${randomBytes(24).toString("base64url")}`;
+}
+
+function queryId() {
+  return `query_${randomBytes(18).toString("base64url")}`;
+}
+
+function jsonValue(value) {
+  return value == null ? undefined : value;
 }
 
 function activeLeaseWhere(runIdentifier, lease, now) {
@@ -121,7 +136,8 @@ export class PrismaRunRepository {
       id: identifier,
       ownerId,
       state: "queued",
-      stage: "queued",
+      phase: "query_planning",
+      stage: "queued_query_planning",
       normalizedShopTypes,
       progress: {
         ...createInitialProgress(),
@@ -232,8 +248,10 @@ export class PrismaRunRepository {
           where: { id: next.id, state: "queued" },
           data: {
             state: "running",
-            stage: "reading_categories",
-            startedAt: now,
+            stage: next.phase === "scraping"
+              ? "validating_confirmed_queries"
+              : "reading_categories",
+            startedAt: next.startedAt || now,
             leaseOwner: owner,
             leaseToken: token,
             leaseAcquiredAt: now,
@@ -271,15 +289,278 @@ export class PrismaRunRepository {
 
   async getRun(runIdentifier, ownerId) {
     return this.prisma.run.findFirst({
-      where: { id: runIdentifier, ownerId }
+      where: { id: runIdentifier, ownerId },
+      include: {
+        queries: { select: { validationState: true } }
+      }
     });
   }
 
   async getActiveRunForOwner(ownerId) {
     return this.prisma.run.findFirst({
-      where: { ownerId, state: { in: ACTIVE_STATES } },
+      where: {
+        ownerId,
+        state: { in: [...ACTIVE_STATES, "awaiting_query_confirmation"] }
+      },
       orderBy: { createdAt: "asc" }
     });
+  }
+
+  async saveGeneratedQueryPlan(
+    runIdentifier,
+    lease,
+    { selected = [], audits = [], categories = [], config },
+    status,
+    now = new Date()
+  ) {
+    const rows = selected.map((plan, sequence) => {
+      const categoryIndex = categories.findIndex((category) =>
+        category.shopType === plan.shopType &&
+        category.businessQualifier === (plan.businessQualifier || "unspecified") &&
+        category.originalShopType === (plan.originalShopType || "")
+      );
+      if (categoryIndex < 0) throw new Error("Generated query has no matching run category");
+      const category = categories[categoryIndex];
+      const fingerprint = queryProbeFingerprint(plan.query, category, config);
+      return {
+        id: queryId(),
+        runId: runIdentifier,
+        categoryIndex,
+        sequence,
+        query: plan.query,
+        source: "generated",
+        validationState: "valid",
+        rejectionReason: null,
+        queryScore: Number.isFinite(Number(plan.queryScore)) ? Number(plan.queryScore) : null,
+        generationReason: plan.queryGenerationReason || null,
+        sourceUrls: Array.isArray(plan.querySourceUrls) ? plan.querySourceUrls.slice(0, 8) : [],
+        categoryVocabulary: plan.categoryVocabulary || [],
+        probeSummary: {
+          accepted: true,
+          resultCount: Array.isArray(plan.results) ? plan.results.length : 0
+        },
+        probeResults: normalizeProbeResults(plan.results),
+        probeContractVersion: GOOGLE_PROBE_CONTRACT_VERSION,
+        probeFingerprint: fingerprint,
+        probedAt: now
+      };
+    });
+    const auditRows = audits.map((record, index) =>
+      queryAuditRecordToCreate(
+        runIdentifier,
+        childId("audit", runIdentifier, index),
+        index,
+        record
+      )
+    );
+    return this.prisma.$transaction(async (transaction) => {
+      const transitioned = await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          state: "awaiting_query_confirmation",
+          phase: "query_review",
+          stage: "awaiting_query_confirmation",
+          queryRevision: { increment: 1 },
+          queryPlanReadyAt: now,
+          progress: progressFromStatus(status),
+          leaseOwner: null,
+          leaseToken: null,
+          leaseAcquiredAt: null,
+          leaseExpiresAt: null,
+          lastHeartbeatAt: null
+        }
+      });
+      requireLeaseMutation(transitioned);
+      await transaction.runQuery.deleteMany({ where: { runId: runIdentifier } });
+      await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
+      if (rows.length) await transaction.runQuery.createMany({ data: rows });
+      if (auditRows.length) await transaction.queryAudit.createMany({ data: auditRows });
+      return transaction.run.findUnique({ where: { id: runIdentifier } });
+    });
+  }
+
+  async getEditableQueries(runIdentifier, ownerId) {
+    const run = await this.prisma.run.findFirst({
+      where: { id: runIdentifier, ownerId },
+      include: { queries: { orderBy: { sequence: "asc" } } }
+    });
+    return run;
+  }
+
+  async replaceEditableQueries(
+    runIdentifier,
+    ownerId,
+    expectedRevision,
+    queries,
+    now = new Date()
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      const run = await transaction.run.findFirst({
+        where: { id: runIdentifier, ownerId },
+        include: { queries: true }
+      });
+      if (!run) return null;
+      if (run.state !== "awaiting_query_confirmation" || run.phase !== "query_review") {
+        throw new RunNotAwaitingQueryConfirmationError();
+      }
+      if (run.queryRevision !== expectedRevision) {
+        throw new QueryRevisionConflictError(run.queryRevision);
+      }
+      const advanced = await transaction.run.updateMany({
+        where: {
+          id: runIdentifier,
+          ownerId,
+          state: "awaiting_query_confirmation",
+          phase: "query_review",
+          queryRevision: expectedRevision
+        },
+        data: { queryRevision: { increment: 1 } }
+      });
+      if (advanced.count !== 1) {
+        const current = await transaction.run.findFirst({
+          where: { id: runIdentifier, ownerId },
+          select: { queryRevision: true }
+        });
+        throw new QueryRevisionConflictError(current?.queryRevision ?? expectedRevision);
+      }
+      const existingById = new Map(run.queries.map((row) => [row.id, row]));
+      const rows = queries.map((item, sequence) => {
+        const existing = item.id ? existingById.get(item.id) : null;
+        const unchanged = existing &&
+          existing.categoryIndex === item.categoryIndex &&
+          existing.query === item.query;
+        if (unchanged) return { ...existing, sequence, updatedAt: now };
+        return {
+          id: existing?.id || queryId(),
+          runId: runIdentifier,
+          categoryIndex: item.categoryIndex,
+          sequence,
+          query: item.query,
+          source: existing ? "user_edited" : "user_added",
+          validationState: "pending",
+          rejectionReason: null,
+          queryScore: existing?.queryScore ?? null,
+          generationReason: existing?.generationReason ?? null,
+          sourceUrls: existing?.sourceUrls || [],
+          categoryVocabulary: jsonValue(existing?.categoryVocabulary) || [],
+          probeSummary: undefined,
+          probeResults: undefined,
+          probeContractVersion: null,
+          probeFingerprint: null,
+          probedAt: null,
+          createdAt: existing?.createdAt || now,
+          updatedAt: now
+        };
+      });
+      await transaction.runQuery.deleteMany({ where: { runId: runIdentifier } });
+      if (rows.length) await transaction.runQuery.createMany({ data: rows });
+      return transaction.run.findUnique({
+        where: { id: runIdentifier },
+        include: { queries: { orderBy: { sequence: "asc" } } }
+      });
+    });
+  }
+
+  async confirmQueryRevision(runIdentifier, ownerId, expectedRevision, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      const run = await transaction.run.findFirst({
+        where: { id: runIdentifier, ownerId }
+      });
+      if (!run) return null;
+      if (
+        run.phase === "scraping" &&
+        run.confirmedQueryRevision === expectedRevision &&
+        ["queued", "running"].includes(run.state)
+      ) return run;
+      if (run.state !== "awaiting_query_confirmation" || run.phase !== "query_review") {
+        throw new RunNotAwaitingQueryConfirmationError();
+      }
+      if (run.queryRevision !== expectedRevision) {
+        throw new QueryRevisionConflictError(run.queryRevision);
+      }
+      const updated = await transaction.run.updateMany({
+        where: {
+          id: runIdentifier,
+          ownerId,
+          state: "awaiting_query_confirmation",
+          phase: "query_review",
+          queryRevision: expectedRevision
+        },
+        data: {
+          state: "queued",
+          phase: "scraping",
+          stage: "queued_query_validation",
+          confirmedQueryRevision: expectedRevision,
+          queriesConfirmedAt: now,
+          safeErrorCode: null,
+          safeErrorMessage: null
+        }
+      });
+      if (updated.count !== 1) throw new QueryRevisionConflictError(expectedRevision);
+      return transaction.run.findUnique({ where: { id: runIdentifier } });
+    });
+  }
+
+  async loadConfirmedQueryPlans(runIdentifier, lease, now = new Date()) {
+    const run = await this.prisma.run.findFirst({
+      where: activeLeaseWhere(runIdentifier, lease, now),
+      include: { queries: { orderBy: { sequence: "asc" } } }
+    });
+    if (!run) throw new RunLeaseLostError();
+    if (run.confirmedQueryRevision !== run.queryRevision) {
+      throw new Error("Confirmed query revision no longer matches the editable revision");
+    }
+    return run.queries;
+  }
+
+  async saveQueryValidation(runIdentifier, lease, rows, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      const fenced = await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { stage: "validating_confirmed_queries" }
+      });
+      requireLeaseMutation(fenced);
+      for (const row of rows) {
+        await transaction.runQuery.updateMany({
+          where: { id: row.id, runId: runIdentifier },
+          data: {
+            query: row.query,
+            validationState: row.validationState,
+            rejectionReason: row.rejectionReason || null,
+            probeSummary: jsonValue(row.probeSummary),
+            probeResults: jsonValue(row.probeResults),
+            probeContractVersion: row.probeContractVersion || null,
+            probeFingerprint: row.probeFingerprint || null,
+            probedAt: row.probedAt || null
+          }
+        });
+      }
+    });
+  }
+
+  async returnRunToQueryReview(
+    runIdentifier,
+    lease,
+    status,
+    now = new Date()
+  ) {
+    const result = await this.prisma.run.updateMany({
+      where: activeLeaseWhere(runIdentifier, lease, now),
+      data: {
+        state: "awaiting_query_confirmation",
+        phase: "query_review",
+        stage: "awaiting_query_confirmation",
+        confirmedQueryRevision: null,
+        queriesConfirmedAt: null,
+        progress: progressFromStatus(status),
+        leaseOwner: null,
+        leaseToken: null,
+        leaseAcquiredAt: null,
+        leaseExpiresAt: null,
+        lastHeartbeatAt: null
+      }
+    });
+    return requireLeaseMutation(result);
   }
 
   async deleteExpiredRunIntents(now = new Date()) {
@@ -359,6 +640,7 @@ export class PrismaRunRepository {
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: {
           state: "completed",
+          phase: "finished",
           stage: "completed",
           completedAt: now,
           resultsAvailable: true,
@@ -386,7 +668,9 @@ export class PrismaRunRepository {
         throw new RunTerminalConflictError();
       }
       await transaction.lead.deleteMany({ where: { runId: runIdentifier } });
-      await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
+      if (auditRows.length) {
+        await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
+      }
       await transaction.runDiagnostic.deleteMany({ where: { runId: runIdentifier } });
       if (leadRows.length) {
         await transaction.lead.createMany({ data: leadRows });
@@ -413,6 +697,7 @@ export class PrismaRunRepository {
       where: activeLeaseWhere(runIdentifier, lease, now),
       data: {
         state: "failed",
+        phase: "finished",
         stage: "failed",
         completedAt: now,
         resultsAvailable: false,
@@ -472,6 +757,7 @@ export class PrismaRunRepository {
       },
       data: {
         state: "failed",
+        phase: "finished",
         stage: "failed",
         completedAt: now,
         resultsAvailable: false,

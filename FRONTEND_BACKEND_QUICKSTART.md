@@ -1,214 +1,245 @@
-# Frontend Backend Quick Start
+# Frontend–Backend Quick Start
 
-> Authentication update: the current owner-scoped contract is documented in
-> `AUTH_AND_RUN_OWNERSHIP_IMPLEMENTATION_PLAN.md` and
-> `../frontend/README.md`. The older unauthenticated examples below are retained
-> as historical v0.1 reference and must not be exposed publicly.
+This is the copyable frontend contract for the durable query-review workflow.
+The complete rules and result schema are in
+`BACKEND_FRONTEND_JSON_HANDOFF_SPEC.md`.
 
-This backend implements the JSON contract in
-`BACKEND_FRONTEND_JSON_HANDOFF_SPEC.md`. It accepts manual categories, persists
-runs and leads in Neon PostgreSQL, and does not use CSV files in the HTTP path.
-
-## Start locally
-
-Use Node.js 20 or newer. Configure the backend-only `.env`:
-
-```env
-DATABASE_URL=postgresql://...-pooler.../neondb?sslmode=require
-GOOGLE_API_KEY=...
-GOOGLE_SEARCH_ENGINE_ID=...
-OPENAI_API_KEY=...
-BACKEND_API_TOKEN=choose-a-long-random-value
-```
-
-The same `DATABASE_URL` is used for runtime and Prisma CLI commands. `DIRECT_URL`
-is optional because `prisma.config.ts` falls back to `DATABASE_URL`; add a direct
-Neon URL only if a future migration cannot run through the pooled connection.
-
-Apply reviewed migrations to a non-production Neon branch, generate Prisma
-Client, and start:
-
-```bash
-npm install
-npm run db:migrate:deploy
-npm run db:generate
-npm start
-```
-
-The default backend base URL is `http://127.0.0.1:3000`.
-
-For frontend work without Google/OpenAI calls, point `DATABASE_URL` at a
-non-production migrated database and run:
-
-```bash
-FRONTEND_SEED_CONFIRM=non-production \
-FRONTEND_SEED_OWNER_ID=the-neon-auth-user-id \
-npm run seed:frontend
-```
-
-The command prints a completed fixture `runId` containing qualified, rejected,
-and failed rows owned by that exact auth user. The guard refuses to run in
-`NODE_ENV=production`.
-
-## Next.js server-only environment
+## Server-only frontend environment
 
 ```env
 BACKEND_API_BASE_URL=http://127.0.0.1:3000
 BACKEND_API_TOKEN=the-same-private-backend-token
 ```
 
-Never use a `NEXT_PUBLIC_` prefix for either value. Do not put `DATABASE_URL`,
-Google, OpenAI, or Browserless credentials in the frontend project.
+Never use `NEXT_PUBLIC_` for either value. Google, OpenAI, Browserless,
+`DATABASE_URL`, the service token, and `X-User-Id` must never reach browser code.
+The Next.js BFF derives the user ID from the verified session.
 
-The browser calls same-origin Next.js Route Handlers. Those handlers forward to:
+## BFF route map
 
-| Next.js route | Backend request |
-|---|---|
-| `GET /api/health` | `GET {BACKEND_API_BASE_URL}/api/health` |
-| `POST /api/runs` | `POST {BACKEND_API_BASE_URL}/api/runs` |
-| `GET /api/runs/[runId]` | `GET {BACKEND_API_BASE_URL}/api/runs/{runId}` |
-| `GET /api/runs/[runId]/results` | Same path and query string |
+| Browser route | Backend route | Method | Timeout |
+|---|---|---:|---:|
+| `/api/runs` | `/api/runs` | POST | 15 s |
+| `/api/runs/[runId]` | `/api/runs/{runId}` | GET | 10 s |
+| `/api/runs/[runId]/queries` | `/api/runs/{runId}/queries` | GET | 10 s |
+| `/api/runs/[runId]/queries` | `/api/runs/{runId}/queries` | PUT | 15 s |
+| `/api/runs/[runId]/start` | `/api/runs/{runId}/start` | POST | 15 s |
+| `/api/runs/[runId]/results` | `/api/runs/{runId}/results` | GET | 20 s |
 
-When `BACKEND_API_TOKEN` is configured, send
-`Authorization: Bearer {BACKEND_API_TOKEN}` from the Next.js server only.
+Every BFF handler validates the opaque run ID, forwards only approved JSON and
+query parameters, uses `cache: "no-store"`, and returns the backend status and
+JSON body. It adds `Authorization` and `X-User-Id` only on the server-to-server
+request.
 
-## Copyable request
+## Browser flow
 
-```http
-POST /api/runs
-Content-Type: application/json
+### 1. Create the planning run
 
-{"shopTypes":["clothing","eyewear","baby food"]}
+```ts
+const run = await apiRequest<StartRunResponse>("/api/runs", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ shopTypes }),
+}, parseStartRunResponse);
 ```
 
-Accepted response:
+The response is:
 
 ```json
 {
   "runId": "run_abcdefghijklmnop",
   "state": "queued",
+  "phase": "query_planning",
+  "stage": "queued_query_planning",
   "statusUrl": "/api/runs/run_abcdefghijklmnop",
+  "queriesUrl": "/api/runs/run_abcdefghijklmnop/queries",
   "resultsUrl": "/api/runs/run_abcdefghijklmnop/results",
-  "createdAt": "2026-07-31T12:00:00.000Z"
+  "createdAt": "2026-08-01T12:00:00.000Z"
 }
 ```
 
-Poll `statusUrl` every three seconds. Stop for `completed`, `failed`, or
-`cancelled`. Fetch `resultsUrl` only when `resultsAvailable` is `true`.
+Poll `statusUrl` every three seconds while state is `queued` or `running`.
 
-## TypeScript contract
+### 2. Load and edit revision 1
+
+When state becomes `awaiting_query_confirmation`, stop polling and fetch:
 
 ```ts
-type RunState = "queued" | "running" | "completed" | "failed" | "cancelled";
-type LeadStatus = "qualified" | "rejected" | "failed";
+const draft = await apiRequest<QuerySet>(run.queriesUrl, {}, parseQuerySet);
+```
 
-type RunProgress = {
-  shopTypesTotal: number;
-  shopTypesProcessed: number;
-  blankShopTypesSkipped: number;
-  invalidShopTypes: number;
-  queryCandidatesGenerated: number;
-  queryCandidatesValidated: number;
-  queryCandidatesProbed: number;
-  queriesSelected: number;
-  planningWarnings: number;
-  queriesTotal: number;
-  queriesProcessed: number;
-  storesDiscovered: number;
-  storesQualified: number;
-  storesRejected: number;
-  failures: number;
-  outputRows: number;
+Send the complete replacement list when saving:
+
+```ts
+const saved = await apiRequest<QuerySet>(run.queriesUrl, {
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    revision: draft.revision,
+    queries: rows.map(({ id, categoryIndex, query }) => ({
+      ...(id ? { id } : {}),
+      categoryIndex,
+      query,
+    })),
+  }),
+}, parseQuerySet);
+```
+
+Keep `saved.revision`. On `QUERY_REVISION_CONFLICT`, refetch and warn instead of
+overwriting another tab. Disable Continue while local edits are unsaved.
+
+### 3. Confirm the exact saved revision
+
+```ts
+await apiRequest<StartScrapeResponse>(`${run.statusUrl}/start`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ revision: saved.revision }),
+}, parseStartScrapeResponse);
+```
+
+Resume three-second status polling. If final validation returns the run to
+`awaiting_query_confirmation`, refetch the query set and focus the first row with
+`validationState: "invalid"`. Fetch results only after `resultsAvailable` is
+true.
+
+## TypeScript shapes
+
+```ts
+type RunState =
+  | "queued"
+  | "running"
+  | "awaiting_query_confirmation"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+type RunPhase = "query_planning" | "query_review" | "scraping" | "finished";
+type QuerySource = "generated" | "user_added" | "user_edited";
+type QueryValidationState = "pending" | "valid" | "invalid";
+
+type QueryCategory = {
+  categoryIndex: number;
+  originalShopType: string;
+  shopType: string;
+  businessQualifier: string;
+};
+
+type RunQuery = {
+  id: string;
+  categoryIndex: number;
+  sequence: number;
+  query: string;
+  source: QuerySource;
+  validationState: QueryValidationState;
+  rejectionReason: string | null;
+  queryScore: number | null;
+  generationReason: string | null;
+  probedAt: string | null;
+};
+
+type QuerySet = {
+  runId: string;
+  revision: number;
+  editable: boolean;
+  categories: QueryCategory[];
+  queries: RunQuery[];
+};
+
+type QueryReviewStatus = {
+  revision: number;
+  confirmedRevision: number | null;
+  editable: boolean;
+  queriesUrl: string;
+  valid: boolean | null;
+  invalidQueryCount: number | null;
 };
 
 type RunStatus = {
   runId: string;
   state: RunState;
+  phase: RunPhase | null;
   stage: string;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
   progress: RunProgress;
   resultsAvailable: boolean;
+  pipelineVersion: number | null;
+  scoringVersion: number | null;
+  queryReview: QueryReviewStatus | null;
   error: { code: string; message: string } | null;
 };
 
-type Lead = {
-  id: string;
-  shop_type: string | null;
-  generated_query: string | null;
-  query_score: number | null;
-  query_generation_reason: string | null;
-  search_query: string | null;
-  google_rank: number | null;
-  google_result_url: string | null;
-  myshopify_domain: string | null;
-  final_url: string | null;
-  canonical_url: string | null;
-  resolved_domain: string | null;
-  store_name: string | null;
-  email: string | null;
-  email_source_url: string | null;
-  phone: string | null;
-  phone_source_url: string | null;
-  contact_url: string | null;
-  social_profiles: string[];
-  additional_information: string | null;
-  shopify_confidence: number | null;
-  relevance_score: number | null;
-  lead_score: number | null;
-  status: LeadStatus;
-  rejection_reason: string | null;
-  error: string | null;
-};
-
-type ResultPage = {
+type StartRunResponse = {
   runId: string;
-  summary: {
-    total: number;
-    qualified: number;
-    rejected: number;
-    failed: number;
-  };
-  pagination: {
-    page: number;
-    pageSize: number;
-    totalItems: number;
-    totalPages: number;
-  };
-  items: Lead[];
+  state: RunState;
+  phase: RunPhase;
+  stage: string;
+  statusUrl: string;
+  queriesUrl: string;
+  resultsUrl: string;
+  createdAt: string;
 };
 
-type ApiError = {
-  error: {
-    code: string;
-    message: string;
-    details?: unknown;
-  };
+type StartScrapeResponse = {
+  runId: string;
+  state: "queued";
+  phase: "scraping";
+  stage: "queued_query_validation";
+  revision: number;
 };
 ```
 
-## Results, sorting, and export
+Keep the existing `RunProgress`, lead, pagination, evidence, and CSV types.
 
-Allowed query parameters are `page`, `pageSize`, `status`, `search`, `sortBy`,
-and `sortDirection`. `pageSize` is 1–200. Allowed sorts are `lead_score`,
-`store_name`, `shop_type`, and `google_rank`; directions are `asc` and `desc`.
+## Editor rules
 
-JSON lead fields are snake_case. CSV export omits `id` and uses the header order
-exported by `src/output.js`. Fetch every API page before “export all”; convert
-null to an empty CSV cell and `JSON.stringify` `social_profiles`.
+- Group rows by `categoryIndex`; category metadata is read-only.
+- Prefill a new row with `site:myshopify.com/products `.
+- Allow add, edit, delete, and reorder; keep at least one row per category.
+- Show generated score/reason and row-level `rejectionReason`.
+- Send only `id`, `categoryIndex`, and `query` in a save item.
+- The backend normalizes and authoritatively validates every row.
+- Keep the last deleted generated row in browser state only for Undo.
+
+## Stage labels
+
+```ts
+const stageLabels: Record<string, string> = {
+  queued_query_planning: "Waiting to plan queries",
+  reading_categories: "Preparing categories",
+  researching_category: "Researching categories",
+  generating_candidates: "Generating search ideas",
+  validating_candidates: "Validating search ideas",
+  probing_queries: "Testing search coverage",
+  selecting_queries: "Selecting the strongest queries",
+  awaiting_query_confirmation: "Review your search queries",
+  queued_query_validation: "Waiting to validate your queries",
+  validating_confirmed_queries: "Checking your saved queries",
+  probing_confirmed_queries: "Testing updated query coverage",
+  discovering_stores: "Discovering Shopify stores",
+  extracting_leads: "Finding contact details",
+  writing_results: "Saving your results",
+  completed: "Run completed",
+  failed: "Run failed",
+  cancelled: "Run cancelled",
+};
+```
 
 ## Error handling
 
-| Status | Frontend behavior |
-|---:|---|
-| `409 RUN_ALREADY_ACTIVE` | Link to the active `runId` from `details` when present |
-| `409 RESULTS_NOT_READY` | Continue status polling; do not treat it as data loss |
-| `409 RESULTS_UNAVAILABLE` | Show the run’s safe terminal error |
-| `502` | Next.js could not reach the backend; offer retry |
-| `503` | Backend database/configuration unavailable; offer retry |
-| `504` | Next.js timed out; a POST outcome may be unknown, so do not blindly duplicate it |
+| Error | Frontend behavior |
+|---|---|
+| `QUERY_LIST_INVALID` (422) | Map `details.errors` to rows/categories |
+| `QUERY_REVISION_CONFLICT` (409) | Refetch and warn; never overwrite silently |
+| `RUN_NOT_AWAITING_QUERY_CONFIRMATION` (409) | Refetch run status |
+| `QUERY_CONFIRMATION_IN_PROGRESS` (409) | Continue planning-status polling |
+| `QUERY_CONFIRMATION_RATE_LIMITED` (429) | Disable Continue briefly and offer retry |
+| `RESULTS_NOT_READY` (409) | Continue status polling |
+| `RESULTS_UNAVAILABLE` (409) | Show the safe terminal run error |
+| `502`, `503`, `504` | Preserve local edits and offer retry |
 
-Completed results have no scheduled application expiry. They remain available
-while the Neon project and records are retained and the database remains
-operational.
+Completed results and review drafts have no scheduled application expiry. Both
+survive API restarts because PostgreSQL, not browser or worker memory, is the
+source of truth.

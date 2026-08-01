@@ -3,6 +3,7 @@ import { ApiError } from "./api-errors.js";
 export const MAX_JSON_BODY_BYTES = 32 * 1024;
 
 export async function readJsonBody(request, limit = MAX_JSON_BODY_BYTES) {
+  const limitLabel = limit % 1024 === 0 ? `${limit / 1024} KiB` : `${limit} bytes`;
   const contentType = request.headers["content-type"] || "";
   if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) {
     throw new ApiError(
@@ -22,7 +23,7 @@ export async function readJsonBody(request, limit = MAX_JSON_BODY_BYTES) {
       throw new ApiError(
         413,
         "REQUEST_BODY_TOO_LARGE",
-        "Request body must not exceed 32 KiB."
+        `Request body must not exceed ${limitLabel}.`
       );
     }
   }
@@ -35,7 +36,7 @@ export async function readJsonBody(request, limit = MAX_JSON_BODY_BYTES) {
       throw new ApiError(
         413,
         "REQUEST_BODY_TOO_LARGE",
-        "Request body must not exceed 32 KiB."
+        `Request body must not exceed ${limitLabel}.`
       );
     }
     chunks.push(chunk);

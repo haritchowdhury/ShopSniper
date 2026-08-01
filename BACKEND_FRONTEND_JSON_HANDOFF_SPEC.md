@@ -1,9 +1,220 @@
 # Backend-to-Frontend JSON Handoff Specification
 
-> Superseded for authentication, ownership, and queue semantics by
-> `AUTH_AND_RUN_OWNERSHIP_IMPLEMENTATION_PLAN.md`. Runs are now owner-scoped,
-> multiple rows may be queued, and only the Next.js BFF may forward a trusted
-> `X-User-Id`.
+> Contract version: query-review v1, implemented 2026-08-01. This section is
+> authoritative wherever older examples later in this document still show the
+> former one-shot HTTP lifecycle. Authentication and owner isolation remain as
+> documented: only the trusted Next.js BFF derives and forwards `X-User-Id`.
+
+## Implemented query-review contract
+
+The HTTP workflow is now two-stage. `POST /api/runs` plans queries only. Store
+discovery does not begin until the user has saved and confirmed the durable query
+revision. The `run:once` CSV command remains a one-shot compatibility path.
+
+```text
+POST /api/runs
+  -> queued/running query_planning
+  -> awaiting_query_confirmation/query_review
+  -> PUT /api/runs/{runId}/queries (zero or more revisions)
+  -> POST /api/runs/{runId}/start
+  -> queued/running scraping
+  -> completed/finished
+```
+
+The implemented states are `queued`, `running`,
+`awaiting_query_confirmation`, `completed`, `failed`, and `cancelled`. The
+implemented phases are `query_planning`, `query_review`, `scraping`, and
+`finished`.
+
+### Create a query-planning run
+
+```http
+POST /api/runs
+Content-Type: application/json
+
+{"shopTypes":["Eyewear Brands","Kitchen Utensil Retailers"]}
+```
+
+```json
+{
+  "runId": "run_abcdefghijklmnop",
+  "state": "queued",
+  "phase": "query_planning",
+  "stage": "queued_query_planning",
+  "statusUrl": "/api/runs/run_abcdefghijklmnop",
+  "queriesUrl": "/api/runs/run_abcdefghijklmnop/queries",
+  "resultsUrl": "/api/runs/run_abcdefghijklmnop/results",
+  "createdAt": "2026-08-01T12:00:00.000Z"
+}
+```
+
+Poll the status URL every three seconds while `state` is `queued` or `running`.
+When it becomes `awaiting_query_confirmation`, stop polling and fetch
+`queriesUrl`. Results remain unavailable during planning and review.
+
+### Read the durable editable queries
+
+```http
+GET /api/runs/{runId}/queries
+```
+
+```json
+{
+  "runId": "run_abcdefghijklmnop",
+  "revision": 1,
+  "editable": true,
+  "categories": [
+    {
+      "categoryIndex": 0,
+      "originalShopType": "Eyewear Brands",
+      "shopType": "eyewear",
+      "businessQualifier": "brand"
+    }
+  ],
+  "queries": [
+    {
+      "id": "query_abcdefghijklmnop",
+      "categoryIndex": 0,
+      "sequence": 0,
+      "query": "site:myshopify.com/products acetate eyeglass frames",
+      "source": "generated",
+      "validationState": "valid",
+      "rejectionReason": null,
+      "queryScore": 91,
+      "generationReason": "Concrete product-title vocabulary",
+      "probedAt": "2026-08-01T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+The default response intentionally omits stored Google result rows and provider
+payloads. `409 QUERY_CONFIRMATION_IN_PROGRESS` means planning has not produced
+revision 1 yet.
+
+### Replace the editable query revision
+
+```http
+PUT /api/runs/{runId}/queries
+Content-Type: application/json
+
+{
+  "revision": 1,
+  "queries": [
+    {
+      "id": "query_abcdefghijklmnop",
+      "categoryIndex": 0,
+      "query": "site:myshopify.com/products round acetate frames"
+    },
+    {
+      "categoryIndex": 0,
+      "query": "site:myshopify.com/products photochromic sunglasses"
+    }
+  ]
+}
+```
+
+Success returns the complete normalized query representation and increments
+`revision` to 2. The list is a replacement, so omitted rows are deleted and array
+order becomes `sequence`. Preserve an existing `id` while editing it. Omit `id`
+for a new row. The only accepted item fields are `id`, `categoryIndex`, and
+`query`; scores, sources, validation state, probe evidence, and category metadata
+are server-owned.
+
+The backend enforces:
+
+- exact lowercase `site:myshopify.com/products <two-to-five-word phrase>` form;
+- no quotes, extra operators, informational wording, exact duplicates, or near
+  duplicates within a category;
+- category relevance using the generated category vocabulary;
+- at least one and at most 20 queries per category;
+- at most `MAX_QUERIES` total and 200 characters per query; and
+- a 128 KiB body limit for this route only.
+
+`422 QUERY_LIST_INVALID` returns `details.errors`, with `index`, `field`, and
+`reason` where applicable. `409 QUERY_REVISION_CONFLICT` returns
+`details.currentRevision`; refetch instead of overwriting. Editing is permitted
+only while the run is in `awaiting_query_confirmation/query_review`.
+
+### Confirm the saved revision and begin scraping
+
+```http
+POST /api/runs/{runId}/start
+Content-Type: application/json
+
+{"revision":2}
+```
+
+```json
+{
+  "runId": "run_abcdefghijklmnop",
+  "state": "queued",
+  "phase": "scraping",
+  "stage": "queued_query_validation",
+  "revision": 2
+}
+```
+
+The worker deterministically validates the locked revision and reuses only a
+successful, contract-compatible probe no more than 24 hours old. New, edited,
+stale, or previously failed queries are probed again. If any query fails, the run
+returns to `awaiting_query_confirmation`; refetch `/queries` to show its row-level
+`rejectionReason`. No query is silently dropped.
+
+Confirmation is idempotent for an already-queued identical revision. A stale
+revision returns `409 QUERY_REVISION_CONFLICT`; an illegal lifecycle state returns
+`409 RUN_NOT_AWAITING_QUERY_CONFIRMATION`; excessive attempts return
+`429 QUERY_CONFIRMATION_RATE_LIMITED`.
+
+### Status additions and polling
+
+`GET /api/runs/{runId}` now also returns `phase` and `queryReview`:
+
+```json
+{
+  "state": "awaiting_query_confirmation",
+  "phase": "query_review",
+  "stage": "awaiting_query_confirmation",
+  "resultsAvailable": false,
+  "queryReview": {
+    "revision": 2,
+    "confirmedRevision": null,
+    "editable": true,
+    "queriesUrl": "/api/runs/run_abcdefghijklmnop/queries",
+    "valid": false,
+    "invalidQueryCount": 1
+  }
+}
+```
+
+`queryReview` is `null` for historical runs without a stored query revision.
+Poll every three seconds only in `queued` or `running`. Stop in review,
+completed, failed, or cancelled. Fetch results only when `resultsAvailable` is
+true.
+
+New stages are `queued_query_planning`, `awaiting_query_confirmation`,
+`queued_query_validation`, `validating_confirmed_queries`, and
+`probing_confirmed_queries`; the prior planning, discovery, extraction, writing,
+and terminal stages remain valid.
+
+### Required BFF routes
+
+The frontend must proxy these additional owner-scoped routes:
+
+| Next.js route | Backend request | Timeout |
+|---|---|---:|
+| `GET /api/runs/[runId]/queries` | Same backend path | 10 s |
+| `PUT /api/runs/[runId]/queries` | Same backend path/body | 15 s |
+| `POST /api/runs/[runId]/start` | Same backend path/body | 15 s |
+
+The BFF allow-lists request bodies, validates the opaque run ID, attaches the
+service token and session-derived user ID server-side, uses `cache: "no-store"`,
+and never forwards browser cookies or a browser-supplied `X-User-Id`.
+
+Draft queries, selected probe evidence, and final leads are stored in Neon via
+Prisma against the same run ID. Review can survive browser/API restarts, waiting
+for review holds no worker lease, and there is no application expiry for the
+query draft or completed downloads.
 
 ## Purpose
 
@@ -28,8 +239,8 @@ Use JSON as the source of truth between the backend and frontend.
 - The frontend must generate CSV only when the user selects an export action.
 - Categories are entered manually in the frontend. CSV upload is not part of the
   first frontend.
-- Query candidates and query-audit records are internal planning data. They may
-  remain in memory during a run and are discarded after the run completes.
+- The selected editable query list and its bounded probe evidence are durable
+  `RunQuery` rows. Rejected candidate audits are durable provenance records.
 - A run must be addressable by an opaque `runId`.
 - Refreshing the browser must not start a new run.
 - Production results must survive an API process restart.
@@ -123,6 +334,8 @@ Create these files in the frontend repository:
 app/api/health/route.ts
 app/api/runs/route.ts
 app/api/runs/[runId]/route.ts
+app/api/runs/[runId]/queries/route.ts
+app/api/runs/[runId]/start/route.ts
 app/api/runs/[runId]/results/route.ts
 ```
 
@@ -133,6 +346,8 @@ Their responsibilities are:
 | `GET /api/health` | `GET {BACKEND_API_BASE_URL}/api/health` |
 | `POST /api/runs` | `POST {BACKEND_API_BASE_URL}/api/runs` |
 | `GET /api/runs/{runId}` | `GET {BACKEND_API_BASE_URL}/api/runs/{runId}` |
+| `GET, PUT /api/runs/{runId}/queries` | Same backend path and method |
+| `POST /api/runs/{runId}/start` | Same backend path and body |
 | `GET /api/runs/{runId}/results` | Same backend path and query string |
 
 Every handler must:

@@ -19,6 +19,7 @@ import { sameAllowedHostname } from "./url-security.js";
 import { log } from "./logger.js";
 import { compareCategoryIntents } from "./category-input.js";
 import { assertPublicLeadScoreState } from "./lead-state.js";
+import { validateConfirmedQueryRows } from "./query-review.js";
 
 function safeErrorType(error) {
   return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*Error$/u.test(error.name)
@@ -368,45 +369,28 @@ const DEFAULT_DEPENDENCIES = {
   normalizeAi: normalizeWithAi
 };
 
-export async function runPipeline(config, status, dependencyOverrides = {}) {
+export async function planQueriesForReview(config, status, dependencyOverrides = {}) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  let queryPlans;
-  let queryAudits = [];
-  if (dependencyOverrides.readQueries) {
-    const { queries, blanksSkipped } = await dependencyOverrides.readQueries(
-      config.inputCsv,
-      config.maxQueries
-    );
-    queryPlans = queries.map((query) => ({
-      originalShopType: "",
-      shopType: "",
-      businessQualifier: "unspecified",
-      categoryVocabulary: [],
-      query,
-      queryScore: "",
-      queryGenerationReason: "",
-      results: null
-    }));
-    queryAudits = queries.map((query) => ({
-      shop_type: "",
-      business_qualifier: "unspecified",
-      query,
-      status: "selected",
-      rejection_reason: "",
-      source: "legacy_query_csv"
-    }));
-    status.queriesTotal = queries.length;
-    status.blankQueriesSkipped = blanksSkipped;
-  } else {
-    const planning = await dependencies.planQueries(
-      config,
-      status,
-      dependencyOverrides
-    );
-    queryPlans = planning.selected;
-    queryAudits = planning.audits || [];
-  }
+  return dependencies.planQueries(config, status, dependencyOverrides);
+}
 
+export async function validateConfirmedQueries(
+  config,
+  status,
+  { rows, categories, ...dependencyOverrides }
+) {
+  return validateConfirmedQueryRows(rows, categories, config, status, dependencyOverrides);
+}
+
+export async function runDiscoveryFromQueryPlans(
+  config,
+  status,
+  { queryPlans, queryAudits = [], ...dependencyOverrides }
+) {
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
+  if (!Array.isArray(queryPlans)) throw new Error("queryPlans must be an array");
+  status.queriesTotal = queryPlans.length;
+  status.queriesProcessed = 0;
   const diagnostics = [];
   const resolvedCandidates = [];
   status.stage = "discovering_stores";
@@ -552,4 +536,49 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
     diagnostics,
     summary
   };
+}
+
+export async function runPipeline(config, status, dependencyOverrides = {}) {
+  let queryPlans;
+  let queryAudits = [];
+  if (dependencyOverrides.readQueries) {
+    const { queries, blanksSkipped } = await dependencyOverrides.readQueries(
+      config.inputCsv,
+      config.maxQueries
+    );
+    queryPlans = queries.map((query) => ({
+      originalShopType: "",
+      shopType: "",
+      businessQualifier: "unspecified",
+      categoryVocabulary: [],
+      query,
+      queryScore: "",
+      queryGenerationReason: "",
+      results: null
+    }));
+    queryAudits = queries.map((query) => ({
+      shop_type: "",
+      business_qualifier: "unspecified",
+      query,
+      status: "selected",
+      rejection_reason: "",
+      source: "legacy_query_csv"
+    }));
+    status.queriesTotal = queries.length;
+    status.blankQueriesSkipped = blanksSkipped;
+  } else {
+    const planning = await planQueriesForReview(
+      config,
+      status,
+      dependencyOverrides
+    );
+    queryPlans = planning.selected;
+    queryAudits = planning.audits || [];
+  }
+
+  return runDiscoveryFromQueryPlans(config, status, {
+    ...dependencyOverrides,
+    queryPlans,
+    queryAudits
+  });
 }

@@ -91,9 +91,14 @@ export function serializeRun(run) {
     const value = Number(run.progress?.[key]);
     progress[key] = Number.isFinite(value) && value >= 0 ? value : 0;
   }
+  const queryRows = Array.isArray(run.queries) ? run.queries : null;
+  const invalidQueryCount = queryRows
+    ? queryRows.filter(({ validationState }) => validationState === "invalid").length
+    : null;
   return {
     runId: run.id,
     state: run.state,
+    phase: run.phase || null,
     stage: run.stage,
     createdAt: run.createdAt.toISOString(),
     startedAt: run.startedAt?.toISOString() || null,
@@ -102,6 +107,18 @@ export function serializeRun(run) {
     resultsAvailable: Boolean(run.resultsAvailable),
     pipelineVersion: run.pipelineVersion ?? null,
     scoringVersion: run.scoringVersion ?? null,
+    queryReview: run.queryRevision > 0
+      ? {
+          revision: run.queryRevision,
+          confirmedRevision: run.confirmedQueryRevision ?? null,
+          editable: run.state === "awaiting_query_confirmation" && run.phase === "query_review",
+          queriesUrl: `/api/runs/${encodeURIComponent(run.id)}/queries`,
+          valid: queryRows
+            ? queryRows.length > 0 && queryRows.every(({ validationState }) => validationState === "valid")
+            : null,
+          invalidQueryCount
+        }
+      : null,
     error: run.safeErrorCode
       ? {
           code: run.safeErrorCode,
@@ -110,6 +127,34 @@ export function serializeRun(run) {
             "The run could not be completed. Please try again."
         }
       : null
+  };
+}
+
+export function serializeRunQuery(row) {
+  return {
+    id: row.id,
+    categoryIndex: row.categoryIndex,
+    sequence: row.sequence,
+    query: row.query,
+    source: row.source,
+    validationState: row.validationState,
+    rejectionReason: row.rejectionReason || null,
+    queryScore: row.queryScore ?? null,
+    generationReason: row.generationReason || null,
+    probedAt: row.probedAt?.toISOString?.() || (row.probedAt ? new Date(row.probedAt).toISOString() : null)
+  };
+}
+
+export function serializeEditableQueries(run) {
+  const categories = Array.isArray(run.normalizedShopTypes)
+    ? run.normalizedShopTypes.map((category, categoryIndex) => ({ categoryIndex, ...category }))
+    : [];
+  return {
+    runId: run.id,
+    revision: run.queryRevision,
+    editable: run.state === "awaiting_query_confirmation" && run.phase === "query_review",
+    categories,
+    queries: (run.queries || []).map(serializeRunQuery)
   };
 }
 
