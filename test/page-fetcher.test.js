@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { extractContactEvidence } from "../src/contact-extractor.js";
 import { assessPageResponse, fetchPage } from "../src/page-fetcher.js";
 
 function storefrontHtml(text = "Specialist eyewear frames and lenses") {
@@ -106,4 +107,44 @@ test("Browserless uses the second configured token when the first one fails", as
   assert.equal(new URL(calls[2].url).searchParams.get("token"), "secondary");
   assert.equal(response.rendered, true);
   assert.equal(response.finalUrl, "https://8.8.8.8/contact");
+});
+
+test("an unusable ordinary contact page invokes the bounded rendered fallback", async () => {
+  let calls = 0;
+  const response = await fetchPage("https://8.8.8.8/pages/contact-us", {
+    requestTimeoutMs: 1000,
+    browserlessUrl: "https://browserless.example/content",
+    browserlessToken: "fixture-token",
+    browserlessFallbackToken: ""
+  }, {
+    purpose: "evidence",
+    request: async () => {
+      calls += 1;
+      return calls === 1
+        ? {
+            body: "<html><body>Not found</body></html>",
+            finalUrl: "https://8.8.8.8/pages/contact-us",
+            status: 200,
+            contentType: "text/html"
+          }
+        : {
+            body: '<html><body><form><textarea name="message"></textarea><button type="submit">Send</button></form></body></html>',
+            finalUrl: "https://browserless.example/content",
+            status: 200,
+            contentType: "text/html"
+          };
+    }
+  });
+  assert.equal(calls, 2);
+  assert.equal(response.rendered, true);
+  assert.match(response.body, /textarea/);
+  const evidence = extractContactEvidence({
+    html: response.body,
+    url: response.finalUrl,
+    requestedUrl: "https://8.8.8.8/pages/contact-us",
+    allowedHostnames: ["8.8.8.8"],
+    status: response.status,
+    fetchAssessment: response.fetchAssessment
+  });
+  assert.equal(evidence.contactUrl, "https://8.8.8.8/pages/contact-us");
 });

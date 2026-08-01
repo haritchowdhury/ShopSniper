@@ -16,6 +16,7 @@ import {
   validateAiResult
 } from "../src/ai-normalizer.js";
 import {
+  assessContactPage,
   classifyStorePageUrl,
   validateContactPageUrl,
   validateSocialProfile
@@ -113,6 +114,67 @@ test("phone extraction requires source-proven or contextual evidence", () => {
   assert.equal(contact.evidence.phones[0].method, "tel");
 });
 
+test("contact-page decisions require a usable same-store page with substantive signals", () => {
+  const base = {
+    url: "https://fictional-shop.dev/pages/contact-us",
+    requestedUrl: "https://fictional-shop.dev/pages/contact-us",
+    allowedHostnames: ["fictional-shop.dev"],
+    status: 200
+  };
+  for (const html of [
+    "",
+    "   ",
+    "<html><body>Not found</body></html>",
+    "<html><title>404 Not Found</title><body>Try again</body></html>",
+    "<html><body>Checking your browser. Verify you are human.</body></html>"
+  ]) {
+    assert.equal(assessContactPage({ ...base, html }).accepted, false, html);
+  }
+  const soft404WithTemplateContact = extractContactEvidence({
+    url: base.url,
+    allowedHostnames: base.allowedHostnames,
+    html: '<html><body>Not found <a href="mailto:template@fictional-shop.dev">Email</a></body></html>'
+  });
+  assert.deepEqual(soft404WithTemplateContact.emails, []);
+  assert.equal(soft404WithTemplateContact.contactUrl, "");
+  assert.equal(assessContactPage({
+    ...base,
+    status: 503,
+    html: "<html><body><h1>Contact us</h1>Service unavailable. Please try again later.</body></html>"
+  }).accepted, false);
+  assert.equal(assessContactPage({
+    ...base,
+    html: '<form><input type="email" name="email"><textarea name="message"></textarea><button type="submit">Send</button></form>'
+  }).accepted, true);
+  assert.equal(assessContactPage({
+    ...base,
+    url: "https://unrelated.dev/pages/contact-us",
+    html: '<form><textarea name="message"></textarea><button type="submit">Send</button></form>'
+  }).accepted, false);
+});
+
+test("negative business identifiers beat generic contact words for visible phone candidates", () => {
+  for (const text of [
+    "Contact support with order number 1234 5678",
+    "Contact us about SKU 8765 4321",
+    "Support can locate tracking reference 1122 3344",
+    "Contact accounting with VAT 9988 7766",
+    "Support documentation for model 5566 7788"
+  ]) {
+    const rejected = extractContactEvidence({
+      url: "https://fictional-shop.dev/pages/contact-us",
+      html: `<p>${text}</p>`
+    });
+    assert.deepEqual(rejected.phones, [], text);
+  }
+
+  const accepted = extractContactEvidence({
+    url: "https://fictional-shop.dev/pages/contact-us",
+    html: "<p>Order enquiries are welcome. Phone: +44 (0)20 7946 0958 ext. 42</p>"
+  });
+  assert.deepEqual(accepted.phones, ["+4402079460958"]);
+});
+
 test("social validation keeps profiles and rejects sharing, intent, roots, and vendors", () => {
   const accepted = [
     "https://instagram.com/fictionaloptics",
@@ -137,6 +199,30 @@ test("social validation keeps profiles and rejects sharing, intent, roots, and v
     "https://instagram.com:8443/fictionaloptics"
   ];
   for (const value of rejected) assert.equal(validateSocialProfile(value).accepted, false, value);
+});
+
+test("social extraction requires store association and rejects theme/vendor credits", () => {
+  const page = extractContactEvidence({
+    url: "https://fictional-optics.dev/",
+    html: `
+      <script type="application/ld+json">{
+        "@type":"Organization",
+        "name":"Fictional Optics",
+        "sameAs":["https://instagram.com/fictionaloptics"]
+      }</script>
+      <header><a href="https://facebook.com/fictionaloptics">Facebook</a></header>
+      <main><a href="https://x.com/unassociatedguest">Guest profile</a></main>
+      <footer>
+        Theme by Vendor <a href="https://instagram.com/themevendor">Instagram</a>
+      </footer>
+    `
+  });
+  assert.deepEqual(page.socialProfiles.sort(), [
+    "https://facebook.com/fictionaloptics",
+    "https://instagram.com/fictionaloptics"
+  ]);
+  assert(page.evidence.socialProfiles.every(({ validationReason }) =>
+    ["organization_same_as", "store_owned_layout_link"].includes(validationReason)));
 });
 
 test("organization and WebSite names beat Product names regardless of JSON-LD order", () => {

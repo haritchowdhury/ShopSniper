@@ -1,8 +1,8 @@
 import { decodeHtml, extractAttributeUrls, extractTitle, stripHtml } from "./html.js";
 import {
+  assessContactPage,
   classifyStorePageUrl,
   makeEvidence,
-  validateContactPageUrl,
   validateSocialProfile
 } from "./contact-evidence.js";
 import { parseHttpUrl } from "./url-security.js";
@@ -10,7 +10,9 @@ import { parseHttpUrl } from "./url-security.js";
 const EMAIL_PATTERN = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/gi;
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{6,}\d)/g;
 const PHONE_LABEL = /\b(?:call|contact|customer\s+service|mobile|phone|telephone|tel|whats\s*app)\b/i;
-const NON_PHONE_LABEL = /\b(?:ean|isbn|item|model|order|product|sku|upc)\b/i;
+const STRONG_PHONE_LABEL = /\b(?:call|mobile|phone|telephone|tel|whats\s*app)\b/i;
+const NON_PHONE_LABEL = /\b(?:ean|invoice|isbn|item|model|order|product|quantity|reference|sku|tracking|upc|vat|year)\b/i;
+const VENDOR_CREDIT_PATTERN = /\b(?:built|created|designed|developed|powered|site|theme)\s+(?:by|with)\b|\b(?:theme|template)\s+(?:author|vendor|credits?)\b/i;
 const ORGANIZATION_TYPES = new Map([
   ["onlinestore", 100],
   ["localbusiness", 98],
@@ -108,6 +110,8 @@ function structuredData(html) {
   const emails = [];
   const phones = [];
   const names = [];
+  const socialProfiles = [];
+  let hasContactPage = false;
   for (const match of html.matchAll(
     /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
   )) {
@@ -118,6 +122,7 @@ function structuredData(html) {
         const item = queue.shift();
         if (!item || typeof item !== "object") continue;
         const types = schemaTypes(item);
+        if (types.includes("contactpage")) hasContactPage = true;
         const organizationType = types.find((type) => ORGANIZATION_TYPES.has(type));
         if (organizationType && typeof item.name === "string" && item.name.trim()) {
           names.push({
@@ -130,6 +135,10 @@ function structuredData(html) {
           if (typeof item.email === "string") emails.push(item.email);
           if (typeof item.telephone === "string") phones.push(item.telephone);
         }
+        if (organizationType) {
+          const sameAs = Array.isArray(item.sameAs) ? item.sameAs : [item.sameAs];
+          socialProfiles.push(...sameAs.filter((value) => typeof value === "string"));
+        }
         for (const nested of Object.values(item)) {
           if (nested && typeof nested === "object") {
             queue.push(...(Array.isArray(nested) ? nested : [nested]));
@@ -140,7 +149,7 @@ function structuredData(html) {
       // Invalid JSON-LD is ignored; it never becomes evidence.
     }
   }
-  return { emails, phones, names };
+  return { emails, phones, names, socialProfiles, hasContactPage };
 }
 
 function siteNameFromMetadata(html) {
@@ -180,9 +189,17 @@ function phoneEvidence(value, sourceUrl, method, confidence, route, textContext 
   if (!["json_ld", "tel", "visible_text"].includes(method)) return null;
   if (method === "visible_text") {
     const hasPhoneLabel = PHONE_LABEL.test(textContext);
-    const hasNonPhoneLabel = NON_PHONE_LABEL.test(textContext);
+    const candidateIndex = textContext.indexOf(value);
+    const beforeCandidate = candidateIndex >= 0
+      ? textContext.slice(Math.max(0, candidateIndex - 64), candidateIndex)
+      : textContext;
+    const negativeMatches = [...beforeCandidate.matchAll(new RegExp(NON_PHONE_LABEL.source, "gi"))];
+    const strongMatches = [...beforeCandidate.matchAll(new RegExp(STRONG_PHONE_LABEL.source, "gi"))];
+    const lastNegative = negativeMatches.at(-1)?.index ?? -1;
+    const lastStrong = strongMatches.at(-1)?.index ?? -1;
+    const isYearRange = /^\s*\d{4}\s*[-–—]\s*\d{4}\s*$/.test(value);
     const hasPhoneFormatting = /[+().-]|\d\s+\d/.test(value);
-    if (hasNonPhoneLabel && !hasPhoneLabel) return null;
+    if (isYearRange || (lastNegative >= 0 && lastNegative >= lastStrong)) return null;
     if (!hasPhoneLabel && !(route.classification === "contact" && hasPhoneFormatting)) {
       return null;
     }
@@ -196,6 +213,58 @@ function phoneEvidence(value, sourceUrl, method, confidence, route, textContext 
     validationReason:
       method === "visible_text" ? "verified_contact_context" : "source_proven_phone"
   });
+}
+
+function insideElement(html, index, tagName) {
+  const prefix = html.slice(0, index);
+  const openings = [...prefix.matchAll(new RegExp(`<${tagName}\\b`, "gi"))];
+  const closings = [...prefix.matchAll(new RegExp(`</${tagName}\\s*>`, "gi"))];
+  return (openings.at(-1)?.index ?? -1) > (closings.at(-1)?.index ?? -1);
+}
+
+function associatedSocialEvidence(html, sourceUrl, route, structuredSocials) {
+  const evidence = [];
+  for (const value of structuredSocials) {
+    const result = validateSocialProfile(value, { baseUrl: sourceUrl });
+    if (!result.accepted) continue;
+    evidence.push(makeEvidence({
+      kind: "social_profile",
+      value: result.url,
+      sourceUrl,
+      method: `json_ld_same_as_${result.platform}`,
+      confidence: 94,
+      validationReason: "organization_same_as"
+    }));
+  }
+
+  for (const match of html.matchAll(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+))[^>]*>[\s\S]*?<\/a>/gi)) {
+    const value = decodeHtml(match[1] ?? match[2] ?? match[3] ?? "");
+    const result = validateSocialProfile(value, { baseUrl: sourceUrl });
+    if (!result.accepted) continue;
+    const index = match.index ?? 0;
+    const precedingContext = stripHtml(html.slice(Math.max(0, index - 140), index));
+    const anchorText = stripHtml(match[0]);
+    const vendorCredit = precedingContext.match(VENDOR_CREDIT_PATTERN);
+    if (VENDOR_CREDIT_PATTERN.test(anchorText) ||
+      (vendorCredit && precedingContext.length - (vendorCredit.index + vendorCredit[0].length) <= 60)) {
+      continue;
+    }
+    const inOwnedLayout = ["header", "nav", "footer"].some((tag) => insideElement(html, index, tag));
+    const onOwnedEvidencePage = route.classification === "contact" ||
+      route.reason === "organization_evidence_route";
+    if (!inOwnedLayout && !onOwnedEvidencePage) continue;
+    evidence.push(makeEvidence({
+      kind: "social_profile",
+      value: result.url,
+      sourceUrl,
+      method: `associated_link_${result.platform}`,
+      confidence: inOwnedLayout ? 86 : 82,
+      validationReason: inOwnedLayout
+        ? "store_owned_layout_link"
+        : "store_owned_evidence_page_link"
+    }));
+  }
+  return evidence;
 }
 
 function deduplicateEvidence(values) {
@@ -216,7 +285,14 @@ function deduplicateEvidence(values) {
   );
 }
 
-export function extractContactEvidence({ html = "", url }) {
+export function extractContactEvidence({
+  html = "",
+  url,
+  requestedUrl = url,
+  allowedHostnames = [],
+  status = 200,
+  fetchAssessment = null
+}) {
   const sourceUrl = normalizedSourceUrl(url);
   if (!sourceUrl) {
     return {
@@ -265,29 +341,39 @@ export function extractContactEvidence({ html = "", url }) {
     phones.push(phoneEvidence(match[0], sourceUrl, "visible_text", 65, route, context));
   }
 
-  const socialEvidence = [];
-  for (const href of hrefs) {
-    const result = validateSocialProfile(href, { baseUrl: sourceUrl });
-    if (!result.accepted) continue;
-    socialEvidence.push(makeEvidence({
-      kind: "social_profile",
-      value: result.url,
-      sourceUrl,
-      method: `link_${result.platform}`,
-      confidence: 82,
-      validationReason: result.reason
-    }));
-  }
+  const socialEvidence = associatedSocialEvidence(
+    html,
+    sourceUrl,
+    route,
+    structured.socialProfiles
+  );
 
-  const contact = validateContactPageUrl(sourceUrl);
+  const extractedEmails = deduplicateEvidence(emails);
+  const extractedPhones = deduplicateEvidence(phones);
+  const extractedSocials = deduplicateEvidence(socialEvidence);
+  const contact = assessContactPage({
+    url: sourceUrl,
+    requestedUrl,
+    allowedHostnames,
+    html,
+    status,
+    fetchAssessment,
+    hasValidatedDirectMethod: Boolean(extractedEmails.length || extractedPhones.length),
+    hasContactStructuredData: structured.hasContactPage
+  });
+  const usableSameStorePage = contact.pageUsable && contact.sameStore;
+  const rankedEmails = usableSameStorePage ? extractedEmails : [];
+  const rankedPhones = usableSameStorePage ? extractedPhones : [];
+  const rankedSocials = usableSameStorePage ? extractedSocials : [];
   const contactPages = contact.accepted
     ? [makeEvidence({
         kind: "contact_page",
-        value: contact.url,
+        value: contact.sourceUrl,
         sourceUrl,
-        method: "route_classifier_v1",
+        method: "contact_page_decision_v2",
         confidence: 100,
-        validationReason: contact.reason
+        validationReason: contact.validationReason,
+        decision: contact
       })]
     : [];
 
@@ -323,9 +409,6 @@ export function extractContactEvidence({ html = "", url }) {
     }
   }
 
-  const rankedEmails = deduplicateEvidence(emails);
-  const rankedPhones = deduplicateEvidence(phones);
-  const rankedSocials = deduplicateEvidence(socialEvidence);
   const rankedNames = deduplicateEvidence(organizationNames);
   return {
     url: sourceUrl,
@@ -352,35 +435,13 @@ function legacyPageEvidence(page) {
     .map((value) => emailEvidence(value, sourceUrl, "legacy_compatibility", 50, route))
     .filter(Boolean);
   const phones = [];
-  const socialProfiles = (page.socialProfiles || [])
-    .map((value) => {
-      const result = validateSocialProfile(value);
-      return result.accepted && sourceUrl ? makeEvidence({
-        kind: "social_profile",
-        value: result.url,
-        sourceUrl,
-        method: "legacy_compatibility",
-        confidence: 50,
-        validationReason: result.reason
-      }) : null;
-    })
-    .filter(Boolean);
-  const contact = validateContactPageUrl(page.contactUrl || "", {
-    allowedHostnames: sourceUrl ? [new URL(sourceUrl).hostname] : []
-  });
+  const socialProfiles = [];
   const organizationNames = [];
   return {
     emails,
     phones,
     socialProfiles,
-    contactPages: contact.accepted && sourceUrl ? [makeEvidence({
-      kind: "contact_page",
-      value: contact.url,
-      sourceUrl,
-      method: "route_classifier_v1",
-      confidence: 100,
-      validationReason: contact.reason
-    })] : [],
+    contactPages: [],
     organizationNames
   };
 }

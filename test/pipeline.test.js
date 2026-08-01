@@ -433,3 +433,48 @@ test("structural rejects and scalar-only contact URLs cannot score or qualify", 
   assert.equal(scalarOnly.leads[0].contactability_tier, "research_only");
   assert.equal(scalarOnly.leads[0].contact_url, "");
 });
+
+test("a blank contact route cannot qualify, while a substantive same-store form can", async () => {
+  async function execute(body) {
+    return runPipeline({ storeConcurrency: 1, pageFetchConcurrency: 1 }, status(), {
+      readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
+      search: async (query) => [{ query, rank: 1, url: "https://contact-gate.myshopify.com/products/frame" }],
+      resolve: async (entry) => ({
+        ...entry,
+        html: "<html><body>Shopify eyewear specialist storefront</body></html>",
+        finalUrl: entry.url,
+        resolvedDomain: "contact-gate.myshopify.com",
+        stableIdentity: "contact-gate.myshopify.com",
+        allowedHostnames: ["contact-gate.myshopify.com"],
+        identityConfidence: 70
+      }),
+      validate: () => ({
+        valid: true,
+        rejectionReason: "",
+        shopifyConfidence: 100,
+        relevanceScore: 100,
+        storeFit: { state: "specialist", score: 100 },
+        evidence: {}
+      }),
+      discoverPages: async () => ["https://contact-gate.myshopify.com/pages/contact-us"],
+      fetchPage: async (url) => ({ body, finalUrl: url, status: 200, contentType: "text/html" }),
+      normalizeAi: async () => null
+    });
+  }
+
+  const blank = await execute("<html><body>Not found</body></html>");
+  assert.equal(blank.leads[0].status, "rejected");
+  assert.equal(blank.leads[0].contact_url, "");
+  assert.equal(blank.leads[0].contactability_tier, "none");
+  assert.equal(blank.leads[0].lead_score, "");
+  assert.equal(blank.leads[0].score_breakdown, null);
+
+  const form = await execute('<html><body><form><input type="email" name="email"><textarea name="message"></textarea><button type="submit">Send</button></form></body></html>');
+  assert.equal(form.leads[0].status, "qualified");
+  assert.equal(form.leads[0].contactability_tier, "indirect");
+  assert.equal(form.leads[0].contact_url, "https://contact-gate.myshopify.com/pages/contact-us");
+  assert.deepEqual(
+    form.leads[0].contact_evidence.contactPages[0].decision.positiveSignals,
+    ["contact_form"]
+  );
+});

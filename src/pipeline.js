@@ -151,6 +151,7 @@ async function processStore(candidate, config, dependencies) {
       let evidenceUrl = pageUrl;
       let fetchAssessment = null;
       let rendered = false;
+      let responseStatus = 200;
       if (pageUrl === candidate.finalUrl || pageUrl === candidate.url) {
         html = candidate.html;
         fetchAssessment = candidate.initialFetch?.assessment || null;
@@ -165,9 +166,17 @@ async function processStore(candidate, config, dependencies) {
         evidenceUrl = response.finalUrl;
         fetchAssessment = response.fetchAssessment || null;
         rendered = Boolean(response.rendered);
+        responseStatus = response.status ?? 200;
       }
       return {
-        page: dependencies.extractEvidence({ html, url: evidenceUrl }),
+        page: dependencies.extractEvidence({
+          html,
+          url: evidenceUrl,
+          requestedUrl: pageUrl,
+          allowedHostnames: candidate.allowedHostnames,
+          status: responseStatus,
+          fetchAssessment
+        }),
         document: { url: evidenceUrl, html, assessment: fetchAssessment, rendered },
         error: ""
       };

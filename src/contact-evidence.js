@@ -166,6 +166,115 @@ export function validateContactPageUrl(value, options = {}) {
   };
 }
 
+const CONTACT_HEADING_PATTERN = /\b(?:contact(?:\s+us)?|customer\s+(?:care|service|support)|get\s+in\s+touch|help(?:\s+center)?|support)\b/i;
+const GENERIC_ERROR_PATTERN = /^(?:4(?:04|10)\b|not\s+found\b|page\s+not\s+found\b|the\s+page\s+(?:could\s+not\s+be\s+found|does\s+not\s+exist)\b|content\s+unavailable\b|service\s+unavailable\b)/i;
+const SOFT_404_PATTERN = /\b(?:404|page\s+(?:was\s+)?not\s+found|page\s+(?:could\s+not\s+be\s+found|does\s+not\s+exist)|could(?:n['’]t|\s+not)\s+find\s+(?:that|the)\s+page|content\s+unavailable|service\s+unavailable)\b/i;
+const CHALLENGE_PATTERN = /(?:captcha|cf-chl-|checking\s+your\s+browser|verify\s+you\s+are\s+human|access\s+denied|unusual\s+traffic)/i;
+
+function visibleText(html = "") {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasUsableContactForm(html = "") {
+  for (const match of html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)) {
+    const form = `${match[1]} ${match[2]}`;
+    if (/\b(?:search|login|password|cart|newsletter|subscribe)\b/i.test(form)) continue;
+    const hasMessage = /<textarea\b/i.test(form) ||
+      /<(?:input|select)\b[^>]*\bname\s*=\s*["'][^"']*(?:message|inquiry|enquiry|comment)[^"']*["']/i.test(form);
+    const hasContactField = /<input\b[^>]*(?:type\s*=\s*["'](?:email|tel)["']|name\s*=\s*["'][^"']*(?:email|phone|telephone)[^"']*["'])/i.test(form);
+    const hasSubmit = /<(?:button|input)\b[^>]*(?:type\s*=\s*["']submit["']|>\s*(?:send|submit|contact))/i.test(form);
+    if ((hasMessage || hasContactField) && hasSubmit) return true;
+  }
+  return false;
+}
+
+function hasContactHeadingAndBody(html = "", text = visibleText(html)) {
+  const heading = [...html.matchAll(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/gi)]
+    .map((match) => visibleText(match[1]))
+    .find((value) => CONTACT_HEADING_PATTERN.test(value));
+  if (!heading) return false;
+  const supportingText = text.replace(heading, "").trim();
+  return supportingText.length >= 80 && supportingText.split(/\s+/).length >= 12;
+}
+
+/**
+ * Decide whether a fetched page is usable contact-page evidence. Route shape is
+ * deliberately only one gate; callers must provide the store's verified hosts.
+ */
+export function assessContactPage({
+  url,
+  requestedUrl = url,
+  allowedHostnames = [],
+  html = "",
+  status = 200,
+  fetchAssessment = null,
+  hasValidatedDirectMethod = false,
+  hasContactStructuredData = false
+} = {}) {
+  const route = validateContactPageUrl(url, { allowedHostnames });
+  let sameStore = false;
+  try {
+    const trustedHosts = allowedHostnames.length
+      ? allowedHostnames
+      : [parseHttpUrl(requestedUrl).hostname];
+    sameStore = sameAllowedHostname(url, trustedHosts);
+  } catch {
+    sameStore = false;
+  }
+
+  const text = visibleText(html);
+  const contactForm = hasUsableContactForm(html);
+  const contactHeadingBody = hasContactHeadingAndBody(html, text);
+  const structuredContact = Boolean(hasContactStructuredData);
+  const directMethod = Boolean(hasValidatedDirectMethod);
+  const positiveSignals = [
+    contactForm ? "contact_form" : "",
+    directMethod ? "validated_direct_method" : "",
+    structuredContact ? "contact_structured_data" : "",
+    contactHeadingBody ? "contact_heading_with_substantive_body" : ""
+  ].filter(Boolean);
+
+  const httpUsable = Number(status) >= 200 && Number(status) < 300;
+  const challenge = Boolean(fetchAssessment?.challenge) || CHALLENGE_PATTERN.test(html);
+  const genericError = GENERIC_ERROR_PATTERN.test(text) ||
+    (text.length <= 500 && SOFT_404_PATTERN.test(text)) ||
+    /<title\b[^>]*>\s*(?:404|not found|page not found)\b/i.test(html);
+  const blank = text.length === 0;
+  const tinyWithoutSubstance = text.length < 40 && !contactForm && !structuredContact && !directMethod;
+  const pageUsable = httpUsable && !challenge && !genericError && !blank && !tinyWithoutSubstance;
+  const accepted = route.accepted && sameStore && pageUsable && positiveSignals.length > 0;
+
+  let validationReason = "validated_contact_page";
+  if (!route.accepted) validationReason = route.reason;
+  else if (!sameStore) validationReason = "unverified_final_host";
+  else if (!httpUsable) validationReason = "unsuccessful_http_status";
+  else if (challenge) validationReason = "challenge_page";
+  else if (genericError) validationReason = "soft_404_or_error_page";
+  else if (blank) validationReason = "blank_page";
+  else if (tinyWithoutSubstance) validationReason = "insufficient_page_content";
+  else if (!positiveSignals.length) validationReason = "missing_contact_signals";
+
+  return Object.freeze({
+    accepted,
+    routeAccepted: route.accepted,
+    routeReason: route.reason,
+    sameStore,
+    httpUsable,
+    pageUsable,
+    positiveSignals: Object.freeze(positiveSignals),
+    validationReason,
+    sourceUrl: route.url || ""
+  });
+}
+
 function socialResult(reason, overrides = {}) {
   return { accepted: false, reason, platform: "", url: "", ...overrides };
 }
@@ -246,7 +355,8 @@ export function makeEvidence({
   sourceUrl,
   method,
   confidence,
-  validationReason
+  validationReason,
+  decision
 }) {
   return Object.freeze({
     kind,
@@ -254,6 +364,7 @@ export function makeEvidence({
     sourceUrl,
     method,
     confidence,
-    validationReason
+    validationReason,
+    ...(decision ? { decision } : {})
   });
 }
