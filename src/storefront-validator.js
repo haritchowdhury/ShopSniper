@@ -245,7 +245,7 @@ export function evaluateStoreFit(candidate, documents = uniqueDocuments(candidat
   };
 }
 
-function qualifierAccepts(qualifier, state) {
+export function storeFitAcceptsIntent(qualifier, state) {
   if (qualifier === "brand") return state === "specialist";
   return state === "specialist" || state === "category_seller";
 }
@@ -301,7 +301,7 @@ export function validateStorefront(candidate, config, { final = false } = {}) {
   else if (final && shopifyConfidence < 30) rejectionReason = "not_shopify";
   else if (final && storeFit.state === "mismatch") rejectionReason = "wrong_category";
   else if (final && storeFit.state === "category_seller" &&
-    !qualifierAccepts(qualifier, storeFit.state)) {
+    !storeFitAcceptsIntent(qualifier, storeFit.state)) {
     rejectionReason = "wrong_store_type";
   }
   else if (final && blocked) rejectionReason = "storefront_blocked";

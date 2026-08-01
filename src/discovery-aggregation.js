@@ -17,13 +17,29 @@ function compareCandidates(left, right) {
     String(left.url || "").localeCompare(String(right.url || ""));
 }
 
-function occurrence(candidate) {
+function sortedStrings(values) {
+  return [...new Set((values || []).filter(Boolean).map(String))].sort();
+}
+
+function intentOf(candidate) {
+  const intent = candidate.categoryIntent || candidate;
   return {
-    shopType: candidate.shopType || "",
-    businessQualifier: candidate.businessQualifier || "unspecified",
+    originalShopType: intent.originalShopType || "",
+    shopType: intent.shopType || "",
+    businessQualifier: intent.businessQualifier || "unspecified"
+  };
+}
+
+function occurrence(candidate) {
+  const categoryIntent = intentOf(candidate);
+  return {
+    categoryIntent,
+    ...categoryIntent,
     query: candidate.query || "",
     queryScore: candidate.queryScore ?? null,
     queryGenerationReason: candidate.queryGenerationReason || "",
+    querySourceUrls: sortedStrings(candidate.querySourceUrls),
+    categoryVocabulary: sortedStrings(candidate.categoryVocabulary),
     rank: candidate.rank ?? null,
     resultUrl: candidate.url || "",
     finalUrl: candidate.finalUrl || "",
@@ -62,20 +78,24 @@ export function mergeDiscoveryCandidates(candidates) {
     const representative = ranked[0];
     const intents = new Map();
     for (const member of members) {
-      const key = `${member.shopType || ""}\u0000${member.businessQualifier || "unspecified"}`;
+      const memberIntent = intentOf(member);
+      const key = `${memberIntent.shopType}\u0000${memberIntent.businessQualifier}`;
       if (!intents.has(key)) {
         intents.set(key, {
-          originalShopType: member.originalShopType || member.shopType || "",
-          shopType: member.shopType || "",
-          businessQualifier: member.businessQualifier || "unspecified",
+          ...memberIntent,
           categoryVocabulary: []
         });
       }
       const intent = intents.get(key);
-      intent.categoryVocabulary = [...new Set([
+      const originalShopTypes = sortedStrings([
+        intent.originalShopType,
+        memberIntent.originalShopType
+      ]);
+      intent.originalShopType = originalShopTypes[0] || "";
+      intent.categoryVocabulary = sortedStrings([
         ...intent.categoryVocabulary,
         ...(member.categoryVocabulary || [])
-      ])];
+      ]);
     }
     const aliases = [...new Set(members.flatMap(normalizedAliases))].sort();
     const myshopify = aliases.filter((value) => value.endsWith(".myshopify.com")).sort()[0];
@@ -93,10 +113,14 @@ export function mergeDiscoveryCandidates(candidates) {
         confidence: representative.identityConfidence || 0
       },
       categoryIntents: [...intents.values()].sort((a, b) =>
-        `${a.shopType}:${a.businessQualifier}`.localeCompare(`${b.shopType}:${b.businessQualifier}`)
+        `${a.shopType}:${a.businessQualifier}:${a.originalShopType}`.localeCompare(
+          `${b.shopType}:${b.businessQualifier}:${b.originalShopType}`
+        )
       ),
       occurrences: members.map(occurrence).sort((a, b) =>
-        `${a.query}:${a.rank}:${a.resultUrl}`.localeCompare(`${b.query}:${b.rank}:${b.resultUrl}`)
+        `${a.query}:${a.rank}:${a.resultUrl}:${a.originalShopType}:${a.businessQualifier}`.localeCompare(
+          `${b.query}:${b.rank}:${b.resultUrl}:${b.originalShopType}:${b.businessQualifier}`
+        )
       ),
       duplicateCount: Math.max(0, members.length - 1)
     };

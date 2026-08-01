@@ -106,19 +106,29 @@ export async function probeCandidates(
   } = {}
 ) {
   return mapWithConcurrency(candidates, config.queryProbeConcurrency, async (candidate) => {
-    if (cache.has(candidate.query)) {
-      const cached = cache.get(candidate.query);
-      onProbed(cached, true);
-      return cached;
-    }
-    try {
-      const page = await searchPage(candidate.query, config);
-      const probe = summarizeProbe(candidate, page, config);
-      cache.set(candidate.query, probe);
-      onProbed(probe, false);
-      return probe;
-    } catch (error) {
-      const probe = {
+    const { value: providerResult, cacheHit } = await cache.getOrCreate(
+      candidate.query,
+      async () => {
+      try {
+        return {
+          ok: true,
+          page: await searchPage(candidate.query, config)
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            name: error instanceof Error ? error.name : "Error",
+            message: error instanceof Error ? error.message : String(error)
+          }
+        };
+      }
+      }
+    );
+
+    const probe = providerResult.ok
+      ? summarizeProbe(candidate, providerResult.page, config)
+      : {
         candidate,
         results: [],
         rawResults: 0,
@@ -129,11 +139,9 @@ export async function probeCandidates(
         estimatedTotalResults: 0,
         baseScore: 0,
         rejectionReason: "probe_failed",
-        error: error instanceof Error ? error.message : String(error)
+        error: providerResult.error.message
       };
-      cache.set(candidate.query, probe);
-      onProbed(probe, false);
-      return probe;
-    }
+    onProbed(probe, cacheHit);
+    return probe;
   });
 }

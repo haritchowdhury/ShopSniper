@@ -472,7 +472,6 @@ test("manual-category planner keeps audits in memory and performs no CSV I/O", a
 
 test("qualifier variants keep separate plans while sharing one Google probe", async () => {
   const status = createInitialStatus();
-  const entry = candidate("barrel jeans");
   let searchCalls = 0;
   const planning = await planGeneratedQueries({
     generatedQueryCount: 1,
@@ -494,15 +493,18 @@ test("qualifier variants keep separate plans while sharing one Google probe", as
         businessQualifier: "unspecified"
       }
     ],
-    generateInitial: async () => ({
+    generateInitial: async (category) => ({
       research: {
-        concrete_products: ["barrel jeans"],
+        concrete_products: [category.businessQualifier === "brand" ? "barrel jeans" : "wide leg jeans"],
         growing_products: [],
         evergreen_products: [],
         product_title_terms: [],
         source_urls: []
       },
-      candidates: [entry],
+      candidates: [candidate("barrel jeans", {
+        query_generation_reason: `${category.businessQualifier} reason`,
+        source_urls: [`https://research.invalid/${category.businessQualifier}`]
+      })],
       mode: "ai",
       error: ""
     }),
@@ -520,6 +522,157 @@ test("qualifier variants keep separate plans while sharing one Google probe", as
     planning.selected.map(({ businessQualifier }) => businessQualifier),
     ["brand", "unspecified"]
   );
+  assert.deepEqual(
+    planning.selected.map(({ originalShopType }) => originalShopType),
+    ["Clothing Brand", "Clothing"]
+  );
+  assert.deepEqual(
+    planning.selected.map(({ queryGenerationReason }) => queryGenerationReason),
+    ["brand reason", "unspecified reason"]
+  );
+  assert.deepEqual(
+    planning.selected.map(({ querySourceUrls }) => querySourceUrls),
+    [
+      ["https://research.invalid/brand"],
+      ["https://research.invalid/unspecified"]
+    ]
+  );
+  assert.deepEqual(
+    planning.selected.map(({ categoryVocabulary }) => categoryVocabulary),
+    [["barrel jeans"], ["wide leg jeans"]]
+  );
+  assert.deepEqual(
+    planning.audits.filter(({ status: auditStatus }) => auditStatus === "selected")
+      .map(({ original_shop_type, query_generation_reason, source_urls }) => ({
+        original_shop_type,
+        query_generation_reason,
+        source_urls
+      })),
+    [
+      {
+        original_shop_type: "Clothing Brand",
+        query_generation_reason: "brand reason",
+        source_urls: ["https://research.invalid/brand"]
+      },
+      {
+        original_shop_type: "Clothing",
+        query_generation_reason: "unspecified reason",
+        source_urls: ["https://research.invalid/unspecified"]
+      }
+    ]
+  );
+});
+
+test("cached provider failures remain candidate-specific", async () => {
+  const config = { queryProbeConcurrency: 1 };
+  const cache = new QueryProbeCache();
+  let calls = 0;
+  const searchPage = async () => {
+    calls += 1;
+    throw new Error("controlled provider failure");
+  };
+  const brand = candidate("barrel jeans", {
+    query_generation_reason: "brand reason",
+    source_urls: ["https://research.invalid/brand"]
+  });
+  const retailer = candidate("barrel jeans", {
+    query_generation_reason: "retailer reason",
+    source_urls: ["https://research.invalid/retailer"]
+  });
+
+  const [brandProbe] = await probeCandidates([brand], config, { searchPage, cache });
+  const [retailerProbe] = await probeCandidates([retailer], config, { searchPage, cache });
+
+  assert.equal(calls, 1);
+  assert.equal(brandProbe.candidate, brand);
+  assert.equal(retailerProbe.candidate, retailer);
+  assert.equal(brandProbe.rejectionReason, "probe_failed");
+  assert.equal(retailerProbe.rejectionReason, "probe_failed");
+});
+
+test("cached provider failures produce separate intent-specific audits", async () => {
+  const currentStatus = createInitialStatus();
+  let calls = 0;
+  const planning = await planGeneratedQueries({
+    generatedQueryCount: 1,
+    queryRepairRounds: 0,
+    queryProbeConcurrency: 1
+  }, currentStatus, {
+    categories: [
+      { originalShopType: "Clothing Brand", shopType: "clothing", businessQualifier: "brand" },
+      { originalShopType: "Clothing Retailer", shopType: "clothing", businessQualifier: "retailer" }
+    ],
+    generateInitial: async (category) => ({
+      research: {
+        concrete_products: ["barrel jeans"], growing_products: [],
+        evergreen_products: [], product_title_terms: [], source_urls: []
+      },
+      candidates: [candidate("barrel jeans", {
+        query_generation_reason: `${category.businessQualifier} failure audit`,
+        source_urls: [`https://research.invalid/${category.businessQualifier}`]
+      })],
+      mode: "ai",
+      error: ""
+    }),
+    searchPage: async () => {
+      calls += 1;
+      throw new Error("controlled provider failure");
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(planning.audits.map((audit) => ({
+    original: audit.original_shop_type,
+    qualifier: audit.business_qualifier,
+    reason: audit.query_generation_reason,
+    sources: audit.source_urls,
+    rejection: audit.rejection_reason
+  })), [
+    {
+      original: "Clothing Brand", qualifier: "brand", reason: "brand failure audit",
+      sources: ["https://research.invalid/brand"], rejection: "probe_failed"
+    },
+    {
+      original: "Clothing Retailer", qualifier: "retailer", reason: "retailer failure audit",
+      sources: ["https://research.invalid/retailer"], rejection: "probe_failed"
+    }
+  ]);
+});
+
+test("query cache keys normalized text and provider contract version", () => {
+  const v1 = new QueryProbeCache("google-contract-v1");
+  const v2 = new QueryProbeCache("google-contract-v2");
+  const providerPage = { ok: true, page: { results: [] } };
+  v1.set(" SITE:myshopify.com/products   Barrel Jeans ", providerPage);
+
+  assert.equal(v1.get("site:myshopify.com/products barrel jeans"), providerPage);
+  assert.equal(v2.has("site:myshopify.com/products barrel jeans"), false);
+});
+
+test("concurrent identical candidates share one in-flight provider call", async () => {
+  let calls = 0;
+  const first = candidate("barrel jeans", { query_generation_reason: "first" });
+  const second = candidate("barrel jeans", { query_generation_reason: "second" });
+  const probes = await probeCandidates([first, second], {
+    queryProbeConcurrency: 2,
+    minQueryResults: 1,
+    minQueryUniqueHosts: 1,
+    minQueryRelevantResults: 1
+  }, {
+    searchPage: async () => {
+      calls += 1;
+      await Promise.resolve();
+      return {
+        results: [result("denim", "barrel jeans")],
+        estimatedTotalResults: 1,
+        nextPageAvailable: false
+      };
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(probes[0].candidate, first);
+  assert.equal(probes[1].candidate, second);
 });
 
 test("generated-query audit atomically escapes arrays, commas and quotes", async (context) => {

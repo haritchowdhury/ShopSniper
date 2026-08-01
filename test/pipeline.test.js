@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runPipeline } from "../src/pipeline.js";
+import { normalizeShopType } from "../src/category-input.js";
 
 function status() {
   return {
@@ -107,6 +108,8 @@ test("one failed query does not stop later queries", async () => {
 
 test("selected probe results enter the lead pipeline without another Google search", async () => {
   let searchCalls = 0;
+  let resolverIntent;
+  const intent = normalizeShopType("  eYeWeAr   BrAnD  ");
   const currentStatus = status();
   const cachedResult = {
     query: "site:myshopify.com/products barrel jeans",
@@ -128,8 +131,8 @@ test("selected probe results enter the lead pipeline without another Google sear
       planQueries: async () => ({
         selected: [
           {
-            shopType: "clothing",
-            businessQualifier: "brand",
+            ...intent,
+            categoryIntent: intent,
             categoryVocabulary: ["barrel jeans"],
             query: cachedResult.query,
             queryScore: 91,
@@ -142,16 +145,19 @@ test("selected probe results enter the lead pipeline without another Google sear
         searchCalls += 1;
         return [];
       },
-      resolve: async (entry) => ({
-        ...entry,
-        html: "<html><body>Shopify barrel jeans store with enough content</body></html>",
-        finalUrl: "https://denim.example/products/barrel-jeans",
-        canonicalUrl: "",
-        myshopifyDomain: "denim.myshopify.com",
-        resolvedDomain: "denim.example",
-        allowedHostnames: ["denim.myshopify.com", "denim.example"],
-        identityConfidence: 100
-      }),
+      resolve: async (entry) => {
+        resolverIntent = entry;
+        return {
+          ...entry,
+          html: "<html><body>Shopify barrel jeans store with enough content</body></html>",
+          finalUrl: "https://denim.example/products/barrel-jeans",
+          canonicalUrl: "",
+          myshopifyDomain: "denim.myshopify.com",
+          resolvedDomain: "denim.example",
+          allowedHostnames: ["denim.myshopify.com", "denim.example"],
+          identityConfidence: 100
+        };
+      },
       validate: () => ({
         valid: true,
         rejectionReason: "",
@@ -190,7 +196,10 @@ test("selected probe results enter the lead pipeline without another Google sear
   );
   const records = result.leads;
   assert.equal(searchCalls, 0);
-  assert.equal(records[0].shop_type, "clothing");
+  assert.equal(resolverIntent.originalShopType, "eYeWeAr BrAnD");
+  assert.deepEqual(resolverIntent.categoryIntent, intent);
+  assert.equal(records[0].original_shop_type, "eYeWeAr BrAnD");
+  assert.equal(records[0].shop_type, "eyewear");
   assert.equal(records[0].business_qualifier, "brand");
   assert.equal(records[0].generated_query, cachedResult.query);
   assert.equal(records[0].query_score, 91);
@@ -340,11 +349,14 @@ test("merged discovery is order-independent and retains every category occurrenc
         identityEvidence: { confidence: entry.identityConfidence }
       }),
       validate: (candidate, _config, { final }) => ({
-        valid: true,
-        rejectionReason: "",
+        valid: !final || candidate.shopType === "eyewear",
+        rejectionReason: final && candidate.shopType !== "eyewear" ? "wrong_category" : "",
         shopifyConfidence: 100,
         relevanceScore: final ? (candidate.shopType === "eyewear" ? 100 : 60) : 100,
-        storeFit: { state: "specialist", score: candidate.shopType === "eyewear" ? 100 : 60 },
+        storeFit: {
+          state: candidate.shopType === "eyewear" ? "specialist" : "mismatch",
+          score: candidate.shopType === "eyewear" ? 100 : 0
+        },
         evidence: {}
       }),
       discoverPages: async () => ["https://merged.example/pages/contact"],
@@ -357,22 +369,41 @@ test("merged discovery is order-independent and retains every category occurrenc
       query: "fixture", rank: 5, url: "https://merged.example/products/a",
       finalUrl: "https://merged.example/products/a", resolvedDomain: "merged.example",
       myshopifyDomain: "merged.myshopify.com", allowedHostnames: ["merged.example", "merged.myshopify.com"],
-      shopType: "clothing", businessQualifier: "retailer", categoryVocabulary: [], identityConfidence: 70
+      originalShopType: "Clothing Retailer", shopType: "clothing", businessQualifier: "retailer",
+      categoryVocabulary: ["clothing"], querySourceUrls: ["https://research.invalid/clothing"], identityConfidence: 70
     },
     {
       query: "fixture", rank: 1, url: "https://merged.myshopify.com/products/b",
       finalUrl: "https://merged.myshopify.com/products/b", resolvedDomain: "merged.myshopify.com",
       myshopifyDomain: "merged.myshopify.com", allowedHostnames: ["merged.myshopify.com"],
-      shopType: "eyewear", businessQualifier: "brand", categoryVocabulary: [], identityConfidence: 100
+      originalShopType: "Eyewear Brand", shopType: "eyewear", businessQualifier: "brand",
+      categoryVocabulary: ["eyewear"], querySourceUrls: ["https://research.invalid/eyewear"], identityConfidence: 100
     }
   ];
   const forward = await execute(occurrences);
   const reverse = await execute([...occurrences].reverse());
   assert.equal(forward.leads.length, 1);
   assert.equal(forward.leads[0].discovery_occurrences.length, 2);
-  assert.equal(forward.leads[0].matched_categories.length, 2);
+  assert.equal(forward.leads[0].matched_categories.length, 1);
+  assert.equal(forward.leads[0].matched_categories[0].originalShopType, "Eyewear Brand");
+  assert.equal(forward.leads[0].discovery_occurrences[0].originalShopType.length > 0, true);
+  assert.deepEqual(
+    forward.leads[0].discovery_occurrences.flatMap(({ querySourceUrls }) => querySourceUrls).sort(),
+    ["https://research.invalid/clothing", "https://research.invalid/eyewear"]
+  );
+  assert.equal(forward.leads[0].original_shop_type, "Eyewear Brand");
   assert.equal(forward.leads[0].shop_type, "eyewear");
   assert.deepEqual(forward.leads[0].discovery_occurrences, reverse.leads[0].discovery_occurrences);
+  assert.deepEqual(forward.leads[0].matched_categories, reverse.leads[0].matched_categories);
+  assert.equal(forward.leads[0].original_shop_type, reverse.leads[0].original_shop_type);
+
+  const noMatches = await execute(occurrences.map((entry, index) => ({
+    ...entry,
+    originalShopType: index ? "Accessories Brand" : "Clothing Retailer",
+    shopType: index ? "accessories" : "clothing"
+  })));
+  assert.deepEqual(noMatches.leads[0].matched_categories, []);
+  assert.equal(noMatches.leads[0].original_shop_type, "Accessories Brand");
 });
 
 test("research-only stores are rejected with a null v2 score", async () => {

@@ -55,6 +55,19 @@ export function normalizeShopType(value) {
   };
 }
 
+export function toCategoryIntent(category) {
+  if (!category || typeof category !== "object") {
+    throw new Error("Category intent must be an object");
+  }
+  return {
+    originalShopType: typeof category.originalShopType === "string"
+      ? category.originalShopType
+      : "",
+    shopType: typeof category.shopType === "string" ? category.shopType : "",
+    businessQualifier: category.businessQualifier || "unspecified"
+  };
+}
+
 function categoryKey(category) {
   return `${category.shopType}\u0000${category.businessQualifier}`;
 }

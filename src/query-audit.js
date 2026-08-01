@@ -18,7 +18,9 @@ export const QUERY_AUDIT_HEADERS = [
   "source_urls",
   "status",
   "rejection_reason",
-  "business_qualifier"
+  "business_qualifier",
+  "original_shop_type",
+  "category_vocabulary"
 ];
 
 export async function writeQueryAudit(filePath, records) {
@@ -32,7 +34,10 @@ export async function writeQueryAudit(filePath, records) {
     ...record,
     source_urls: Array.isArray(record.source_urls)
       ? JSON.stringify(record.source_urls)
-      : record.source_urls || ""
+      : record.source_urls || "",
+    category_vocabulary: Array.isArray(record.category_vocabulary)
+      ? JSON.stringify(record.category_vocabulary)
+      : record.category_vocabulary || ""
   }));
 
   try {

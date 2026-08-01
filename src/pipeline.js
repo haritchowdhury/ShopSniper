@@ -2,6 +2,7 @@ import { searchGoogle } from "./search.js";
 import { planGeneratedQueries } from "./query-planner.js";
 import { resolveStoreIdentity } from "./domain-resolver.js";
 import {
+  storeFitAcceptsIntent,
   storefrontRejectionPriority,
   validateStorefront
 } from "./storefront-validator.js";
@@ -25,6 +26,7 @@ function safeErrorType(error) {
 
 function blankRecord(overrides = {}) {
   return {
+    original_shop_type: "",
     shop_type: "",
     business_qualifier: "unspecified",
     generated_query: "",
@@ -68,6 +70,7 @@ function blankRecord(overrides = {}) {
 
 function recordFromCandidate(candidate, overrides = {}) {
   return blankRecord({
+    original_shop_type: candidate.originalShopType || "",
     shop_type: candidate.shopType || "",
     business_qualifier: candidate.businessQualifier || "unspecified",
     generated_query: candidate.query || "",
@@ -110,6 +113,7 @@ async function processStore(candidate, config, dependencies) {
       store_fit_state: validation.storeFit?.state || "",
       store_fit_evidence: validation.storeFit ? [{
         intent: {
+          originalShopType: candidate.originalShopType || "",
           shopType: candidate.shopType || "",
           businessQualifier: candidate.businessQualifier || "unspecified"
         },
@@ -119,7 +123,7 @@ async function processStore(candidate, config, dependencies) {
       identity_confidence: candidate.identityConfidence,
       identity_evidence: candidate.identityEvidence || null,
       discovery_occurrences: candidate.occurrences || [],
-      matched_categories: candidate.categoryIntents || [],
+      matched_categories: [],
       status: "rejected",
       rejection_reason: validation.rejectionReason,
       additional_information: JSON.stringify(validation.evidence)
@@ -194,42 +198,68 @@ async function processStore(candidate, config, dependencies) {
   const intents = candidate.categoryIntents?.length
     ? candidate.categoryIntents
     : [{
+        originalShopType: candidate.originalShopType || "",
         shopType: candidate.shopType,
         businessQualifier: candidate.businessQualifier || "unspecified",
         categoryVocabulary: candidate.categoryVocabulary || []
       }];
-  const validations = intents.map((intent) => ({
-    intent,
-    validation: dependencies.validate(
-      { ...candidate, ...intent, evidencePages },
+  const validations = intents.map((intent) => {
+    const item = dependencies.validate(
+      {
+        ...candidate,
+        ...intent,
+        categoryIntent: {
+          originalShopType: intent.originalShopType || "",
+          shopType: intent.shopType || "",
+          businessQualifier: intent.businessQualifier || "unspecified"
+        },
+        evidencePages
+      },
       config,
       { final: true }
-    )
-  }));
+    );
+    return {
+      intent,
+      validation: item,
+      accepted: storeFitAcceptsIntent(
+        intent.businessQualifier || "unspecified",
+        item.storeFit?.state
+      )
+    };
+  });
   validations.sort((left, right) =>
+    Number(right.accepted) - Number(left.accepted) ||
     Number(right.validation.valid) - Number(left.validation.valid) ||
     storefrontRejectionPriority(left.validation.rejectionReason) -
       storefrontRejectionPriority(right.validation.rejectionReason) ||
     Number(right.validation.relevanceScore || 0) - Number(left.validation.relevanceScore || 0) ||
-    `${left.intent.shopType}:${left.intent.businessQualifier}`.localeCompare(
-      `${right.intent.shopType}:${right.intent.businessQualifier}`
+    `${left.intent.shopType}:${left.intent.businessQualifier}:${left.intent.originalShopType}`.localeCompare(
+      `${right.intent.shopType}:${right.intent.businessQualifier}:${right.intent.originalShopType}`
     )
   );
+  const matchedCategories = validations
+    .filter(({ accepted }) => accepted)
+    .map(({ intent }) => intent);
   ({ validation } = validations[0]);
   const selectedIntent = validations[0].intent;
   if (!validation.valid) {
     return recordFromCandidate(candidate, {
       shop_type: selectedIntent.shopType,
+      original_shop_type: selectedIntent.originalShopType || "",
       business_qualifier: selectedIntent.businessQualifier,
       shopify_confidence: validation.shopifyConfidence,
       relevance_score: validation.relevanceScore,
       lead_score: "",
       store_fit_state: validation.storeFit?.state || "",
-      store_fit_evidence: validations.map(({ intent, validation: item }) => ({ intent, ...item.storeFit })),
+      store_fit_evidence: validations.map(({ intent, validation: item, accepted }) => ({
+        intent,
+        accepted,
+        ...item.storeFit
+      })),
       identity_confidence: candidate.identityConfidence,
       identity_evidence: candidate.identityEvidence || null,
       discovery_occurrences: candidate.occurrences || [],
-      matched_categories: intents,
+      matched_categories: matchedCategories,
       status: "rejected",
       rejection_reason: validation.rejectionReason,
       additional_information: JSON.stringify(validation.evidence)
@@ -291,6 +321,7 @@ async function processStore(candidate, config, dependencies) {
 
   return recordFromCandidate(candidate, {
     shop_type: selectedIntent.shopType,
+    original_shop_type: selectedIntent.originalShopType || "",
     business_qualifier: selectedIntent.businessQualifier,
     store_name: ai?.store_name || evidence.storeName,
     email,
@@ -305,14 +336,18 @@ async function processStore(candidate, config, dependencies) {
     lead_score: leadStatus === "qualified" ? scoreBreakdown.total : "",
     scoring_version: leadStatus === "qualified" ? 2 : "",
     store_fit_state: validation.storeFit?.state || "",
-    store_fit_evidence: validations.map(({ intent, validation: item }) => ({ intent, ...item.storeFit })),
+    store_fit_evidence: validations.map(({ intent, validation: item, accepted }) => ({
+      intent,
+      accepted,
+      ...item.storeFit
+    })),
     contactability_tier: contactabilityTier,
     contact_evidence: evidence.evidence || null,
     identity_confidence: candidate.identityConfidence,
     identity_evidence: candidate.identityEvidence || null,
     score_breakdown: leadStatus === "qualified" ? scoreBreakdown : null,
     discovery_occurrences: candidate.occurrences || [],
-    matched_categories: intents,
+    matched_categories: matchedCategories,
     status: leadStatus,
     rejection_reason: rejectionReason,
     error: aiError ? `AI normalization failed; deterministic evidence retained (${aiError})` : ""
@@ -341,6 +376,7 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       config.maxQueries
     );
     queryPlans = queries.map((query) => ({
+      originalShopType: "",
       shopType: "",
       businessQualifier: "unspecified",
       categoryVocabulary: [],
@@ -380,6 +416,7 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       results = queryPlan.results || await dependencies.search(query, config);
       results = results.map((result) => ({
         ...result,
+        originalShopType: queryPlan.originalShopType || result.originalShopType || "",
         shopType: queryPlan.shopType || result.shopType || "",
         businessQualifier: queryPlan.shopType
           ? queryPlan.businessQualifier || "unspecified"
@@ -388,7 +425,17 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
           ? queryPlan.categoryVocabulary
           : result.categoryVocabulary || [],
         queryScore: queryPlan.queryScore,
-        queryGenerationReason: queryPlan.queryGenerationReason
+        queryGenerationReason: queryPlan.queryGenerationReason,
+        querySourceUrls: queryPlan.querySourceUrls?.length
+          ? queryPlan.querySourceUrls
+          : result.querySourceUrls || [],
+        categoryIntent: queryPlan.categoryIntent || {
+          originalShopType: queryPlan.originalShopType || result.originalShopType || "",
+          shopType: queryPlan.shopType || result.shopType || "",
+          businessQualifier: queryPlan.shopType
+            ? queryPlan.businessQualifier || "unspecified"
+            : result.businessQualifier || "unspecified"
+        }
       }));
     } catch (error) {
       diagnostics.push({
@@ -474,7 +521,7 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
           identity_confidence: candidate.identityConfidence,
           identity_evidence: candidate.identityEvidence || null,
           discovery_occurrences: candidate.occurrences || [],
-          matched_categories: candidate.categoryIntents || [],
+          matched_categories: [],
           status: "failed",
           rejection_reason: "processing_failed",
           error: `Store processing failed (${safeErrorType(error)})`

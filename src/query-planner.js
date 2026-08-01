@@ -1,4 +1,4 @@
-import { readCategories } from "./category-input.js";
+import { readCategories, toCategoryIntent } from "./category-input.js";
 import {
   generateInitialCandidates,
   generateRepairs
@@ -16,6 +16,7 @@ function messageOf(error) {
 
 function blankAudit(shopType, overrides = {}) {
   return {
+    original_shop_type: "",
     shop_type: shopType,
     query: "",
     query_score: "",
@@ -29,6 +30,7 @@ function blankAudit(shopType, overrides = {}) {
     seasonality: "",
     query_generation_reason: "",
     source_urls: [],
+    category_vocabulary: [],
     status: "",
     rejection_reason: "",
     business_qualifier: "",
@@ -36,24 +38,27 @@ function blankAudit(shopType, overrides = {}) {
   };
 }
 
-function rejectedCandidateAudit(shopType, rejected, businessQualifier) {
+function rejectedCandidateAudit(category, rejected, categoryVocabulary) {
   const candidate = rejected.candidate || {};
-  return blankAudit(shopType, {
+  return blankAudit(category.shopType, {
+    original_shop_type: category.originalShopType,
     query: rejected.query || candidate.query || "",
     market_signal: candidate.market_signal || "",
     seasonality: candidate.seasonality || "",
     query_generation_reason: candidate.query_generation_reason || "",
     source_urls: candidate.source_urls || [],
-    business_qualifier: businessQualifier,
+    category_vocabulary: categoryVocabulary,
+    business_qualifier: category.businessQualifier || "unspecified",
     status: "rejected",
     rejection_reason: rejected.rejectionReason
   });
 }
 
-function probeAudit(shopType, probe, selectedScores, businessQualifier) {
+function probeAudit(category, probe, selectedScores, categoryVocabulary) {
   const candidate = probe.candidate;
   const selectedScore = selectedScores.get(candidate.query);
-  return blankAudit(shopType, {
+  return blankAudit(category.shopType, {
+    original_shop_type: category.originalShopType,
     query: candidate.query,
     query_score: selectedScore ?? probe.baseScore,
     raw_results: probe.rawResults,
@@ -66,7 +71,8 @@ function probeAudit(shopType, probe, selectedScores, businessQualifier) {
     seasonality: candidate.seasonality,
     query_generation_reason: candidate.query_generation_reason,
     source_urls: candidate.source_urls,
-    business_qualifier: businessQualifier,
+    category_vocabulary: categoryVocabulary,
+    business_qualifier: category.businessQualifier || "unspecified",
     status: selectedScore == null ? "rejected" : "selected",
     rejection_reason:
       selectedScore == null ? probe.rejectionReason || "not_selected" : ""
@@ -85,6 +91,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
       selected: [],
       audits: [
         blankAudit(category.shopType, {
+          original_shop_type: category.originalShopType,
           business_qualifier: category.businessQualifier || "unspecified",
           status: "failed",
           rejection_reason: "candidate_generation_failed",
@@ -117,11 +124,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
   });
   status.queryCandidatesValidated += validated.accepted.length;
   const rejectedAudits = validated.rejected.map((rejected) =>
-    rejectedCandidateAudit(
-      category.shopType,
-      rejected,
-      category.businessQualifier || "unspecified"
-    )
+    rejectedCandidateAudit(category, rejected, categoryVocabulary)
   );
 
   status.stage = "probing_queries";
@@ -193,11 +196,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     status.queryCandidatesValidated += validated.accepted.length;
     rejectedAudits.push(
       ...validated.rejected.map((rejected) =>
-        rejectedCandidateAudit(
-          category.shopType,
-          rejected,
-          category.businessQualifier || "unspecified"
-        )
+        rejectedCandidateAudit(category, rejected, categoryVocabulary)
       )
     );
     status.stage = "probing_queries";
@@ -218,13 +217,13 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     ranked.selected.map((probe) => [probe.candidate.query, probe.queryScore])
   );
   const selected = ranked.selected.map((probe) => ({
-    originalShopType: category.originalShopType,
-    shopType: category.shopType,
-    businessQualifier: category.businessQualifier || "unspecified",
+    ...toCategoryIntent(category),
+    categoryIntent: toCategoryIntent(category),
     categoryVocabulary,
     query: probe.candidate.query,
     queryScore: probe.queryScore,
     queryGenerationReason: probe.candidate.query_generation_reason,
+    querySourceUrls: probe.candidate.source_urls || [],
     results: probe.results
   }));
   status.queriesSelected += selected.length;
@@ -235,12 +234,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     audits: [
       ...rejectedAudits,
       ...allProbes.map((probe) =>
-        probeAudit(
-          category.shopType,
-          probe,
-          selectedScores,
-          category.businessQualifier || "unspecified"
-        )
+        probeAudit(category, probe, selectedScores, categoryVocabulary)
       )
     ]
   };
@@ -270,7 +264,8 @@ export async function planGeneratedQueries(
   status.blankShopTypesSkipped = input.blanksSkipped;
 
   const audits = input.invalid.map((invalid) =>
-    blankAudit(invalid.originalShopType, {
+    blankAudit("", {
+      original_shop_type: invalid.originalShopType,
       status: "rejected",
       rejection_reason: `invalid_shop_type_row_${invalid.row}: ${invalid.error}`
     })
