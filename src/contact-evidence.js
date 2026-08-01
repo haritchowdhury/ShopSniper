@@ -1,4 +1,5 @@
 import { normalizeHostname, parseHttpUrl, sameAllowedHostname } from "./url-security.js";
+import { assessChallengeEvidence } from "./challenge-detector.js";
 
 const REJECTED_ROUTE_SEGMENTS = new Set([
   "account",
@@ -169,8 +170,6 @@ export function validateContactPageUrl(value, options = {}) {
 const CONTACT_HEADING_PATTERN = /\b(?:contact(?:\s+us)?|customer\s+(?:care|service|support)|get\s+in\s+touch|help(?:\s+center)?|support)\b/i;
 const GENERIC_ERROR_PATTERN = /^(?:4(?:04|10)\b|not\s+found\b|page\s+not\s+found\b|the\s+page\s+(?:could\s+not\s+be\s+found|does\s+not\s+exist)\b|content\s+unavailable\b|service\s+unavailable\b)/i;
 const SOFT_404_PATTERN = /\b(?:404|page\s+(?:was\s+)?not\s+found|page\s+(?:could\s+not\s+be\s+found|does\s+not\s+exist)|could(?:n['’]t|\s+not)\s+find\s+(?:that|the)\s+page|content\s+unavailable|service\s+unavailable)\b/i;
-const CHALLENGE_PATTERN = /(?:captcha|cf-chl-|checking\s+your\s+browser|verify\s+you\s+are\s+human|access\s+denied|unusual\s+traffic)/i;
-
 function visibleText(html = "") {
   return html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
@@ -243,7 +242,8 @@ export function assessContactPage({
   ].filter(Boolean);
 
   const httpUsable = Number(status) >= 200 && Number(status) < 300;
-  const challenge = Boolean(fetchAssessment?.challenge) || CHALLENGE_PATTERN.test(html);
+  const challenge = Boolean(fetchAssessment?.challenge) ||
+    assessChallengeEvidence(html, text).challenge;
   const genericError = GENERIC_ERROR_PATTERN.test(text) ||
     (text.length <= 500 && SOFT_404_PATTERN.test(text)) ||
     /<title\b[^>]*>\s*(?:404|not found|page not found)\b/i.test(html);

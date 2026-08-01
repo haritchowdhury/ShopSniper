@@ -153,6 +153,32 @@ test("contact-page decisions require a usable same-store page with substantive s
   }).accepted, false);
 });
 
+test("contact pages ignore embedded CAPTCHA scripts but reject visible challenges", () => {
+  const base = {
+    url: "https://fictional-shop.dev/pages/contact-us",
+    requestedUrl: "https://fictional-shop.dev/pages/contact-us",
+    allowedHostnames: ["fictional-shop.dev"],
+    status: 200
+  };
+  const ordinaryContact = assessContactPage({
+    ...base,
+    html: `<html><body>
+      <script>window.ShopifyCaptcha = { enabled: true };</script>
+      <form><input type="email" name="email"><textarea name="message"></textarea><button type="submit">Send</button></form>
+      <small>This site is protected by reCAPTCHA and the Google privacy policy applies.</small>
+    </body></html>`
+  });
+  const blockedContact = assessContactPage({
+    ...base,
+    html: `<html><body><h1>Verify that you are a human</h1><p>Complete the security check to continue.</p></body></html>`
+  });
+
+  assert.equal(ordinaryContact.accepted, true);
+  assert.equal(ordinaryContact.validationReason, "validated_contact_page");
+  assert.equal(blockedContact.accepted, false);
+  assert.equal(blockedContact.validationReason, "challenge_page");
+});
+
 test("negative business identifiers beat generic contact words for visible phone candidates", () => {
   for (const text of [
     "Contact support with order number 1234 5678",

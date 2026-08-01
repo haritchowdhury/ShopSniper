@@ -1,6 +1,7 @@
 import { requestText } from "./http-client.js";
 import { stripHtml } from "./html.js";
 import { parseBrowserlessContentResponse } from "./browserless-adapter.js";
+import { assessChallengeEvidence } from "./challenge-detector.js";
 import {
   assertPublicUrl,
   normalizeHostname,
@@ -8,8 +9,6 @@ import {
   sameAllowedHostname
 } from "./url-security.js";
 
-const CHALLENGE_PATTERN =
-  /(?:captcha|cf-chl-|cloudflare ray id|checking your browser|verify you are human|access denied|bot detection|unusual traffic)/i;
 const CONSENT_SHELL_PATTERN =
   /(?:enable javascript|javascript is required|please turn javascript on|cookie consent).{0,160}(?:continue|view|site|shop)/i;
 const SHOPIFY_PATTERN =
@@ -47,7 +46,8 @@ export function assessPageResponse(response, { purpose = "evidence" } = {}) {
   const text = stripHtml(body).slice(0, 100000);
   const contentType = response?.contentType || "";
   const htmlLike = contentType.includes("html") || /<html|<body|<main/i.test(body);
-  const challenge = CHALLENGE_PATTERN.test(body);
+  const challengeEvidence = assessChallengeEvidence(body, text);
+  const challenge = challengeEvidence.challenge;
   const consentOrJsShell = CONSENT_SHELL_PATTERN.test(text);
   const hasShopifyEvidence = SHOPIFY_PATTERN.test(body);
   const hasProductEvidence = PRODUCT_PATTERN.test(body);
@@ -76,6 +76,7 @@ export function assessPageResponse(response, { purpose = "evidence" } = {}) {
     reason,
     textLength: text.length,
     challenge,
+    challengeSignals: challengeEvidence.signals,
     passwordProtected,
     lockEvidence: lock,
     consentOrJsShell,
