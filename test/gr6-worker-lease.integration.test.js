@@ -76,7 +76,24 @@ async function gr4BaselineConfig() {
 
 function payload(domain = "lease-fixture.example") {
   return {
-    leads: [{ resolved_domain: domain, status: "qualified", lead_score: 80 }],
+    leads: [{
+      resolved_domain: domain,
+      status: "qualified",
+      pipeline_version: 2,
+      scoring_version: 2,
+      lead_score: 80,
+      score_breakdown: {
+        version: 2,
+        components: {
+          identity: 14,
+          shopifyValidation: 20,
+          categoryFit: 24,
+          contactEvidence: 22
+        },
+        total: 80,
+        semantics: "deterministic_evidence_rank_not_probability"
+      }
+    }],
     queryAudits: [{ query: domain, status: "selected" }],
     diagnostics: [{ scope: "run", code: "lease_fixture", details: {} }],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }

@@ -10,6 +10,29 @@ const enabled =
   process.env.ALLOW_DATABASE_TESTS === "true" &&
   Boolean(process.env.TEST_DATABASE_URL);
 
+function qualifiedLead() {
+  return {
+    shop_type: "clothing",
+    store_name: "Integration Fixture",
+    pipeline_version: 2,
+    scoring_version: 2,
+    lead_score: 88,
+    score_breakdown: {
+      version: 2,
+      components: {
+        identity: 16,
+        shopifyValidation: 20,
+        categoryFit: 30,
+        contactEvidence: 22
+      },
+      total: 88,
+      semantics: "deterministic_evidence_rank_not_probability"
+    },
+    status: "qualified",
+    social_profiles: []
+  };
+}
+
 test(
   "Prisma repository persists runs atomically on an explicit test database",
   { skip: !enabled },
@@ -68,15 +91,7 @@ test(
         first.id,
         claimed.lease,
         {
-          leads: [
-            {
-              shop_type: "clothing",
-              store_name: "Integration Fixture",
-              lead_score: 88,
-              status: "qualified",
-              social_profiles: []
-            }
-          ],
+          leads: [qualifiedLead()],
           queryAudits: [{ query: "fixture query", status: "selected" }],
           diagnostics: [{ scope: "query", code: "fixture_warning", details: {} }],
           summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
@@ -93,15 +108,7 @@ test(
         first.id,
         claimed.lease,
         {
-          leads: [
-            {
-              shop_type: "clothing",
-              store_name: "Integration Fixture",
-              lead_score: 88,
-              status: "qualified",
-              social_profiles: []
-            }
-          ],
+          leads: [qualifiedLead()],
           queryAudits: [{ query: "fixture query", status: "selected" }],
           diagnostics: [{ scope: "query", code: "fixture_warning", details: {} }],
           summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }

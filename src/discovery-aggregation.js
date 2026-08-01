@@ -1,3 +1,5 @@
+import { categoryIntentKey, compareCategoryIntents } from "./category-input.js";
+
 function normalizedAliases(candidate) {
   return [...new Set([
     candidate.stableIdentity,
@@ -79,7 +81,7 @@ export function mergeDiscoveryCandidates(candidates) {
     const intents = new Map();
     for (const member of members) {
       const memberIntent = intentOf(member);
-      const key = `${memberIntent.shopType}\u0000${memberIntent.businessQualifier}`;
+      const key = categoryIntentKey(memberIntent);
       if (!intents.has(key)) {
         intents.set(key, {
           ...memberIntent,
@@ -87,11 +89,6 @@ export function mergeDiscoveryCandidates(candidates) {
         });
       }
       const intent = intents.get(key);
-      const originalShopTypes = sortedStrings([
-        intent.originalShopType,
-        memberIntent.originalShopType
-      ]);
-      intent.originalShopType = originalShopTypes[0] || "";
       intent.categoryVocabulary = sortedStrings([
         ...intent.categoryVocabulary,
         ...(member.categoryVocabulary || [])
@@ -112,14 +109,10 @@ export function mergeDiscoveryCandidates(candidates) {
         mergedOccurrenceCount: members.length,
         confidence: representative.identityConfidence || 0
       },
-      categoryIntents: [...intents.values()].sort((a, b) =>
-        `${a.shopType}:${a.businessQualifier}:${a.originalShopType}`.localeCompare(
-          `${b.shopType}:${b.businessQualifier}:${b.originalShopType}`
-        )
-      ),
+      categoryIntents: [...intents.values()].sort(compareCategoryIntents),
       occurrences: members.map(occurrence).sort((a, b) =>
-        `${a.query}:${a.rank}:${a.resultUrl}:${a.originalShopType}:${a.businessQualifier}`.localeCompare(
-          `${b.query}:${b.rank}:${b.resultUrl}:${b.originalShopType}:${b.businessQualifier}`
+        `${a.query}:${a.rank}:${a.resultUrl}:${categoryIntentKey(a)}`.localeCompare(
+          `${b.query}:${b.rank}:${b.resultUrl}:${categoryIntentKey(b)}`
         )
       ),
       duplicateCount: Math.max(0, members.length - 1)

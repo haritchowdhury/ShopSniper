@@ -17,6 +17,8 @@ import { scoreLeadV2 } from "./lead-scorer.js";
 import { mergeDiscoveryCandidates } from "./discovery-aggregation.js";
 import { sameAllowedHostname } from "./url-security.js";
 import { log } from "./logger.js";
+import { compareCategoryIntents } from "./category-input.js";
+import { assertPublicLeadScoreState } from "./lead-state.js";
 
 function safeErrorType(error) {
   return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*Error$/u.test(error.name)
@@ -69,7 +71,7 @@ function blankRecord(overrides = {}) {
 }
 
 function recordFromCandidate(candidate, overrides = {}) {
-  return blankRecord({
+  const record = blankRecord({
     original_shop_type: candidate.originalShopType || "",
     shop_type: candidate.shopType || "",
     business_qualifier: candidate.businessQualifier || "unspecified",
@@ -85,6 +87,8 @@ function recordFromCandidate(candidate, overrides = {}) {
     resolved_domain: candidate.resolvedDomain || "",
     ...overrides
   });
+  assertPublicLeadScoreState(record);
+  return record;
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -233,9 +237,7 @@ async function processStore(candidate, config, dependencies) {
     storefrontRejectionPriority(left.validation.rejectionReason) -
       storefrontRejectionPriority(right.validation.rejectionReason) ||
     Number(right.validation.relevanceScore || 0) - Number(left.validation.relevanceScore || 0) ||
-    `${left.intent.shopType}:${left.intent.businessQualifier}:${left.intent.originalShopType}`.localeCompare(
-      `${right.intent.shopType}:${right.intent.businessQualifier}:${right.intent.originalShopType}`
-    )
+    compareCategoryIntents(left.intent, right.intent)
   );
   const matchedCategories = validations
     .filter(({ accepted }) => accepted)

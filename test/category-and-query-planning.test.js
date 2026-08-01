@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCsv } from "../src/csv.js";
 import {
+  categoryIntentKey,
   normalizeShopType,
+  normalizeShopTypes,
   readCategories
 } from "../src/category-input.js";
 import {
@@ -102,6 +104,31 @@ test("shop-type input normalizes aliases, skips blanks and rejects instructions"
   );
   assert.equal(input.blanksSkipped, 1);
   assert.equal(input.invalid.length, 1);
+});
+
+test("exact normalized category inputs remain distinct intent identities", () => {
+  const categories = normalizeShopTypes([
+    "  Eyewear   Brand  ",
+    "Eyewear Brands",
+    "Eyewear Brand"
+  ]);
+  assert.deepEqual(categories, [
+    {
+      originalShopType: "Eyewear Brand",
+      shopType: "eyewear",
+      businessQualifier: "brand"
+    },
+    {
+      originalShopType: "Eyewear Brands",
+      shopType: "eyewear",
+      businessQualifier: "brand"
+    }
+  ]);
+  assert.notEqual(categoryIntentKey(categories[0]), categoryIntentKey(categories[1]));
+  assert.equal(
+    categoryIntentKey(categories[0]),
+    categoryIntentKey(normalizeShopType("Eyewear Brand"))
+  );
 });
 
 test("OpenAI Responses helper sends web search and strict structured output", async () => {
@@ -561,6 +588,74 @@ test("qualifier variants keep separate plans while sharing one Google probe", as
       }
     ]
   );
+});
+
+test("exact singular and plural inputs keep separate plans while sharing provider data", async () => {
+  const categories = normalizeShopTypes(["Eyewear Brand", "Eyewear Brands"]);
+  const status = createInitialStatus();
+  let searchCalls = 0;
+  const planning = await planGeneratedQueries({
+    generatedQueryCount: 1,
+    queryRepairRounds: 0,
+    queryProbeConcurrency: 1,
+    minQueryResults: 1,
+    minQueryUniqueHosts: 1,
+    minQueryRelevantResults: 1
+  }, status, {
+    categories,
+    generateInitial: async (category) => {
+      const plural = category.originalShopType.endsWith("Brands");
+      return {
+        research: {
+          concrete_products: [
+            "eyewear frames",
+            plural ? "reading glasses" : "acetate frames"
+          ],
+          growing_products: [],
+          evergreen_products: [],
+          product_title_terms: [],
+          source_urls: []
+        },
+        candidates: [candidate("eyewear frames", {
+          query_generation_reason: plural ? "plural exact input" : "singular exact input",
+          source_urls: [plural
+            ? "https://research.invalid/plural"
+            : "https://research.invalid/singular"]
+        })],
+        mode: "ai",
+        error: ""
+      };
+    },
+    searchPage: async () => {
+      searchCalls += 1;
+      return {
+        results: [result("optics", "eyewear frames")],
+        estimatedTotalResults: 1,
+        nextPageAvailable: false
+      };
+    }
+  });
+
+  assert.equal(searchCalls, 1);
+  assert.deepEqual(planning.selected.map((item) => ({
+    originalShopType: item.originalShopType,
+    vocabulary: item.categoryVocabulary,
+    reason: item.queryGenerationReason,
+    sources: item.querySourceUrls
+  })), [
+    {
+      originalShopType: "Eyewear Brand",
+      vocabulary: ["eyewear frames", "acetate frames"],
+      reason: "singular exact input",
+      sources: ["https://research.invalid/singular"]
+    },
+    {
+      originalShopType: "Eyewear Brands",
+      vocabulary: ["eyewear frames", "reading glasses"],
+      reason: "plural exact input",
+      sources: ["https://research.invalid/plural"]
+    }
+  ]);
 });
 
 test("cached provider failures remain candidate-specific", async () => {

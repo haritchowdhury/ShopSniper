@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runPipeline } from "../src/pipeline.js";
 import { normalizeShopType } from "../src/category-input.js";
+import { leadRecordToCreate, serializeLead } from "../src/api-serializer.js";
 
 function status() {
   return {
@@ -401,6 +402,133 @@ test("merged discovery is order-independent and retains every category occurrenc
   assert.equal(noMatches.leads[0].original_shop_type, "Accessories Brand");
 });
 
+test("singular and plural exact category intents survive aggregation and API mapping", async () => {
+  const plans = [
+    {
+      originalShopType: "Eyewear Brand",
+      shopType: "eyewear",
+      businessQualifier: "brand",
+      categoryIntent: {
+        originalShopType: "Eyewear Brand",
+        shopType: "eyewear",
+        businessQualifier: "brand"
+      },
+      categoryVocabulary: ["acetate frames"],
+      query: "site:myshopify.com/products eyewear frames",
+      queryScore: 91,
+      queryGenerationReason: "singular exact input",
+      querySourceUrls: ["https://research.invalid/singular"],
+      results: [{
+        query: "site:myshopify.com/products eyewear frames",
+        rank: 1,
+        url: "https://exact-intents.myshopify.com/products/frame"
+      }]
+    },
+    {
+      originalShopType: "Eyewear Brands",
+      shopType: "eyewear",
+      businessQualifier: "brand",
+      categoryIntent: {
+        originalShopType: "Eyewear Brands",
+        shopType: "eyewear",
+        businessQualifier: "brand"
+      },
+      categoryVocabulary: ["reading glasses"],
+      query: "site:myshopify.com/products eyewear frames",
+      queryScore: 83,
+      queryGenerationReason: "plural exact input",
+      querySourceUrls: ["https://research.invalid/plural"],
+      results: [{
+        query: "site:myshopify.com/products eyewear frames",
+        rank: 1,
+        url: "https://exact-intents.myshopify.com/products/frame"
+      }]
+    }
+  ];
+
+  async function execute(selected) {
+    return runPipeline({ storeConcurrency: 1, pageFetchConcurrency: 1 }, status(), {
+      planQueries: async () => ({ selected, audits: [] }),
+      resolve: async (entry) => ({
+        ...entry,
+        html: "<html><body>Shopify eyewear specialist storefront</body></html>",
+        finalUrl: "https://exact-intents.dev/products/frame",
+        resolvedDomain: "exact-intents.dev",
+        myshopifyDomain: "exact-intents.myshopify.com",
+        stableIdentity: "exact-intents.myshopify.com",
+        allowedHostnames: ["exact-intents.dev", "exact-intents.myshopify.com"],
+        identityConfidence: 100
+      }),
+      validate: () => ({
+        valid: true,
+        rejectionReason: "",
+        shopifyConfidence: 100,
+        relevanceScore: 100,
+        storeFit: { state: "specialist", score: 100, reason: "controlled_specialist" },
+        evidence: {}
+      }),
+      discoverPages: async () => ["https://exact-intents.dev/pages/contact-us"],
+      fetchPage: async (url) => ({
+        body: '<a href="mailto:hello@exact-intents.dev">Email us</a>',
+        finalUrl: url,
+        status: 200,
+        contentType: "text/html"
+      }),
+      normalizeAi: async () => null
+    });
+  }
+
+  const forward = await execute(plans);
+  const reverse = await execute([...plans].reverse());
+  for (const result of [forward, reverse]) {
+    const lead = result.leads[0];
+    assert.equal(lead.status, "qualified");
+    assert.deepEqual(lead.matched_categories.map(({ originalShopType }) => originalShopType), [
+      "Eyewear Brand",
+      "Eyewear Brands"
+    ]);
+    assert.deepEqual(lead.store_fit_evidence.map(({ intent }) => ({
+      originalShopType: intent.originalShopType,
+      vocabulary: intent.categoryVocabulary
+    })), [
+      { originalShopType: "Eyewear Brand", vocabulary: ["acetate frames"] },
+      { originalShopType: "Eyewear Brands", vocabulary: ["reading glasses"] }
+    ]);
+    assert.deepEqual(lead.discovery_occurrences.map((item) => ({
+      originalShopType: item.originalShopType,
+      vocabulary: item.categoryVocabulary,
+      reason: item.queryGenerationReason,
+      sources: item.querySourceUrls,
+      score: item.queryScore
+    })), [
+      {
+        originalShopType: "Eyewear Brand",
+        vocabulary: ["acetate frames"],
+        reason: "singular exact input",
+        sources: ["https://research.invalid/singular"],
+        score: 91
+      },
+      {
+        originalShopType: "Eyewear Brands",
+        vocabulary: ["reading glasses"],
+        reason: "plural exact input",
+        sources: ["https://research.invalid/plural"],
+        score: 83
+      }
+    ]);
+
+    const persisted = leadRecordToCreate("run-fixture", "lead-fixture", lead);
+    const api = serializeLead(persisted);
+    assert.deepEqual(api.matched_categories, lead.matched_categories);
+    assert.deepEqual(api.discovery_occurrences, lead.discovery_occurrences);
+    assert.deepEqual(api.store_fit_evidence, lead.store_fit_evidence);
+  }
+  assert.deepEqual(forward.leads[0].matched_categories, reverse.leads[0].matched_categories);
+  assert.deepEqual(forward.leads[0].discovery_occurrences, reverse.leads[0].discovery_occurrences);
+  assert.deepEqual(forward.leads[0].store_fit_evidence, reverse.leads[0].store_fit_evidence);
+  assert.equal(forward.leads[0].original_shop_type, "Eyewear Brand");
+});
+
 test("research-only stores are rejected with a null v2 score", async () => {
   const result = await runPipeline({ storeConcurrency: 1 }, status(), {
     readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
@@ -504,5 +632,92 @@ test("a blank contact route cannot qualify, while a substantive same-store form 
   assert.deepEqual(
     form.leads[0].contact_evidence.contactPages[0].decision.positiveSignals,
     ["contact_form"]
+  );
+});
+
+test("unassociated emails and trailing business identifiers cannot qualify or score", async () => {
+  async function execute(html) {
+    return runPipeline({ storeConcurrency: 1, pageFetchConcurrency: 1 }, status(), {
+      readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
+      search: async (query) => [{
+        query,
+        rank: 1,
+        url: "https://association-gate.myshopify.com/products/frame"
+      }],
+      resolve: async (entry) => ({
+        ...entry,
+        html,
+        finalUrl: entry.url,
+        resolvedDomain: "association-gate.myshopify.com",
+        stableIdentity: "association-gate.myshopify.com",
+        allowedHostnames: ["association-gate.myshopify.com"],
+        identityConfidence: 80
+      }),
+      validate: () => ({
+        valid: true,
+        rejectionReason: "",
+        shopifyConfidence: 100,
+        relevanceScore: 100,
+        storeFit: { state: "specialist", score: 100 },
+        evidence: {}
+      }),
+      discoverPages: async (candidate) => [candidate.finalUrl],
+      normalizeAi: async () => null
+    });
+  }
+
+  for (const html of [
+    "<main><p>Product support: support@themevendor.co</p></main>",
+    "<main><p>1234 5678 is your order number. Contact support for help.</p></main>"
+  ]) {
+    const result = await execute(html);
+    assert.equal(result.leads[0].status, "rejected", html);
+    assert.equal(result.leads[0].contactability_tier, "none", html);
+    assert.equal(result.leads[0].email, "", html);
+    assert.equal(result.leads[0].phone, "", html);
+    assert.equal(result.leads[0].lead_score, "", html);
+    assert.equal(result.leads[0].score_breakdown, null, html);
+  }
+});
+
+test("a broad multi-department Organization claim is rejected for brand intent", async () => {
+  const broadHtml = `<html><body><script src="/cdn/shop/theme.js"></script>
+    <script type="application/ld+json">${JSON.stringify({
+      "@type": "Organization",
+      name: "Market Eyewear",
+      description: "Eyewear, toys, electronics, furniture, groceries, and garden products"
+    })}</script>
+    ${"Shop eyewear, toys, electronics, furniture, groceries, and garden products. ".repeat(8)}
+  </body></html>`;
+  const result = await runPipeline({ storeConcurrency: 1 }, status(), {
+    readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
+    search: async (query) => [{
+      query,
+      rank: 1,
+      url: "https://broad-fit.myshopify.com/products/frame",
+      shopType: "eyewear",
+      originalShopType: "Eyewear Brand",
+      businessQualifier: "brand",
+      categoryVocabulary: ["eyewear"]
+    }],
+    resolve: async (entry) => ({
+      ...entry,
+      html: broadHtml,
+      finalUrl: "https://broad-fit.example/",
+      resolvedDomain: "broad-fit.example",
+      myshopifyDomain: "broad-fit.myshopify.com",
+      stableIdentity: "broad-fit.myshopify.com",
+      allowedHostnames: ["broad-fit.example", "broad-fit.myshopify.com"],
+      identityConfidence: 90
+    }),
+    discoverPages: async (candidate) => [candidate.finalUrl],
+    normalizeAi: async () => null
+  });
+  assert.equal(result.leads[0].status, "rejected");
+  assert.equal(result.leads[0].store_fit_state, "category_seller");
+  assert.equal(result.leads[0].rejection_reason, "wrong_store_type");
+  assert.equal(
+    result.leads[0].store_fit_evidence[0].decisionEvidence.breadthBlockedSpecialist,
+    true
   );
 });

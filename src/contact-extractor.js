@@ -13,13 +13,32 @@ const PHONE_LABEL = /\b(?:call|contact|customer\s+service|mobile|phone|telephone
 const STRONG_PHONE_LABEL = /\b(?:call|mobile|phone|telephone|tel|whats\s*app)\b/i;
 const NON_PHONE_LABEL = /\b(?:ean|invoice|isbn|item|model|order|product|quantity|reference|sku|tracking|upc|vat|year)\b/i;
 const VENDOR_CREDIT_PATTERN = /\b(?:built|created|designed|developed|powered|site|theme)\s+(?:by|with)\b|\b(?:theme|template)\s+(?:author|vendor|credits?)\b/i;
+const EMAIL_OUTREACH_CONTEXT_PATTERN = /\b(?:contact|customer\s+(?:care|service|support)|email|enquir(?:y|ies)|get\s+in\s+touch|help|inquir(?:y|ies)|mail\s+us|press|reach\s+us|sales|support|wholesale|write\s+to)\b/i;
+const OWNED_OUTREACH_MARKER_PATTERN = /\b(?:class|id)\s*=\s*["'][^"']*\b(?:contact|customer-(?:care|service|support)|footer|header|help|support)\b[^"']*["']/i;
+const UNRELATED_EMAIL_CONTEXT_PATTERN = /\b(?:manufacturer|marketplace|third[-\s]?party)\s+(?:contact|email|support)\b|\b(?:designer|developer|theme|template|vendor|website?)\s+(?:author|credit|developer|email|support|vendor)\b|\b(?:built|created|designed|developed|powered|site|theme)\s+(?:by|with)\b/i;
 const ORGANIZATION_TYPES = new Map([
   ["onlinestore", 100],
   ["localbusiness", 98],
   ["organization", 96],
   ["website", 88]
 ]);
-const CONTACT_TYPES = new Set(["contactpoint", ...ORGANIZATION_TYPES.keys()]);
+const CONTACT_OWNER_TYPES = new Set(["contactpoint", "localbusiness", "onlinestore", "organization"]);
+const BLOCKED_STRUCTURED_RELATIONSHIPS = new Set([
+  "author",
+  "brand",
+  "manufacturer",
+  "provider",
+  "seller",
+  "vendor"
+]);
+const BLOCKED_STRUCTURED_TYPES = new Set([
+  "brand",
+  "creativework",
+  "person",
+  "product",
+  "service",
+  "softwareapplication"
+]);
 const PLACEHOLDER_DOMAINS = new Set([
   "example.com",
   "example.net",
@@ -117,31 +136,59 @@ function structuredData(html) {
   )) {
     try {
       const value = JSON.parse(decodeHtml(match[1]));
-      const queue = Array.isArray(value) ? [...value] : [value];
+      const queue = (Array.isArray(value) ? value : [value]).map((item) => ({
+        item,
+        blocked: false,
+        path: "$"
+      }));
       while (queue.length) {
-        const item = queue.shift();
+        const { item, blocked, path } = queue.shift();
         if (!item || typeof item !== "object") continue;
         const types = schemaTypes(item);
         if (types.includes("contactpage")) hasContactPage = true;
         const organizationType = types.find((type) => ORGANIZATION_TYPES.has(type));
-        if (organizationType && typeof item.name === "string" && item.name.trim()) {
+        const blockedNode = blocked || types.some((type) => BLOCKED_STRUCTURED_TYPES.has(type));
+        if (!blockedNode && organizationType && typeof item.name === "string" && item.name.trim()) {
           names.push({
             value: item.name.trim(),
             method: `json_ld_${organizationType}`,
             confidence: ORGANIZATION_TYPES.get(organizationType)
           });
         }
-        if (types.some((type) => CONTACT_TYPES.has(type))) {
-          if (typeof item.email === "string") emails.push(item.email);
-          if (typeof item.telephone === "string") phones.push(item.telephone);
+        const contactOwnerType = types.find((type) => CONTACT_OWNER_TYPES.has(type));
+        if (!blockedNode && contactOwnerType) {
+          const ownerReason = contactOwnerType === "contactpoint"
+            ? "structured_store_contact_point"
+            : "structured_store_organization";
+          if (typeof item.email === "string") {
+            emails.push({
+              value: item.email,
+              method: `json_ld_${contactOwnerType}`,
+              validationReason: `${ownerReason}_email`,
+              path: `${path}.email`
+            });
+          }
+          if (typeof item.telephone === "string") {
+            phones.push({
+              value: item.telephone,
+              method: `json_ld_${contactOwnerType}`,
+              validationReason: `${ownerReason}_phone`,
+              path: `${path}.telephone`
+            });
+          }
         }
-        if (organizationType) {
+        if (!blockedNode && organizationType) {
           const sameAs = Array.isArray(item.sameAs) ? item.sameAs : [item.sameAs];
           socialProfiles.push(...sameAs.filter((value) => typeof value === "string"));
         }
-        for (const nested of Object.values(item)) {
+        for (const [key, nested] of Object.entries(item)) {
           if (nested && typeof nested === "object") {
-            queue.push(...(Array.isArray(nested) ? nested : [nested]));
+            const childBlocked = blockedNode || BLOCKED_STRUCTURED_RELATIONSHIPS.has(key.toLowerCase());
+            queue.push(...(Array.isArray(nested) ? nested : [nested]).map((child, index) => ({
+              item: child,
+              blocked: childBlocked,
+              path: `${path}.${key}${Array.isArray(nested) ? `[${index}]` : ""}`
+            })));
           }
         }
       }
@@ -168,39 +215,132 @@ function confidenceFor(base, route, boost = 8) {
   return Math.min(100, base + (route.classification === "contact" ? boost : 0));
 }
 
-function emailEvidence(value, sourceUrl, method, confidence, route) {
+function emailEvidence(
+  value,
+  sourceUrl,
+  method,
+  confidence,
+  route,
+  validationReason = "",
+  structuredPath = ""
+) {
   if (!sourceUrl) return null;
   const result = validateEmailCandidate(value);
   if (!result.accepted) return null;
+  if (!validationReason) return null;
   return makeEvidence({
     kind: "email",
     value: result.value,
     sourceUrl,
     method,
     confidence: confidenceFor(confidence, route),
-    validationReason: result.reason
+    validationReason,
+    structuredPath
   });
 }
 
-function phoneEvidence(value, sourceUrl, method, confidence, route, textContext = "") {
+function rawValueIndexes(html, value) {
+  const indexes = [];
+  const lowerHtml = html.toLowerCase();
+  const lowerValue = value.toLowerCase();
+  let start = 0;
+  while (start < lowerHtml.length) {
+    const index = lowerHtml.indexOf(lowerValue, start);
+    if (index < 0) break;
+    indexes.push(index);
+    start = index + lowerValue.length;
+  }
+  return indexes;
+}
+
+function emailAssociation(html, value, route, { explicitMailto = false } = {}) {
+  for (const index of rawValueIndexes(html, value)) {
+    if (insideElement(html, index, "script") || insideElement(html, index, "style")) continue;
+    const rawContext = html.slice(Math.max(0, index - 220), index + value.length + 220);
+    const textContext = stripHtml(rawContext);
+    if (UNRELATED_EMAIL_CONTEXT_PATTERN.test(textContext)) continue;
+
+    const layout = ["header", "nav", "footer", "address"].find((tag) =>
+      insideElement(html, index, tag));
+    const markedOutreachBlock = OWNED_OUTREACH_MARKER_PATTERN.test(rawContext);
+    const hasOutreachContext = EMAIL_OUTREACH_CONTEXT_PATTERN.test(textContext);
+    const contactPage = route.classification === "contact";
+    const organizationPage = route.reason === "organization_evidence_route";
+
+    if (explicitMailto && contactPage) return "store_owned_contact_page_mailto";
+    if (explicitMailto && organizationPage && hasOutreachContext) {
+      return "store_owned_organization_page_mailto";
+    }
+    if (explicitMailto && layout) return `store_owned_${layout}_mailto`;
+    if (explicitMailto && markedOutreachBlock) return "store_owned_outreach_block_mailto";
+    if (contactPage) return "store_owned_contact_page_visible_email";
+    if ((organizationPage || layout || markedOutreachBlock) && hasOutreachContext) {
+      return layout
+        ? `store_owned_${layout}_visible_email`
+        : "store_owned_outreach_block_visible_email";
+    }
+  }
+  return "";
+}
+
+function associatedMailtoEvidence(html, sourceUrl, route) {
+  const evidence = [];
+  for (const match of html.matchAll(/\bhref\s*=\s*(?:"(mailto:[^"]*)"|'(mailto:[^']*)'|(mailto:[^\s"'=<>]+))/gi)) {
+    const href = decodeHtml(match[1] ?? match[2] ?? match[3] ?? "");
+    const email = normalizeEmail(href);
+    const validationReason = emailAssociation(html, email, route, { explicitMailto: true });
+    evidence.push(emailEvidence(href, sourceUrl, "mailto", 96, route, validationReason));
+  }
+  return evidence;
+}
+
+function phoneEvidence(
+  value,
+  sourceUrl,
+  method,
+  confidence,
+  route,
+  textContext = "",
+  structuredPath = ""
+) {
   if (!sourceUrl) return null;
   const normalized = normalizePhone(value);
   if (!normalized) return null;
-  if (!["json_ld", "tel", "visible_text"].includes(method)) return null;
+  if (!(method.startsWith("json_ld_") || ["tel", "visible_text"].includes(method))) return null;
   if (method === "visible_text") {
     const hasPhoneLabel = PHONE_LABEL.test(textContext);
     const candidateIndex = textContext.indexOf(value);
     const beforeCandidate = candidateIndex >= 0
       ? textContext.slice(Math.max(0, candidateIndex - 64), candidateIndex)
       : textContext;
-    const negativeMatches = [...beforeCandidate.matchAll(new RegExp(NON_PHONE_LABEL.source, "gi"))];
-    const strongMatches = [...beforeCandidate.matchAll(new RegExp(STRONG_PHONE_LABEL.source, "gi"))];
-    const lastNegative = negativeMatches.at(-1)?.index ?? -1;
-    const lastStrong = strongMatches.at(-1)?.index ?? -1;
+    const afterCandidate = candidateIndex >= 0
+      ? textContext.slice(candidateIndex + value.length, candidateIndex + value.length + 64)
+      : textContext;
+    const attachedNegativeBefore = [...beforeCandidate.matchAll(new RegExp(NON_PHONE_LABEL.source, "gi"))]
+      .some((match) => {
+        const gap = beforeCandidate.slice((match.index ?? 0) + match[0].length);
+        return gap.length <= 40 && !/[.!?;:]/.test(gap);
+      });
+    const attachedNegativeAfter = [...afterCandidate.matchAll(new RegExp(NON_PHONE_LABEL.source, "gi"))]
+      .some((match) => {
+        const gap = afterCandidate.slice(0, match.index ?? 0);
+        return gap.length <= 40 && !/[.!?;:]/.test(gap);
+      });
+    const attachedStrongBefore = [...beforeCandidate.matchAll(new RegExp(STRONG_PHONE_LABEL.source, "gi"))]
+      .some((match) => {
+        const gap = beforeCandidate.slice((match.index ?? 0) + match[0].length);
+        return gap.length <= 40 && !/[.!?;:]/.test(gap);
+      });
+    const attachedStrongAfter = [...afterCandidate.matchAll(new RegExp(STRONG_PHONE_LABEL.source, "gi"))]
+      .some((match) => {
+        const gap = afterCandidate.slice(0, match.index ?? 0);
+        return gap.length <= 40 && !/[.!?;:]/.test(gap);
+      });
     const isYearRange = /^\s*\d{4}\s*[-–—]\s*\d{4}\s*$/.test(value);
     const hasPhoneFormatting = /[+().-]|\d\s+\d/.test(value);
-    if (isYearRange || (lastNegative >= 0 && lastNegative >= lastStrong)) return null;
-    if (!hasPhoneLabel && !(route.classification === "contact" && hasPhoneFormatting)) {
+    if (isYearRange || attachedNegativeBefore || attachedNegativeAfter) return null;
+    if (!(attachedStrongBefore || attachedStrongAfter || hasPhoneLabel) &&
+      !(route.classification === "contact" && hasPhoneFormatting)) {
       return null;
     }
   }
@@ -211,7 +351,12 @@ function phoneEvidence(value, sourceUrl, method, confidence, route, textContext 
     method,
     confidence: confidenceFor(confidence, route),
     validationReason:
-      method === "visible_text" ? "verified_contact_context" : "source_proven_phone"
+      method === "visible_text"
+        ? "store_associated_visible_phone_context"
+        : method === "tel"
+          ? "store_owned_tel_link"
+          : "structured_store_phone",
+    structuredPath
   });
 }
 
@@ -319,19 +464,32 @@ export function extractContactEvidence({
   const route = classifyStorePageUrl(sourceUrl);
 
   const emails = [];
-  for (const value of structured.emails) {
-    emails.push(emailEvidence(value, sourceUrl, "json_ld", 92, route));
+  for (const item of structured.emails) {
+    emails.push(emailEvidence(
+      item.value,
+      sourceUrl,
+      item.method,
+      92,
+      route,
+      item.validationReason,
+      item.path
+    ));
   }
-  for (const href of hrefs.filter((value) => /^mailto:/i.test(value))) {
-    emails.push(emailEvidence(href, sourceUrl, "mailto", 96, route));
-  }
+  emails.push(...associatedMailtoEvidence(html, sourceUrl, route));
   for (const value of text.match(EMAIL_PATTERN) || []) {
-    emails.push(emailEvidence(value, sourceUrl, "visible_text", 68, route));
+    emails.push(emailEvidence(
+      value,
+      sourceUrl,
+      "visible_text",
+      68,
+      route,
+      emailAssociation(html, value, route)
+    ));
   }
 
   const phones = [];
-  for (const value of structured.phones) {
-    phones.push(phoneEvidence(value, sourceUrl, "json_ld", 92, route));
+  for (const item of structured.phones) {
+    phones.push(phoneEvidence(item.value, sourceUrl, item.method, 92, route, "", item.path));
   }
   for (const href of hrefs.filter((value) => /^tel:/i.test(value))) {
     phones.push(phoneEvidence(href, sourceUrl, "tel", 96, route));
@@ -432,7 +590,14 @@ function legacyPageEvidence(page) {
   const sourceUrl = normalizedSourceUrl(page.url);
   const route = sourceUrl ? classifyStorePageUrl(sourceUrl) : { classification: "rejected" };
   const emails = (page.emails || [])
-    .map((value) => emailEvidence(value, sourceUrl, "legacy_compatibility", 50, route))
+    .map((value) => emailEvidence(
+      value,
+      sourceUrl,
+      "legacy_compatibility",
+      50,
+      route,
+      "legacy_prevalidated_email_compatibility"
+    ))
     .filter(Boolean);
   const phones = [];
   const socialProfiles = [];

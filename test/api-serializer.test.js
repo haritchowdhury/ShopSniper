@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import {
   leadRecordToCreate,
   serializeLead,
   serializeRun
 } from "../src/api-serializer.js";
+import {
+  assertPublicLeadScoreState,
+  LeadStateInvariantError
+} from "../src/lead-state.js";
 import { log } from "../src/logger.js";
 
 test("lead serialization preserves snake_case types and normalizes blanks", () => {
@@ -15,6 +20,20 @@ test("lead serialization preserves snake_case types and normalizes blanks", () =
     google_rank: "",
     social_profiles: ["https://instagram.com/example", 42],
     status: "qualified",
+    pipeline_version: 2,
+    scoring_version: 2,
+    lead_score: 80,
+    score_breakdown: {
+      version: 2,
+      components: {
+        identity: 14,
+        shopifyValidation: 20,
+        categoryFit: 24,
+        contactEvidence: 22
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    },
     email: " "
   });
   const serialized = serializeLead(stored);
@@ -60,7 +79,17 @@ test("v2 lead evidence round-trips while unversioned rows remain explicitly lega
     scoring_version: 2,
     lead_score: 80,
     identity_confidence: 70,
-    score_breakdown: { version: 2, components: { identity: 14 }, total: 80 },
+    score_breakdown: {
+      version: 2,
+      components: {
+        identity: 14,
+        shopifyValidation: 20,
+        categoryFit: 24,
+        contactEvidence: 22
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    },
     discovery_occurrences: [{ query: "frames", rank: 1 }],
     status: "qualified"
   });
@@ -89,6 +118,52 @@ test("v2 lead evidence round-trips while unversioned rows remain explicitly lega
     status: "failed"
   });
   assert.equal(serializeLead(failed).score_semantics, "not_scored_v2");
+});
+
+test("shared lead score-state fixtures agree with persistence and serialization", () => {
+  const fixtures = JSON.parse(fs.readFileSync(
+    new URL("../../contracts/lead-score-state-v2.fixtures.json", import.meta.url),
+    "utf8"
+  ));
+  for (const fixture of fixtures.valid) {
+    assert.doesNotThrow(
+      () => assertPublicLeadScoreState(fixture.lead),
+      fixture.name
+    );
+    const stored = fixture.lead.pipeline_version == null
+      ? {
+          id: `lead_${fixture.name}`,
+          status: fixture.lead.status,
+          pipelineVersion: null,
+          scoringVersion: null,
+          leadScore: fixture.lead.lead_score,
+          scoreBreakdown: fixture.lead.score_breakdown
+        }
+      : leadRecordToCreate(
+          "run_abcdefghijklmnop",
+          `lead_${fixture.name}`,
+          fixture.lead
+        );
+    assert.equal(serializeLead(stored).score_semantics, fixture.lead.score_semantics);
+  }
+  for (const fixture of fixtures.invalid) {
+    assert.throws(
+      () => assertPublicLeadScoreState(fixture.lead),
+      LeadStateInvariantError,
+      fixture.name
+    );
+  }
+  assert.throws(() => assertPublicLeadScoreState({
+    ...fixtures.valid[0].lead,
+    lead_score: Number.POSITIVE_INFINITY
+  }), LeadStateInvariantError);
+  assert.throws(
+    () => leadRecordToCreate("run_abcdefghijklmnop", "lead_new_legacy", {
+      status: "rejected"
+    }),
+    (error) => error instanceof LeadStateInvariantError &&
+      error.code === "new_persistence_requires_v2"
+  );
 });
 
 test("structured logging redacts PostgreSQL credentials", () => {

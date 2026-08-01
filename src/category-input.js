@@ -68,8 +68,24 @@ export function toCategoryIntent(category) {
   };
 }
 
-function categoryKey(category) {
-  return `${category.shopType}\u0000${category.businessQualifier}`;
+function normalizedExactInput(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
+
+export function categoryIntentKey(category) {
+  const intent = toCategoryIntent(category);
+  return JSON.stringify([
+    normalizedExactInput(intent.originalShopType),
+    normalizedExactInput(intent.shopType).toLocaleLowerCase("en-US"),
+    normalizedExactInput(intent.businessQualifier || "unspecified").toLocaleLowerCase("en-US")
+  ]);
+}
+
+export function compareCategoryIntents(left, right) {
+  return categoryIntentKey(left).localeCompare(categoryIntentKey(right));
 }
 
 export function normalizeShopTypes(values, maxShopTypes = 100) {
@@ -89,7 +105,7 @@ export function normalizeShopTypes(values, maxShopTypes = 100) {
   for (const [index, value] of values.entries()) {
     try {
       const category = normalizeShopType(value);
-      const key = categoryKey(category);
+      const key = categoryIntentKey(category);
       if (seen.has(key)) continue;
       seen.add(key);
       categories.push(category);
@@ -134,7 +150,7 @@ export async function readCategories(filePath, maxShopTypes = 100) {
     }
     try {
       const category = normalizeShopType(rawValue);
-      const key = categoryKey(category);
+      const key = categoryIntentKey(category);
       if (seen.has(key)) continue;
       seen.add(key);
       categories.push(category);

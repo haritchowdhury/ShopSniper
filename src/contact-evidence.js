@@ -356,7 +356,8 @@ export function makeEvidence({
   method,
   confidence,
   validationReason,
-  decision
+  decision,
+  structuredPath
 }) {
   return Object.freeze({
     kind,
@@ -365,6 +366,7 @@ export function makeEvidence({
     method,
     confidence,
     validationReason,
-    ...(decision ? { decision } : {})
+    ...(decision ? { decision } : {}),
+    ...(structuredPath ? { structuredPath } : {})
   });
 }

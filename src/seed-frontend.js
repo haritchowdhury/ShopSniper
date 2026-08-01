@@ -143,7 +143,7 @@ await repository.saveCompletedResults(
           method: "observed_myshopify_host",
           confidence: 100
         },
-        score_breakdown: { version: 2, components: { identity: 20, shopifyValidation: 25, categoryFit: 30, contactEvidence: 15 }, total: 90, semantics: "evidence_rank_v2" },
+        score_breakdown: { version: 2, components: { identity: 20, shopifyValidation: 25, categoryFit: 30, contactEvidence: 15 }, total: 90, semantics: "deterministic_evidence_rank_not_probability" },
         discovery_occurrences: [occurrence],
         matched_categories: [{ ...category, categoryVocabulary: occurrence.categoryVocabulary }],
         status: "qualified",

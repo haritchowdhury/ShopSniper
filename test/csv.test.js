@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseCsv, readQueries, stringifyCsv } from "../src/csv.js";
 import { OUTPUT_HEADERS } from "../src/output.js";
+import { writeOutput } from "../src/output.js";
 
 test("CSV parser handles commas, escaped quotes, and newlines", () => {
   const rows = parseCsv('Search Query,note\r\n"coffee, tea","said ""hello"""\r\n"line\nbreak",ok\r\n');
@@ -62,4 +66,31 @@ test("query reader requires the exact header and reports blank rows", async () =
     readQueries(fixture("missing-header.csv"), 10),
     /exact header "Search Query"/
   );
+});
+
+test("backend CSV export rejects contradictory v2 score states", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "score-state-csv-"));
+  const output = path.join(directory, "leads.csv");
+  try {
+    await assert.rejects(writeOutput(output, [{
+      status: "rejected",
+      pipeline_version: 2,
+      scoring_version: 2,
+      lead_score: 72,
+      score_breakdown: {
+        version: 2,
+        components: {
+          identity: 14,
+          shopifyValidation: 20,
+          categoryFit: 24,
+          contactEvidence: 14
+        },
+        total: 72,
+        semantics: "deterministic_evidence_rank_not_probability"
+      }
+    }]), /Lead score state/u);
+    await assert.rejects(fs.access(output));
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });

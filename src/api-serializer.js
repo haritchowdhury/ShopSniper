@@ -1,4 +1,8 @@
 import { createInitialProgress } from "./status.js";
+import {
+  assertLeadScoreState,
+  LeadStateInvariantError
+} from "./lead-state.js";
 
 const TEXT_FIELDS = {
   original_shop_type: "originalShopType",
@@ -56,6 +60,13 @@ function nullableNumber(value) {
 }
 
 export function serializeLead(lead) {
+  const scoreSemantics = assertLeadScoreState({
+    status: lead.status,
+    pipelineVersion: lead.pipelineVersion,
+    scoringVersion: lead.scoringVersion,
+    leadScore: lead.leadScore,
+    scoreBreakdown: lead.scoreBreakdown
+  });
   const item = { id: lead.id };
   for (const [publicName, modelName] of Object.entries(TEXT_FIELDS)) {
     item[publicName] = nullableText(lead[modelName]);
@@ -70,12 +81,7 @@ export function serializeLead(lead) {
   for (const [publicName, modelName] of Object.entries(JSON_FIELDS)) {
     item[publicName] = lead[modelName] ?? null;
   }
-  const isV2 = lead.pipelineVersion === 2 || lead.scoringVersion === 2;
-  item.score_semantics = !isV2
-    ? "legacy_v1"
-    : lead.leadScore == null
-      ? "not_scored_v2"
-      : "evidence_rank_v2";
+  item.score_semantics = scoreSemantics;
   return item;
 }
 
@@ -120,6 +126,16 @@ export function leadRecordToCreate(runId, id, record) {
     : [];
   for (const [publicName, modelName] of Object.entries(JSON_FIELDS)) {
     if (record[publicName] != null) mapped[modelName] = record[publicName];
+  }
+  const scoreSemantics = assertLeadScoreState({
+    status: mapped.status,
+    pipelineVersion: mapped.pipelineVersion,
+    scoringVersion: mapped.scoringVersion,
+    leadScore: mapped.leadScore,
+    scoreBreakdown: mapped.scoreBreakdown
+  });
+  if (scoreSemantics === "legacy_v1") {
+    throw new LeadStateInvariantError("new_persistence_requires_v2");
   }
   return mapped;
 }

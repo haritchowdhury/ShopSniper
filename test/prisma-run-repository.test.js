@@ -6,6 +6,27 @@ import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 const LEASE = { owner: "worker_fixture", token: "lease_fixture" };
 const NOW = new Date("2026-08-01T00:00:00.000Z");
 
+function qualifiedLead(domain = "fixture.example") {
+  return {
+    resolved_domain: domain,
+    status: "qualified",
+    pipeline_version: 2,
+    scoring_version: 2,
+    lead_score: 80,
+    score_breakdown: {
+      version: 2,
+      components: {
+        identity: 14,
+        shopifyValidation: 20,
+        categoryFit: 24,
+        contactEvidence: 22
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    }
+  };
+}
+
 function fakePrisma() {
   let findArguments;
   const prisma = {
@@ -143,7 +164,7 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
     $transaction: async (callback) => callback(transaction)
   });
   const result = await repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
-    leads: [{ resolved_domain: "fixture.example", status: "qualified", lead_score: 80 }],
+    leads: [qualifiedLead()],
     queryAudits: [{ query: "fixture", status: "selected" }],
     diagnostics: [{ scope: "query", code: "fixture", details: {} }],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
@@ -191,7 +212,7 @@ test("a child-write failure occurs after the conditional publication gate", asyn
     })
   });
   await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
-    leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
+    leads: [qualifiedLead()],
     queryAudits: [{ query: "fixture", status: "selected" }],
     diagnostics: [{ scope: "query", code: "fixture", details: {} }],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
@@ -218,7 +239,7 @@ test("completion replay is idempotent only for the same durable payload", async 
     $transaction: async (callback) => callback(transaction)
   });
   const payload = {
-    leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
+    leads: [qualifiedLead()],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
   };
   await repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, payload);

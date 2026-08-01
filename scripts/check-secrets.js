@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
+export const REPOSITORY_ROOT = path.resolve(SCRIPT_DIRECTORY, "..", "..");
+
 const PATTERNS = [
   {
     name: "private_key",
@@ -18,7 +21,7 @@ const PATTERNS = [
   },
   {
     name: "credential_assignment",
-    expression: /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|authorization)["']?\s*[:=]\s*["']([^"'\r\n]{8,})["']/giu,
+    expression: /(?<![\w-])["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|authorization)["']?\s*[:=]\s*["']([^"'\r\n]{8,})["']/giu,
     valueGroup: 1
   }
 ];
@@ -56,34 +59,77 @@ export function scanText(text, file = "<memory>") {
   return findings;
 }
 
-const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
-const EXCLUDED_FILES = new Set([
+const EXCLUDED_PATH_SEGMENTS = new Set([
+  ".git",
+  ".next",
+  "build",
+  "coverage",
+  "node_modules",
+  "out"
+]);
+const EXCLUDED_EXACT_PATHS = new Set([
   ".env",
-  "My workflow 3.json",
-  "My workflow 4.json"
+  "email_scraper/.env",
+  "frontend/.env.local",
+  "email_scraper/My workflow 3.json",
+  "email_scraper/My workflow 4.json"
 ]);
 
-function repositoryFiles(directory = ".", relative = "") {
+function normalizedRepositoryPath(value) {
+  return value.split(path.sep).join("/").replace(/^\.\//u, "");
+}
+
+export function isExcludedRepositoryPath(value) {
+  const file = normalizedRepositoryPath(value);
+  if (EXCLUDED_EXACT_PATHS.has(file)) return true;
+  return file.split("/").some((segment) => EXCLUDED_PATH_SEGMENTS.has(segment));
+}
+
+export function listRepositoryFiles(repositoryRoot = REPOSITORY_ROOT) {
   const files = [];
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && EXCLUDED_DIRECTORIES.has(entry.name)) continue;
-    if (!relative && EXCLUDED_FILES.has(entry.name)) continue;
-    const file = path.join(directory, entry.name);
-    const display = relative ? path.join(relative, entry.name) : entry.name;
-    if (entry.isDirectory()) files.push(...repositoryFiles(file, display));
-    else if (entry.isFile()) files.push(display);
-  }
+  const visit = (directory, relative = "") => {
+    const entries = fs.readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const display = normalizedRepositoryPath(
+        relative ? path.join(relative, entry.name) : entry.name
+      );
+      if (isExcludedRepositoryPath(display) || entry.isSymbolicLink()) continue;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolute, display);
+      else if (entry.isFile()) files.push(display);
+    }
+  };
+  visit(repositoryRoot);
   return files;
 }
 
-export function scanRepository() {
+export function scanRepository({
+  repositoryRoot = REPOSITORY_ROOT,
+  files = listRepositoryFiles(repositoryRoot)
+} = {}) {
   const findings = [];
-  for (const file of repositoryFiles()) {
-    const buffer = fs.readFileSync(file);
+  for (const file of files) {
+    const absolute = path.resolve(repositoryRoot, file);
+    const relative = normalizedRepositoryPath(path.relative(repositoryRoot, absolute));
+    if (relative.startsWith("../") || isExcludedRepositoryPath(relative)) continue;
+    let stat;
+    try {
+      stat = fs.lstatSync(absolute);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!stat.isFile()) continue;
+    const buffer = fs.readFileSync(absolute);
     if (buffer.includes(0)) continue;
-    findings.push(...scanText(buffer.toString("utf8"), file));
+    findings.push(...scanText(buffer.toString("utf8"), relative));
   }
-  return findings;
+  return findings.sort((left, right) =>
+    left.file.localeCompare(right.file) ||
+    left.line - right.line ||
+    left.pattern.localeCompare(right.pattern)
+  );
 }
 
 const invokedPath = process.argv[1] ? fileURLToPath(import.meta.url) : "";

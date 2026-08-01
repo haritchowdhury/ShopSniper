@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { stringifyCsv } from "./csv.js";
+import { assertPublicLeadScoreState } from "./lead-state.js";
 
 export const OUTPUT_HEADERS = [
   "shop_type",
@@ -44,6 +45,7 @@ export const OUTPUT_HEADERS = [
 ];
 
 export async function writeOutput(filePath, records) {
+  records.forEach(assertPublicLeadScoreState);
   const directory = path.dirname(filePath);
   await fs.mkdir(directory, { recursive: true });
   const temporaryPath = path.join(

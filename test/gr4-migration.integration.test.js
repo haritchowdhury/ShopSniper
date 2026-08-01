@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 import { serializeLead } from "../src/api-serializer.js";
+import { LeadStateInvariantError } from "../src/lead-state.js";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 
@@ -107,6 +108,28 @@ function failureClient(prisma, stage) {
   };
 }
 
+function qualifiedLead(domain, overrides = {}) {
+  return {
+    resolved_domain: domain,
+    status: "qualified",
+    pipeline_version: 2,
+    scoring_version: 2,
+    lead_score: 80,
+    score_breakdown: {
+      version: 2,
+      components: {
+        identity: 14,
+        shopifyValidation: 20,
+        categoryFit: 24,
+        contactEvidence: 22
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    },
+    ...overrides
+  };
+}
+
 test(
   "G-R4 upgrades and replays safely with preservation, float, rollback, and terminal proof",
   { skip: !enabled, timeout: 120_000 },
@@ -190,7 +213,7 @@ test(
           status: true
         }
       });
-      assert.equal(serializeLead(preservedV2).score_semantics, "not_scored_v2");
+      assert.throws(() => serializeLead(preservedV2), LeadStateInvariantError);
 
       const repository = new PrismaRunRepository(prisma);
       const floatRun = await repository.createRun("float_owner", [{
@@ -201,16 +224,14 @@ test(
       const floatClaim = await repository.claimNextQueuedRun("gr4_float_worker");
       const scores = [82.29, 82.0, 0, 100];
       await repository.saveCompletedResults(floatRun.id, floatClaim.lease, {
-        leads: scores.map((queryScore, index) => ({
+        leads: scores.map((queryScore, index) => qualifiedLead(
+          `float-${index}.example`,
+          {
           original_shop_type: "Eyewear Brand",
           shop_type: "eyewear",
-          resolved_domain: `float-${index}.example`,
-          query_score: queryScore,
-          pipeline_version: 2,
-          scoring_version: 2,
-          lead_score: 80,
-          status: "qualified"
-        })),
+            query_score: queryScore
+          }
+        )),
         summary: { total: 4, qualified: 4, rejected: 0, failed: 0 }
       });
       const floats = await prisma.lead.findMany({
@@ -246,7 +267,7 @@ test(
         details: {}
       } });
       const replacement = {
-        leads: [{ resolved_domain: "replacement.example", status: "qualified" }],
+        leads: [qualifiedLead("replacement.example")],
         queryAudits: [{ query: "replacement", status: "selected" }],
         diagnostics: [{ scope: "run", code: "replacement", details: {} }],
         summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }

@@ -96,32 +96,58 @@ function elementText(html, tags) {
 
 function structuredOrganizationClaims(html) {
   const claims = [];
+  const blockedRelationships = new Set([
+    "author", "brand", "manufacturer", "provider", "seller", "vendor"
+  ]);
+  const blockedTypes = new Set([
+    "brand", "creativework", "person", "product", "service", "softwareapplication"
+  ]);
   for (const match of html.matchAll(
     /<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
   )) {
     try {
       const root = JSON.parse(match[1]);
-      const visit = (value) => {
-        if (Array.isArray(value)) return value.forEach(visit);
+      const visit = (value, { blocked = false, path = "$" } = {}) => {
+        if (Array.isArray(value)) {
+          return value.forEach((item, index) => visit(item, { blocked, path: `${path}[${index}]` }));
+        }
         if (!value || typeof value !== "object") return;
         const types = [value["@type"]].flat().map((type) => normalizedText(type));
-        if (types.some((type) => [
+        const blockedNode = blocked || types.some((type) => blockedTypes.has(type));
+        if (!blockedNode && types.some((type) => [
           "organization", "localbusiness", "onlinestore", "store", "website"
         ].includes(type))) {
           for (const key of ["name", "description", "slogan", "category", "knowsAbout"]) {
             const field = value[key];
-            if (typeof field === "string") claims.push(field);
-            else if (Array.isArray(field)) claims.push(...field.filter((item) => typeof item === "string"));
+            const values = typeof field === "string"
+              ? [field]
+              : Array.isArray(field)
+                ? field.filter((item) => typeof item === "string")
+                : [];
+            for (const text of values) {
+              claims.push({
+                field: key,
+                text,
+                path: `${path}.${key}`,
+                explicit: key === "category" || key === "knowsAbout"
+              });
+            }
           }
         }
-        for (const child of Object.values(value)) visit(child);
+        for (const [key, child] of Object.entries(value)) {
+          if (!child || typeof child !== "object") continue;
+          visit(child, {
+            blocked: blockedNode || blockedRelationships.has(key.toLowerCase()),
+            path: `${path}.${key}`
+          });
+        }
       };
       visit(root);
     } catch {
       // Malformed structured data is not storefront-fit evidence.
     }
   }
-  return normalizedText(claims.join(" "));
+  return claims;
 }
 
 function matchingPhrases(text, phrases) {
@@ -148,11 +174,21 @@ function evidenceForPage(document, phrases) {
   const navigation = elementText(document.html, "nav");
   const structuredClaims = structuredOrganizationClaims(document.html);
   const highLevel = ["homepage", "organization"].includes(type);
-  const siteClaimText = highLevel
-    ? normalizedText(`${title} ${headings} ${structuredClaims}`)
-    : structuredClaims;
+  const structuredIdentityText = normalizedText(structuredClaims
+    .filter(({ explicit }) => !explicit)
+    .map(({ text }) => text)
+    .join(" "));
+  const structuredExplicitText = normalizedText(structuredClaims
+    .filter(({ explicit }) => explicit)
+    .map(({ text }) => text)
+    .join(" "));
+  const siteIdentityText = highLevel
+    ? normalizedText(`${title} ${headings} ${structuredIdentityText}`)
+    : structuredIdentityText;
   const matchedTerms = matchingPhrases(normalizedText(`${normalized} ${title}`), phrases);
-  const claimTerms = matchingPhrases(siteClaimText, phrases);
+  const identityClaimTerms = matchingPhrases(siteIdentityText, phrases);
+  const explicitClaimTerms = matchingPhrases(structuredExplicitText, phrases);
+  const claimTerms = [...new Set([...explicitClaimTerms, ...identityClaimTerms])];
   const navigationTerms = matchingPhrases(navigation, phrases);
   const relevantCollectionLinks = collectionLinks(document.html).filter((value) =>
     matchingPhrases(value, phrases).length
@@ -165,7 +201,8 @@ function evidenceForPage(document, phrases) {
       )
     : [];
   const signals = [
-    claimTerms.length ? "organization_or_site_category_claim" : "",
+    explicitClaimTerms.length ? "explicit_typed_category_claim" : "",
+    identityClaimTerms.length ? "category_site_identity" : "",
     navigationTerms.length ? "category_navigation" : "",
     collectionMatch || relevantCollectionLinks.length ? "category_collection_assortment" : "",
     productMatch ? "category_product_assortment" : "",
@@ -175,7 +212,8 @@ function evidenceForPage(document, phrases) {
       : ""
   ].filter(Boolean);
   const strength = Math.min(100,
-    (claimTerms.length ? 90 : 0) +
+    (explicitClaimTerms.length ? 95 : 0) +
+    (identityClaimTerms.length ? 45 : 0) +
     (navigationTerms.length ? 25 : 0) +
     (collectionMatch || relevantCollectionLinks.length ? 30 : 0) +
     (productMatch ? 20 : 0) +
@@ -186,6 +224,11 @@ function evidenceForPage(document, phrases) {
     pageType: type,
     matchedTerms,
     claimTerms,
+    explicitClaimTerms,
+    identityClaimTerms,
+    claimEvidence: structuredClaims
+      .filter(({ text }) => matchingPhrases(normalizedText(text), phrases).length)
+      .map(({ field, path, explicit }) => ({ field, path, explicit })),
     signals,
     breadthTerms,
     negativeSignals: breadthTerms.length >= 3 ? ["broad_multi_department_store"] : [],
@@ -197,9 +240,14 @@ function evidenceForPage(document, phrases) {
 export function evaluateStoreFit(candidate, documents = uniqueDocuments(candidate)) {
   const phrases = vocabularyPhrases(candidate);
   const evidence = documents.map((document) => evidenceForPage(document, phrases));
-  const matched = evidence.filter(({ matchedTerms }) => matchedTerms.length);
-  const organizationClaim = matched.some(({ signals }) =>
-    signals.includes("organization_or_site_category_claim")
+  const matched = evidence.filter(({ matchedTerms, claimTerms }) =>
+    matchedTerms.length || claimTerms.length
+  );
+  const explicitClaimEvidence = matched.filter(({ signals }) =>
+    signals.includes("explicit_typed_category_claim")
+  );
+  const identityClaimEvidence = matched.filter(({ signals }) =>
+    signals.includes("category_site_identity")
   );
   const productPages = matched.filter(({ signals }) =>
     signals.includes("category_product_assortment")
@@ -215,14 +263,22 @@ export function evaluateStoreFit(candidate, documents = uniqueDocuments(candidat
     negativeSignals.map((signal) => ({ sourceUrl, signal, terms: breadthTerms }))
   );
   const totalText = evidence.reduce((sum, item) => sum + item.textLength, 0);
+  const hasContradictoryBreadth = breadthEvidence.length > 0;
+  const strongExclusiveClaim = explicitClaimEvidence.length > 0 && !hasContradictoryBreadth;
+  const identityWithAssortment = identityClaimEvidence.length > 0 &&
+    assortmentSignals.size >= 1 &&
+    !hasContradictoryBreadth;
+  const independentAssortment = assortmentSignals.size >= 2 && !hasContradictoryBreadth;
 
   let state = "unknown";
   let reason = "insufficient_category_evidence";
-  if (organizationClaim || (assortmentSignals.size >= 2 && !breadthEvidence.length)) {
+  if (strongExclusiveClaim || identityWithAssortment || independentAssortment) {
     state = "specialist";
-    reason = organizationClaim
-      ? "organization_or_site_category_claim"
-      : "category_dominant_independent_assortment_signals";
+    reason = strongExclusiveClaim
+      ? "explicit_typed_category_claim_without_breadth"
+      : identityWithAssortment
+        ? "category_identity_with_assortment_corroboration"
+        : "category_dominant_independent_assortment_signals";
   } else if (matched.length) {
     state = "category_seller";
     reason = breadthEvidence.length
@@ -241,6 +297,13 @@ export function evaluateStoreFit(candidate, documents = uniqueDocuments(candidat
     signalKinds: [...new Set(matched.flatMap(({ signals }) => signals))],
     breadthEvidence,
     evidence,
+    decisionEvidence: {
+      strongExclusiveClaimSourceUrls: explicitClaimEvidence.map(({ sourceUrl }) => sourceUrl),
+      identityClaimSourceUrls: identityClaimEvidence.map(({ sourceUrl }) => sourceUrl),
+      assortmentSignalKinds: [...assortmentSignals],
+      breadthBlockedSpecialist: hasContradictoryBreadth,
+      controllingReason: reason
+    },
     reason
   };
 }

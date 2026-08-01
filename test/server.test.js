@@ -152,6 +152,7 @@ class TestRepository {
         shopifyConfidence: lead.shopify_confidence || null,
         relevanceScore: lead.relevance_score || null,
         leadScore: lead.lead_score || null,
+        scoreBreakdown: lead.score_breakdown ?? null,
         pipelineVersion: lead.pipeline_version ?? 2,
         scoringVersion: lead.scoring_version ?? 2,
         status: lead.status,
@@ -322,6 +323,19 @@ test("documented API creates, polls, and returns durable-shaped results", async 
             shopify_confidence: 100,
             relevance_score: 90,
             lead_score: 95,
+            pipeline_version: 2,
+            scoring_version: 2,
+            score_breakdown: {
+              version: 2,
+              components: {
+                identity: 20,
+                shopifyValidation: 25,
+                categoryFit: 30,
+                contactEvidence: 20
+              },
+              total: 95,
+              semantics: "deterministic_evidence_rank_not_probability"
+            },
             status: "qualified",
             rejection_reason: "",
             error: ""

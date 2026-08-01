@@ -111,7 +111,7 @@ test("store fit distinguishes a general seller from a specialist and enforces br
   const specialist = {
     ...seller,
     finalUrl: "https://general.myshopify.com/",
-    html: `<html><head><meta property="og:site_name" content="Fixture Eyewear"></head><body><script src="/cdn/shop/theme.js"></script>${"Independent eyewear studio frames lenses ".repeat(8)}</body></html>`
+    html: `<html><head><meta property="og:site_name" content="Fixture Eyewear"></head><body><script src="/cdn/shop/theme.js"></script><nav><a href="/collections/eyewear">Eyewear</a></nav>${"Independent eyewear studio frames lenses ".repeat(8)}</body></html>`
   };
   const fit = evaluateStoreFit(specialist);
   assert.equal(fit.state, "specialist");
@@ -138,6 +138,122 @@ test("several isolated category phrases do not promote a broad department store"
   );
 });
 
+test("broad Organization claims cannot override multi-department evidence", () => {
+  const candidate = {
+    resolvedDomain: "market.example",
+    myshopifyDomain: "market.myshopify.com",
+    finalUrl: "https://market.example/",
+    shopType: "eyewear",
+    businessQualifier: "brand",
+    html: `<html><body><script src="/cdn/shop/theme.js"></script>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Organization",
+        name: "Market Eyewear",
+        description: "Eyewear, toys, electronics, furniture, groceries, and garden products"
+      })}</script>
+      ${"Shop eyewear, toys, electronics, furniture, groceries, and garden products. ".repeat(8)}
+    </body></html>`
+  };
+  const result = validateStorefront(candidate, {}, { final: true });
+  assert.equal(result.storeFit.state, "category_seller");
+  assert.equal(result.rejectionReason, "wrong_store_type");
+  assert.equal(result.storeFit.decisionEvidence.breadthBlockedSpecialist, true);
+  assert.equal(result.storeFit.evidence[0].signals.includes("category_site_identity"), true);
+  assert.deepEqual(result.storeFit.breadthEvidence[0].terms, [
+    "electronics", "furniture", "garden", "groceries", "toys"
+  ]);
+
+  const retailer = validateStorefront({
+    ...candidate,
+    businessQualifier: "retailer"
+  }, {}, { final: true });
+  assert.equal(retailer.valid, true);
+});
+
+test("incidental category placement never makes a broad store specialist", () => {
+  const variants = [
+    "<title>Market Eyewear</title>",
+    "<h1>Market Eyewear</h1>",
+    `<script type="application/ld+json">${JSON.stringify({
+      "@type": "Organization",
+      description: "Our eyewear department and many other departments"
+    })}</script>`,
+    '<nav><a href="/collections/eyewear">Eyewear</a></nav>',
+    '<a href="/collections/eyewear">Eyewear collection</a><p>Eyewear promotion</p>'
+  ];
+  for (const variant of variants) {
+    const fit = evaluateStoreFit({
+      finalUrl: "https://general.example/",
+      shopType: "eyewear",
+      categoryVocabulary: ["eyewear"],
+      html: `<html><body>${variant}${"Toys electronics furniture groceries garden and stationery. ".repeat(8)}</body></html>`
+    });
+    assert.equal(fit.state, "category_seller", variant);
+    assert.equal(fit.decisionEvidence.breadthBlockedSpecialist, true, variant);
+  }
+});
+
+test("specialist classification requires explicit category typing or corroborated identity", () => {
+  const explicit = evaluateStoreFit({
+    finalUrl: "https://typed.example/",
+    shopType: "eyewear",
+    html: `<html><body>${"Independent frames and lenses made in our studio. ".repeat(5)}
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "OnlineStore",
+        name: "Fictional Optics",
+        category: "eyewear"
+      })}</script>
+    </body></html>`
+  });
+  assert.equal(explicit.state, "specialist");
+  assert.equal(explicit.reason, "explicit_typed_category_claim_without_breadth");
+  assert.equal(explicit.evidence[0].claimEvidence[0].field, "category");
+
+  const corroborated = evaluateStoreFit({
+    finalUrl: "https://corroborated.example/",
+    shopType: "eyewear",
+    html: `<html><head><title>Fictional Eyewear Studio</title></head><body>
+      <nav><a href="/collections/eyewear">Eyewear collections</a></nav>
+      ${"Frames, lenses, and optical fitting from our independent studio. ".repeat(5)}
+    </body></html>`
+  });
+  assert.equal(corroborated.state, "specialist");
+  assert.equal(corroborated.reason, "category_identity_with_assortment_corroboration");
+});
+
+test("store-fit decisions are independent of evidence page order", () => {
+  const candidate = {
+    finalUrl: "https://ordered.example/",
+    shopType: "eyewear",
+    html: `<html><head><title>Fictional Eyewear Studio</title></head><body>${"Frames and lenses. ".repeat(8)}</body></html>`
+  };
+  const pages = [
+    {
+      url: "https://ordered.example/collections/eyewear",
+      html: '<h1>Eyewear</h1><a href="/collections/eyewear">Shop eyewear</a>'
+    },
+    {
+      url: "https://ordered.example/pages/about",
+      html: `<script type="application/ld+json">${JSON.stringify({
+        "@type": "Organization",
+        knowsAbout: "eyewear"
+      })}</script><p>Our optical studio.</p>`
+    }
+  ];
+  const forward = evaluateStoreFit({ ...candidate, evidencePages: pages });
+  const reverse = evaluateStoreFit({ ...candidate, evidencePages: [...pages].reverse() });
+  assert.equal(forward.state, "specialist");
+  assert.equal(reverse.state, "specialist");
+  assert.deepEqual(
+    [...forward.signalKinds].sort(),
+    [...reverse.signalKinds].sort()
+  );
+  assert.deepEqual(
+    [...forward.sourceUrls].sort(),
+    [...reverse.sourceUrls].sort()
+  );
+});
+
 test("incidental opening-soon About copy cannot make an active storefront inactive", () => {
   const candidate = {
     resolvedDomain: "active.example",
@@ -145,7 +261,7 @@ test("incidental opening-soon About copy cannot make an active storefront inacti
     finalUrl: "https://active.example/",
     shopType: "eyewear",
     businessQualifier: "brand",
-    html: `<html><head><title>Active Eyewear Studio</title></head><body><script src="/cdn/shop/theme.js"></script>${"Eyewear frames and lenses available now. ".repeat(8)}</body></html>`,
+    html: `<html><head><title>Active Eyewear Studio</title></head><body><script src="/cdn/shop/theme.js"></script><nav><a href="/collections/eyewear">Eyewear</a></nav>${"Eyewear frames and lenses available now. ".repeat(8)}</body></html>`,
     evidencePages: [{
       url: "https://active.example/pages/about",
       html: `<html><body>${"Our active eyewear studio serves customers daily. ".repeat(4)} Second location opening soon.</body></html>`

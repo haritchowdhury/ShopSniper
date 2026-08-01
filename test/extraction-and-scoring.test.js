@@ -156,9 +156,13 @@ test("contact-page decisions require a usable same-store page with substantive s
 test("negative business identifiers beat generic contact words for visible phone candidates", () => {
   for (const text of [
     "Contact support with order number 1234 5678",
+    "1234 5678 is your order number. Contact support for help.",
     "Contact us about SKU 8765 4321",
+    "8765 4321 is the SKU. Call customer service with questions.",
     "Support can locate tracking reference 1122 3344",
+    "1122 3344 is your tracking reference; contact us if it is missing.",
     "Contact accounting with VAT 9988 7766",
+    "9988 7766 is our VAT identifier. Phone support can help.",
     "Support documentation for model 5566 7788"
   ]) {
     const rejected = extractContactEvidence({
@@ -173,6 +177,78 @@ test("negative business identifiers beat generic contact words for visible phone
     html: "<p>Order enquiries are welcome. Phone: +44 (0)20 7946 0958 ext. 42</p>"
   });
   assert.deepEqual(accepted.phones, ["+4402079460958"]);
+
+  const labelAfter = extractContactEvidence({
+    url: "https://fictional-shop.dev/pages/contact-us",
+    html: "<p>+44 20 7946 0958 is our phone number.</p>"
+  });
+  assert.deepEqual(labelAfter.phones, ["+442079460958"]);
+});
+
+test("email evidence requires store-owned outreach association", () => {
+  const rejectedPages = [
+    {
+      url: "https://fictional-optics.dev/products/frame",
+      html: "<main><p>Product support: support@themevendor.co</p></main>"
+    },
+    {
+      url: "https://fictional-optics.dev/",
+      html: "<footer>Theme developer support: support@themevendor.co</footer>"
+    },
+    {
+      url: "https://fictional-optics.dev/blogs/news",
+      html: "<article>Our guest can be reached at guest@outside-writer.dev.</article>"
+    },
+    {
+      url: "https://fictional-optics.dev/products/frame",
+      html: `<main>Frame details</main><script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        manufacturer: {
+          "@type": "Organization",
+          email: "factory@manufacturer.dev",
+          telephone: "+1 212 555 0166"
+        }
+      })}</script>`
+    }
+  ];
+  for (const fixture of rejectedPages) {
+    const page = extractContactEvidence(fixture);
+    assert.deepEqual(page.emails, [], fixture.html);
+    assert.deepEqual(page.phones, [], fixture.html);
+  }
+
+  const header = extractContactEvidence({
+    url: "https://fictional-optics.dev/",
+    html: "<header>Customer care: care@fictional-optics.dev</header>"
+  });
+  assert.deepEqual(header.emails, ["care@fictional-optics.dev"]);
+  assert.equal(header.evidence.emails[0].validationReason, "store_owned_header_visible_email");
+
+  const contact = extractContactEvidence({
+    url: "https://fictional-optics.dev/pages/contact-us",
+    html: '<main><a href="mailto:hello@fictional-optics.dev">Write to us</a></main>'
+  });
+  assert.deepEqual(contact.emails, ["hello@fictional-optics.dev"]);
+  assert.equal(contact.evidence.emails[0].validationReason, "store_owned_contact_page_mailto");
+
+  const organization = extractContactEvidence({
+    url: "https://fictional-optics.dev/",
+    html: `<main>Fictional Optics official storefront and customer service.</main>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "Organization",
+        name: "Fictional Optics",
+        email: "team@fictional-optics.dev",
+        telephone: "+1 212 555 0199"
+      })}</script>`
+  });
+  assert.deepEqual(organization.emails, ["team@fictional-optics.dev"]);
+  assert.deepEqual(organization.phones, ["+12125550199"]);
+  assert.equal(
+    organization.evidence.emails[0].validationReason,
+    "structured_store_organization_email"
+  );
+  assert.equal(organization.evidence.emails[0].structuredPath, "$.email");
+  assert.equal(organization.evidence.phones[0].structuredPath, "$.telephone");
 });
 
 test("social validation keeps profiles and rejects sharing, intent, roots, and vendors", () => {
