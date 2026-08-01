@@ -28,12 +28,23 @@ test("G3 CSV fields are appended without shifting legacy columns", () => {
 });
 
 test("CSV writer round-trips special values", () => {
-  const source = [{ a: "plain", b: 'comma, quote " and\nnewline' }];
+  const source = [{ a: "café 👓", b: 'comma, quote " and\nnewline 眼鏡' }];
   const serialized = stringifyCsv(source, ["a", "b"]);
   assert.deepEqual(parseCsv(serialized), [
     ["a", "b"],
-    ["plain", 'comma, quote " and\nnewline']
+    ["café 👓", 'comma, quote " and\nnewline 眼鏡']
   ]);
+});
+
+test("CSV writer neutralizes spreadsheet formulas without changing numeric values", () => {
+  const dangerous = ["=1+1", "+cmd", "-2+3", "@SUM(A1)", "\tformula", "\rformula", "  =trimmed"];
+  const serialized = stringifyCsv(
+    dangerous.map((value, index) => ({ value, numeric: index })),
+    ["value", "numeric"]
+  );
+  const parsed = parseCsv(serialized).slice(1);
+  assert.deepEqual(parsed.map(([value]) => value), dangerous.map((value) => `'${value}`));
+  assert.deepEqual(parsed.map(([, numeric]) => numeric), dangerous.map((_, index) => String(index)));
 });
 
 test("CSV parser rejects unclosed quoted fields", () => {

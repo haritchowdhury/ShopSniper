@@ -45,7 +45,10 @@ export function parseCsv(text) {
 
 export function stringifyCsv(rows, headers) {
   const escape = (value) => {
-    const text = value == null ? "" : String(value);
+    const raw = value == null ? "" : value;
+    const text = typeof raw === "string" && (/^[\t\r]/u.test(raw) || /^\s*[=+\-@]/u.test(raw))
+      ? `'${raw}`
+      : String(raw);
     return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
   };
 
