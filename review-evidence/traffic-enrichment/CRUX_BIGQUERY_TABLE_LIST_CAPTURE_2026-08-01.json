@@ -1,0 +1,1175 @@
+{
+  "metadata": {
+    "captured_at": "2026-08-01T15:24:17.338Z",
+    "http_status": 200
+  },
+  "request": {
+    "method": "GET",
+    "endpoint": "https://bigquery.googleapis.com/bigquery/v2/projects/chrome-ux-report/datasets/all/tables",
+    "query": {
+      "maxResults": 1000
+    }
+  },
+  "response": {
+    "kind": "bigquery#tableList",
+    "etag": "kwRGS+R18NWchAcBgjCM/A==",
+    "tables": [
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201710"
+        },
+        "type": "TABLE",
+        "creationTime": "1516826056242"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201711"
+        },
+        "type": "TABLE",
+        "creationTime": "1516826561503"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201712"
+        },
+        "type": "TABLE",
+        "creationTime": "1516818029138"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201801"
+        },
+        "type": "TABLE",
+        "creationTime": "1518456255902"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201802"
+        },
+        "type": "TABLE",
+        "creationTime": "1520915154617"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201803"
+        },
+        "type": "TABLE",
+        "creationTime": "1523379221368"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201804"
+        },
+        "type": "TABLE",
+        "creationTime": "1525413862979"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201805"
+        },
+        "type": "TABLE",
+        "creationTime": "1528052643386"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201806"
+        },
+        "type": "TABLE",
+        "creationTime": "1531240116826"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201807"
+        },
+        "type": "TABLE",
+        "creationTime": "1533743043477"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201808"
+        },
+        "type": "TABLE",
+        "creationTime": "1536649992364"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201809"
+        },
+        "type": "TABLE",
+        "creationTime": "1539075047780"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201810"
+        },
+        "type": "TABLE",
+        "creationTime": "1542133468641"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201811"
+        },
+        "type": "TABLE",
+        "creationTime": "1544546379141"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201812"
+        },
+        "type": "TABLE",
+        "creationTime": "1546967151856"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201901"
+        },
+        "type": "TABLE",
+        "creationTime": "1549987854188"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201902"
+        },
+        "type": "TABLE",
+        "creationTime": "1552367279291"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201903"
+        },
+        "type": "TABLE",
+        "creationTime": "1554829403318"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201904"
+        },
+        "type": "TABLE",
+        "creationTime": "1560179155912"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201905"
+        },
+        "type": "TABLE",
+        "creationTime": "1560273945793"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201906"
+        },
+        "type": "TABLE",
+        "creationTime": "1562683528698"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201907"
+        },
+        "type": "TABLE",
+        "creationTime": "1565713398900"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201908"
+        },
+        "type": "TABLE",
+        "creationTime": "1568087019438"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201909"
+        },
+        "type": "TABLE",
+        "creationTime": "1570551700121"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201910"
+        },
+        "type": "TABLE",
+        "creationTime": "1573550665724"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201911"
+        },
+        "type": "TABLE",
+        "creationTime": "1576003319024"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "201912"
+        },
+        "type": "TABLE",
+        "creationTime": "1579021440622"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202001"
+        },
+        "type": "TABLE",
+        "creationTime": "1581402495074"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202002"
+        },
+        "type": "TABLE",
+        "creationTime": "1583873064269"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202003"
+        },
+        "type": "TABLE",
+        "creationTime": "1586896053913"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202004"
+        },
+        "type": "TABLE",
+        "creationTime": "1589303472747"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202005"
+        },
+        "type": "TABLE",
+        "creationTime": "1591721940737"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202006"
+        },
+        "type": "TABLE",
+        "creationTime": "1594700703846"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202007"
+        },
+        "type": "TABLE",
+        "creationTime": "1597155647406"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202008"
+        },
+        "type": "TABLE",
+        "creationTime": "1599590827694"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202009"
+        },
+        "type": "TABLE",
+        "creationTime": "1602600012516"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202010"
+        },
+        "type": "TABLE",
+        "creationTime": "1605028174003"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202011"
+        },
+        "type": "TABLE",
+        "creationTime": "1607401592188"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202012"
+        },
+        "type": "TABLE",
+        "creationTime": "1610469313592"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202101"
+        },
+        "type": "TABLE",
+        "creationTime": "1613003891768"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202102"
+        },
+        "type": "TABLE",
+        "creationTime": "1615306627878"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202103"
+        },
+        "type": "TABLE",
+        "creationTime": "1618262742494"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202104"
+        },
+        "type": "TABLE",
+        "creationTime": "1620688907912"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202105"
+        },
+        "type": "TABLE",
+        "creationTime": "1623172578662"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202106"
+        },
+        "type": "TABLE",
+        "creationTime": "1626192914415"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202107"
+        },
+        "type": "TABLE",
+        "creationTime": "1628606024209"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202108"
+        },
+        "type": "TABLE",
+        "creationTime": "1631635675897"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202109"
+        },
+        "type": "TABLE",
+        "creationTime": "1634056507179"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202110"
+        },
+        "type": "TABLE",
+        "creationTime": "1636480674723"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202111"
+        },
+        "type": "TABLE",
+        "creationTime": "1639505521398"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202112"
+        },
+        "type": "TABLE",
+        "creationTime": "1641926047174"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202201"
+        },
+        "type": "TABLE",
+        "creationTime": "1644346590128"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202202"
+        },
+        "type": "TABLE",
+        "creationTime": "1646769045044"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202203"
+        },
+        "type": "TABLE",
+        "creationTime": "1649780658874"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202204"
+        },
+        "type": "TABLE",
+        "creationTime": "1651597442597"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202205"
+        },
+        "type": "TABLE",
+        "creationTime": "1661402951782"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202206"
+        },
+        "type": "TABLE",
+        "creationTime": "1657746723128"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202207"
+        },
+        "type": "TABLE",
+        "creationTime": "1660070598545"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202208"
+        },
+        "type": "TABLE",
+        "creationTime": "1663048986411"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202209"
+        },
+        "type": "TABLE",
+        "creationTime": "1665449838686"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202210"
+        },
+        "type": "TABLE",
+        "creationTime": "1667865386911"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202211"
+        },
+        "type": "TABLE",
+        "creationTime": "1670896942922"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202212"
+        },
+        "type": "TABLE",
+        "creationTime": "1673335732683"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202301"
+        },
+        "type": "TABLE",
+        "creationTime": "1676332161443"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202302"
+        },
+        "type": "TABLE",
+        "creationTime": "1678740839123"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202303"
+        },
+        "type": "TABLE",
+        "creationTime": "1681191282434"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202304"
+        },
+        "type": "TABLE",
+        "creationTime": "1683655296837"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202305"
+        },
+        "type": "TABLE",
+        "creationTime": "1686614181026"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202306"
+        },
+        "type": "TABLE",
+        "creationTime": "1689047514021"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202307"
+        },
+        "type": "TABLE",
+        "creationTime": "1691475645846"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202308"
+        },
+        "type": "TABLE",
+        "creationTime": "1694492365239"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202309"
+        },
+        "type": "TABLE",
+        "creationTime": "1696906793263"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202310"
+        },
+        "type": "TABLE",
+        "creationTime": "1699932823166"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202311"
+        },
+        "type": "TABLE",
+        "creationTime": "1702359319046"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202312"
+        },
+        "type": "TABLE",
+        "creationTime": "1704776057532"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202401"
+        },
+        "type": "TABLE",
+        "creationTime": "1707794844695"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202402"
+        },
+        "type": "TABLE",
+        "creationTime": "1710218905996"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202403"
+        },
+        "type": "TABLE",
+        "creationTime": "1712605437817"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202404"
+        },
+        "type": "TABLE",
+        "creationTime": "1715660436081"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202405"
+        },
+        "type": "TABLE",
+        "creationTime": "1718083810357"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202406"
+        },
+        "type": "TABLE",
+        "creationTime": "1720519214443"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202407"
+        },
+        "type": "TABLE",
+        "creationTime": "1723529947463"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202408"
+        },
+        "type": "TABLE",
+        "creationTime": "1725941709660"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202409"
+        },
+        "type": "TABLE",
+        "creationTime": "1728369026698"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202410"
+        },
+        "type": "TABLE",
+        "creationTime": "1731392241942"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202411"
+        },
+        "type": "TABLE",
+        "creationTime": "1733812302561"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202412"
+        },
+        "type": "TABLE",
+        "creationTime": "1736824350646"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202501"
+        },
+        "type": "TABLE",
+        "creationTime": "1739265721010"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202502"
+        },
+        "type": "TABLE",
+        "creationTime": "1741671363474"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202503"
+        },
+        "type": "TABLE",
+        "creationTime": "1744090288515"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202504"
+        },
+        "type": "TABLE",
+        "creationTime": "1747115244977"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202505"
+        },
+        "type": "TABLE",
+        "creationTime": "1749530841266"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202506"
+        },
+        "type": "TABLE",
+        "creationTime": "1751957283400"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202507"
+        },
+        "type": "TABLE",
+        "creationTime": "1754974279595"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202508"
+        },
+        "type": "TABLE",
+        "creationTime": "1757391049902"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202509"
+        },
+        "type": "TABLE",
+        "creationTime": "1760412855203"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202510"
+        },
+        "type": "TABLE",
+        "creationTime": "1762835490318"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202511"
+        },
+        "type": "TABLE",
+        "creationTime": "1765255170802"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202512"
+        },
+        "type": "TABLE",
+        "creationTime": "1768283264670"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202601"
+        },
+        "type": "TABLE",
+        "creationTime": "1770708504812"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202602"
+        },
+        "type": "TABLE",
+        "creationTime": "1773031710985"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202603"
+        },
+        "type": "TABLE",
+        "creationTime": "1776133392416"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202604"
+        },
+        "type": "TABLE",
+        "creationTime": "1778563223479"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202605"
+        },
+        "type": "TABLE",
+        "creationTime": "1780978144381"
+      },
+      {
+        "kind": "bigquery#table",
+        "id": "<redacted-resource-id>",
+        "tableReference": {
+          "projectId": "chrome-ux-report",
+          "datasetId": "all",
+          "tableId": "202606"
+        },
+        "type": "TABLE",
+        "creationTime": "1784007806406"
+      }
+    ],
+    "totalItems": 105
+  }
+}

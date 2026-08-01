@@ -1,0 +1,40 @@
+{
+  "kind": "bigquery#tableList",
+  "etag": "kwRGS+R18NWchAcBgjCM/A==",
+  "tables": [
+    {
+      "kind": "bigquery#table",
+      "id": "<redacted-resource-id>",
+      "tableReference": {
+        "projectId": "chrome-ux-report",
+        "datasetId": "all",
+        "tableId": "201710"
+      },
+      "type": "TABLE",
+      "creationTime": "1516826056242"
+    },
+    {
+      "kind": "bigquery#table",
+      "id": "<redacted-resource-id>",
+      "tableReference": {
+        "projectId": "chrome-ux-report",
+        "datasetId": "all",
+        "tableId": "202605"
+      },
+      "type": "TABLE",
+      "creationTime": "1780978144381"
+    },
+    {
+      "kind": "bigquery#table",
+      "id": "<redacted-resource-id>",
+      "tableReference": {
+        "projectId": "chrome-ux-report",
+        "datasetId": "all",
+        "tableId": "202606"
+      },
+      "type": "TABLE",
+      "creationTime": "1784007806406"
+    }
+  ],
+  "totalItems": 3
+}

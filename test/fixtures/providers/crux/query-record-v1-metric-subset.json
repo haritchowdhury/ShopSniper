@@ -1,0 +1,43 @@
+{
+  "record": {
+    "key": {
+      "formFactor": "PHONE",
+      "origin": "https://www.google.com"
+    },
+    "metrics": {
+      "largest_contentful_paint": {
+        "histogram": [
+          {
+            "start": 0,
+            "end": 2500,
+            "density": 0.9297
+          },
+          {
+            "start": 2500,
+            "end": 4000,
+            "density": 0.0429
+          },
+          {
+            "start": 4000,
+            "density": 0.0273
+          }
+        ],
+        "percentiles": {
+          "p75": 1123
+        }
+      }
+    },
+    "collectionPeriod": {
+      "firstDate": {
+        "year": 2026,
+        "month": 7,
+        "day": 3
+      },
+      "lastDate": {
+        "year": 2026,
+        "month": 7,
+        "day": 30
+      }
+    }
+  }
+}

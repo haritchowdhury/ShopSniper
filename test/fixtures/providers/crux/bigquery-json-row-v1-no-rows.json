@@ -1,0 +1,32 @@
+{
+  "kind": "bigquery#queryResponse",
+  "schema": {
+    "fields": [
+      {
+        "name": "payload",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      }
+    ]
+  },
+  "jobReference": {
+    "projectId": "<billing-project>",
+    "jobId": "<redacted-job-id>",
+    "location": "US"
+  },
+  "totalRows": "0",
+  "totalBytesProcessed": "111193442",
+  "jobComplete": true,
+  "cacheHit": false,
+  "queryId": "<redacted-query-id>",
+  "jobCreationReason": {
+    "code": "REQUESTED"
+  },
+  "totalBytesBilled": "112197632",
+  "totalSlotMs": "954",
+  "location": "US",
+  "creationTime": "1785597438483",
+  "startTime": "1785597438644",
+  "endTime": "1785597439193",
+  "pageRowCount": "0"
+}

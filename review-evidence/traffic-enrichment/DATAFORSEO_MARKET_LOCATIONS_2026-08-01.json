@@ -1,0 +1,214 @@
+{
+  "metadata": {
+    "captured_at": "2026-08-01T15:22:28.116Z",
+    "endpoint": "https://api.dataforseo.com/v3/dataforseo_labs/locations_and_languages",
+    "http_status": 200,
+    "provider_version": "0.1.20260731",
+    "provider_status_code": 20000,
+    "provider_status_message": "Ok.",
+    "provider_cost_usd": 0
+  },
+  "markets": [
+    {
+      "location_code": 2036,
+      "location_name": "Australia",
+      "location_code_parent": null,
+      "country_iso_code": "AU",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 294054107,
+          "serps": 16033438
+        }
+      ]
+    },
+    {
+      "location_code": 2124,
+      "location_name": "Canada",
+      "location_code_parent": null,
+      "country_iso_code": "CA",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 331525441,
+          "serps": 16712530
+        },
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "French",
+          "language_code": "fr",
+          "keywords": 190026891,
+          "serps": 8445730
+        }
+      ]
+    },
+    {
+      "location_code": 2250,
+      "location_name": "France",
+      "location_code_parent": null,
+      "country_iso_code": "FR",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "French",
+          "language_code": "fr",
+          "keywords": 241473948,
+          "serps": 17994416
+        }
+      ]
+    },
+    {
+      "location_code": 2276,
+      "location_name": "Germany",
+      "location_code_parent": null,
+      "country_iso_code": "DE",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "German",
+          "language_code": "de",
+          "keywords": 292990256,
+          "serps": 25605276
+        }
+      ]
+    },
+    {
+      "location_code": 2356,
+      "location_name": "India",
+      "location_code_parent": null,
+      "country_iso_code": "IN",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 309873359,
+          "serps": 14229022
+        },
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "Hindi",
+          "language_code": "hi",
+          "keywords": 155460684,
+          "serps": 11790180
+        }
+      ]
+    },
+    {
+      "location_code": 2554,
+      "location_name": "New Zealand",
+      "location_code_parent": null,
+      "country_iso_code": "NZ",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 41325149,
+          "serps": 1398542
+        }
+      ]
+    },
+    {
+      "location_code": 2784,
+      "location_name": "United Arab Emirates",
+      "location_code_parent": null,
+      "country_iso_code": "AE",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google",
+            "amazon"
+          ],
+          "language_name": "Arabic",
+          "language_code": "ar",
+          "keywords": 41283198,
+          "serps": 1225351
+        },
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 51951350,
+          "serps": 1177813
+        }
+      ]
+    },
+    {
+      "location_code": 2826,
+      "location_name": "United Kingdom",
+      "location_code_parent": null,
+      "country_iso_code": "GB",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 482255431,
+          "serps": 33357346
+        }
+      ]
+    },
+    {
+      "location_code": 2840,
+      "location_name": "United States",
+      "location_code_parent": null,
+      "country_iso_code": "US",
+      "location_type": "Country",
+      "available_languages": [
+        {
+          "available_sources": [
+            "google",
+            "bing",
+            "amazon"
+          ],
+          "language_name": "English",
+          "language_code": "en",
+          "keywords": 1256243059,
+          "serps": 176955796
+        },
+        {
+          "available_sources": [
+            "google"
+          ],
+          "language_name": "Spanish",
+          "language_code": "es",
+          "keywords": 176252558,
+          "serps": 5224000
+        }
+      ]
+    }
+  ]
+}

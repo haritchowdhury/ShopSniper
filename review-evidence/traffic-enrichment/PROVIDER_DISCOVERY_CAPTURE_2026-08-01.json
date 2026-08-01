@@ -1,0 +1,1911 @@
+{
+  "metadata": {
+    "captured_at": "2026-08-01T14:50:25.649Z",
+    "probe_version": "traffic-discovery-v1",
+    "feature_flags_unchanged": true,
+    "public_domains": [
+      "shopify.com",
+      "allbirds.com",
+      "twolines.co.nz"
+    ],
+    "dataforseo_live_call_limit": 3,
+    "bigquery_execution_cap_bytes": 10000000000
+  },
+  "dataforseo": {
+    "locations": {
+      "request": {
+        "method": "GET",
+        "endpoint": "https://api.dataforseo.com/v3/dataforseo_labs/locations_and_languages"
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "version": "0.1.20260731",
+          "status_code": 20000,
+          "status_message": "Ok.",
+          "cost": 0,
+          "tasks_count": 1,
+          "tasks_error": 0,
+          "tasks": [
+            {
+              "id": "<redacted-task-id>",
+              "status_code": 20000,
+              "status_message": "Ok.",
+              "time": "0 sec.",
+              "cost": 0,
+              "result_count": 2,
+              "path": [
+                "v3",
+                "dataforseo_labs",
+                "locations_and_languages"
+              ],
+              "data": {
+                "api": "dataforseo_labs",
+                "function": "locations_and_languages"
+              },
+              "result": [
+                {
+                  "location_code": 2554,
+                  "location_name": "New Zealand",
+                  "location_code_parent": null,
+                  "country_iso_code": "NZ",
+                  "location_type": "Country",
+                  "available_languages": [
+                    {
+                      "available_sources": [
+                        "google"
+                      ],
+                      "language_name": "English",
+                      "language_code": "en",
+                      "keywords": 41325149,
+                      "serps": 1398542
+                    }
+                  ]
+                },
+                {
+                  "location_code": 2840,
+                  "location_name": "United States",
+                  "location_code_parent": null,
+                  "country_iso_code": "US",
+                  "location_type": "Country",
+                  "available_languages": [
+                    {
+                      "available_sources": [
+                        "google",
+                        "bing",
+                        "amazon"
+                      ],
+                      "language_name": "English",
+                      "language_code": "en",
+                      "keywords": 1256243059,
+                      "serps": 176955796
+                    },
+                    {
+                      "available_sources": [
+                        "google"
+                      ],
+                      "language_name": "Spanish",
+                      "language_code": "es",
+                      "keywords": 176252558,
+                      "serps": 5224000
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "note": "Result was reduced to the two consumed country records; values were not altered."
+    },
+    "sandbox_success": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://sandbox.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+        "body": [
+          {
+            "targets": [
+              "shopify.com",
+              "allbirds.com",
+              "twolines.co.nz"
+            ],
+            "item_types": [
+              "organic",
+              "paid",
+              "featured_snippet",
+              "local_pack"
+            ],
+            "location_code": 2840
+          }
+        ]
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "version": "0.1.20260731",
+          "status_code": 20000,
+          "status_message": "Ok.",
+          "time": "0 sec.",
+          "cost": 0,
+          "tasks_count": 1,
+          "tasks_error": 0,
+          "tasks": [
+            {
+              "id": "<redacted-task-id>",
+              "status_code": 20000,
+              "status_message": "Ok.",
+              "time": "0 sec.",
+              "cost": 0,
+              "result_count": 1,
+              "path": [
+                "v3",
+                "dataforseo_labs",
+                "google",
+                "bulk_traffic_estimation",
+                "live"
+              ],
+              "data": {
+                "api": "dataforseo_labs",
+                "function": "bulk_traffic_estimation",
+                "se_type": "google",
+                "targets": [
+                  "shopify.com",
+                  "allbirds.com",
+                  "twolines.co.nz"
+                ],
+                "item_types": [
+                  "organic",
+                  "paid",
+                  "featured_snippet",
+                  "local_pack"
+                ],
+                "location_code": 2840
+              },
+              "result": [
+                {
+                  "se_type": "google",
+                  "location_code": 2840,
+                  "language_code": "en",
+                  "total_count": 2,
+                  "items_count": 2,
+                  "items": [
+                    {
+                      "se_type": "google",
+                      "target": "cnn.com",
+                      "metrics": {
+                        "organic": {
+                          "etv": 95609986.96719275,
+                          "count": 3425907
+                        },
+                        "paid": {
+                          "etv": 66.83400136232376,
+                          "count": 7
+                        },
+                        "local_pack": null,
+                        "featured_snippet": null
+                      }
+                    },
+                    {
+                      "se_type": "google",
+                      "target": "dataforseo.com",
+                      "metrics": {
+                        "organic": {
+                          "etv": 9474.705426679924,
+                          "count": 3176
+                        },
+                        "paid": {
+                          "etv": 3.7439998388290405,
+                          "count": 2
+                        },
+                        "local_pack": null,
+                        "featured_snippet": null
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "sandbox_task_error": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://sandbox.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+        "body": [
+          {
+            "targets": []
+          }
+        ]
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "version": "0.1.20260731",
+          "status_code": 20000,
+          "status_message": "Ok.",
+          "time": "0.0083 sec.",
+          "cost": 0,
+          "tasks_count": 1,
+          "tasks_error": 1,
+          "tasks": [
+            {
+              "id": "<redacted-task-id>",
+              "status_code": 40501,
+              "status_message": "Invalid Field: 'targets'.",
+              "time": "0 sec.",
+              "cost": 0,
+              "result_count": 0,
+              "path": [
+                "v3",
+                "dataforseo_labs",
+                "google",
+                "bulk_traffic_estimation",
+                "live"
+              ],
+              "data": {
+                "api": "dataforseo_labs",
+                "function": "bulk_traffic_estimation",
+                "se_type": "google",
+                "targets": []
+              },
+              "result": null
+            }
+          ]
+        }
+      }
+    },
+    "live": {
+      "worldwide": {
+        "request": {
+          "method": "POST",
+          "endpoint": "https://api.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+          "body": [
+            {
+              "targets": [
+                "shopify.com",
+                "allbirds.com",
+                "twolines.co.nz"
+              ],
+              "item_types": [
+                "organic",
+                "paid",
+                "featured_snippet",
+                "local_pack"
+              ]
+            }
+          ]
+        },
+        "response": {
+          "httpStatus": 200,
+          "body": {
+            "version": "0.1.20260731",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1415 sec.",
+            "cost": 0.01236,
+            "tasks_count": 1,
+            "tasks_error": 0,
+            "tasks": [
+              {
+                "id": "<redacted-task-id>",
+                "status_code": 20000,
+                "status_message": "Ok.",
+                "time": "0.0920 sec.",
+                "cost": 0.01236,
+                "result_count": 1,
+                "path": [
+                  "v3",
+                  "dataforseo_labs",
+                  "google",
+                  "bulk_traffic_estimation",
+                  "live"
+                ],
+                "data": {
+                  "api": "dataforseo_labs",
+                  "function": "bulk_traffic_estimation",
+                  "se_type": "google",
+                  "targets": [
+                    "shopify.com",
+                    "allbirds.com",
+                    "twolines.co.nz"
+                  ],
+                  "item_types": [
+                    "organic",
+                    "paid",
+                    "featured_snippet",
+                    "local_pack"
+                  ]
+                },
+                "result": [
+                  {
+                    "se_type": "google",
+                    "location_code": null,
+                    "language_code": null,
+                    "total_count": 3,
+                    "items_count": 3,
+                    "items": [
+                      {
+                        "se_type": "google",
+                        "target": "shopify.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 17726185.185212217,
+                            "count": 989194
+                          },
+                          "paid": {
+                            "etv": 131511.84117367864,
+                            "count": 1243
+                          },
+                          "local_pack": {
+                            "etv": 2146.5559689998627,
+                            "count": 26
+                          },
+                          "featured_snippet": {
+                            "etv": 145786.24077033997,
+                            "count": 588
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "allbirds.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 372641.606290061,
+                            "count": 8491
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 85.1200008392334,
+                            "count": 5
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "twolines.co.nz",
+                        "metrics": {
+                          "organic": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "united_states": {
+        "request": {
+          "method": "POST",
+          "endpoint": "https://api.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+          "body": [
+            {
+              "targets": [
+                "shopify.com",
+                "allbirds.com",
+                "twolines.co.nz"
+              ],
+              "item_types": [
+                "organic",
+                "paid",
+                "featured_snippet",
+                "local_pack"
+              ],
+              "location_code": 2840
+            }
+          ]
+        },
+        "response": {
+          "httpStatus": 200,
+          "body": {
+            "version": "0.1.20260731",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1360 sec.",
+            "cost": 0.01236,
+            "tasks_count": 1,
+            "tasks_error": 0,
+            "tasks": [
+              {
+                "id": "<redacted-task-id>",
+                "status_code": 20000,
+                "status_message": "Ok.",
+                "time": "0.0923 sec.",
+                "cost": 0.01236,
+                "result_count": 1,
+                "path": [
+                  "v3",
+                  "dataforseo_labs",
+                  "google",
+                  "bulk_traffic_estimation",
+                  "live"
+                ],
+                "data": {
+                  "api": "dataforseo_labs",
+                  "function": "bulk_traffic_estimation",
+                  "se_type": "google",
+                  "targets": [
+                    "shopify.com",
+                    "allbirds.com",
+                    "twolines.co.nz"
+                  ],
+                  "item_types": [
+                    "organic",
+                    "paid",
+                    "featured_snippet",
+                    "local_pack"
+                  ],
+                  "location_code": 2840
+                },
+                "result": [
+                  {
+                    "se_type": "google",
+                    "location_code": 2840,
+                    "language_code": null,
+                    "total_count": 3,
+                    "items_count": 3,
+                    "items": [
+                      {
+                        "se_type": "google",
+                        "target": "shopify.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 5189594.745362263,
+                            "count": 338477
+                          },
+                          "paid": {
+                            "etv": 6277.480017021298,
+                            "count": 134
+                          },
+                          "local_pack": {
+                            "etv": 35.29699993133545,
+                            "count": 3
+                          },
+                          "featured_snippet": {
+                            "etv": 44116.48000335693,
+                            "count": 141
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "allbirds.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 326560.43158063665,
+                            "count": 6073
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 85.1200008392334,
+                            "count": 5
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "twolines.co.nz",
+                        "metrics": {
+                          "organic": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "new_zealand": {
+        "request": {
+          "method": "POST",
+          "endpoint": "https://api.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live",
+          "body": [
+            {
+              "targets": [
+                "shopify.com",
+                "allbirds.com",
+                "twolines.co.nz"
+              ],
+              "item_types": [
+                "organic",
+                "paid",
+                "featured_snippet",
+                "local_pack"
+              ],
+              "location_code": 2554
+            }
+          ]
+        },
+        "response": {
+          "httpStatus": 200,
+          "body": {
+            "version": "0.1.20260731",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1281 sec.",
+            "cost": 0.01236,
+            "tasks_count": 1,
+            "tasks_error": 0,
+            "tasks": [
+              {
+                "id": "<redacted-task-id>",
+                "status_code": 20000,
+                "status_message": "Ok.",
+                "time": "0.0737 sec.",
+                "cost": 0.01236,
+                "result_count": 1,
+                "path": [
+                  "v3",
+                  "dataforseo_labs",
+                  "google",
+                  "bulk_traffic_estimation",
+                  "live"
+                ],
+                "data": {
+                  "api": "dataforseo_labs",
+                  "function": "bulk_traffic_estimation",
+                  "se_type": "google",
+                  "targets": [
+                    "shopify.com",
+                    "allbirds.com",
+                    "twolines.co.nz"
+                  ],
+                  "item_types": [
+                    "organic",
+                    "paid",
+                    "featured_snippet",
+                    "local_pack"
+                  ],
+                  "location_code": 2554
+                },
+                "result": [
+                  {
+                    "se_type": "google",
+                    "location_code": 2554,
+                    "language_code": null,
+                    "total_count": 3,
+                    "items_count": 3,
+                    "items": [
+                      {
+                        "se_type": "google",
+                        "target": "allbirds.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 1519.4978944659233,
+                            "count": 78
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "shopify.com",
+                        "metrics": {
+                          "organic": {
+                            "etv": 29392.437606230378,
+                            "count": 3541
+                          },
+                          "paid": {
+                            "etv": 348.73199915885925,
+                            "count": 15
+                          },
+                          "local_pack": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "featured_snippet": {
+                            "etv": 121.60000228881836,
+                            "count": 2
+                          }
+                        }
+                      },
+                      {
+                        "se_type": "google",
+                        "target": "twolines.co.nz",
+                        "metrics": {
+                          "organic": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "paid": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "local_pack": {
+                            "etv": 0,
+                            "count": 0
+                          },
+                          "featured_snippet": {
+                            "etv": 0,
+                            "count": 0
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "crux_api": {
+    "aggregate_success": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "https://www.google.com",
+          "metrics": [
+            "largest_contentful_paint",
+            "interaction_to_next_paint",
+            "cumulative_layout_shift",
+            "first_contentful_paint",
+            "experimental_time_to_first_byte",
+            "form_factors"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "record": {
+            "key": {
+              "origin": "https://www.google.com"
+            },
+            "metrics": {
+              "cumulative_layout_shift": {
+                "histogram": [
+                  {
+                    "start": "0.00",
+                    "end": "0.10",
+                    "density": 0.9092
+                  },
+                  {
+                    "start": "0.10",
+                    "end": "0.25",
+                    "density": 0.0594
+                  },
+                  {
+                    "start": "0.25",
+                    "density": 0.0314
+                  }
+                ],
+                "percentiles": {
+                  "p75": "0.00"
+                }
+              },
+              "experimental_time_to_first_byte": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 800,
+                    "density": 0.9474
+                  },
+                  {
+                    "start": 800,
+                    "end": 1800,
+                    "density": 0.0345
+                  },
+                  {
+                    "start": 1800,
+                    "density": 0.0181
+                  }
+                ],
+                "percentiles": {
+                  "p75": 234
+                }
+              },
+              "first_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 1800,
+                    "density": 0.9576
+                  },
+                  {
+                    "start": 1800,
+                    "end": 3000,
+                    "density": 0.0244
+                  },
+                  {
+                    "start": 3000,
+                    "density": 0.018
+                  }
+                ],
+                "percentiles": {
+                  "p75": 568
+                }
+              },
+              "form_factors": {
+                "fractions": {
+                  "desktop": 0.2617,
+                  "phone": 0.7254,
+                  "tablet": 0.0129
+                }
+              },
+              "interaction_to_next_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 200,
+                    "density": 0.7857
+                  },
+                  {
+                    "start": 200,
+                    "end": 500,
+                    "density": 0.1582
+                  },
+                  {
+                    "start": 500,
+                    "density": 0.0561
+                  }
+                ],
+                "percentiles": {
+                  "p75": 171
+                }
+              },
+              "largest_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 2500,
+                    "density": 0.9334
+                  },
+                  {
+                    "start": 2500,
+                    "end": 4000,
+                    "density": 0.0419
+                  },
+                  {
+                    "start": 4000,
+                    "density": 0.0247
+                  }
+                ],
+                "percentiles": {
+                  "p75": 1129
+                }
+              }
+            },
+            "collectionPeriod": {
+              "firstDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 3
+              },
+              "lastDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              }
+            }
+          }
+        }
+      }
+    },
+    "phone_metric_subset": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "https://www.google.com",
+          "formFactor": "PHONE",
+          "metrics": [
+            "largest_contentful_paint"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "record": {
+            "key": {
+              "formFactor": "PHONE",
+              "origin": "https://www.google.com"
+            },
+            "metrics": {
+              "largest_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 2500,
+                    "density": 0.9297
+                  },
+                  {
+                    "start": 2500,
+                    "end": 4000,
+                    "density": 0.0429
+                  },
+                  {
+                    "start": 4000,
+                    "density": 0.0273
+                  }
+                ],
+                "percentiles": {
+                  "p75": 1123
+                }
+              }
+            },
+            "collectionPeriod": {
+              "firstDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 3
+              },
+              "lastDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              }
+            }
+          }
+        }
+      }
+    },
+    "shopify_without_www": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "https://shopify.com",
+          "metrics": [
+            "largest_contentful_paint",
+            "interaction_to_next_paint",
+            "cumulative_layout_shift",
+            "first_contentful_paint",
+            "experimental_time_to_first_byte",
+            "form_factors"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "record": {
+            "key": {
+              "origin": "https://shopify.com"
+            },
+            "metrics": {
+              "experimental_time_to_first_byte": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 800,
+                    "density": 0.2225
+                  },
+                  {
+                    "start": 800,
+                    "end": 1800,
+                    "density": 0.313
+                  },
+                  {
+                    "start": 1800,
+                    "density": 0.4645
+                  }
+                ],
+                "percentiles": {
+                  "p75": 2580
+                }
+              },
+              "first_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 1800,
+                    "density": 0.2389
+                  },
+                  {
+                    "start": 1800,
+                    "end": 3000,
+                    "density": 0.31
+                  },
+                  {
+                    "start": 3000,
+                    "density": 0.451
+                  }
+                ],
+                "percentiles": {
+                  "p75": 4058
+                }
+              },
+              "form_factors": {
+                "fractions": {
+                  "desktop": 0.1674,
+                  "phone": 0.8216,
+                  "tablet": 0.011
+                }
+              },
+              "interaction_to_next_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 200,
+                    "density": 0.9501
+                  },
+                  {
+                    "start": 200,
+                    "end": 500,
+                    "density": 0.0416
+                  },
+                  {
+                    "start": 500,
+                    "density": 0.0083
+                  }
+                ],
+                "percentiles": {
+                  "p75": 94
+                }
+              },
+              "largest_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 2500,
+                    "density": 0.2713
+                  },
+                  {
+                    "start": 2500,
+                    "end": 4000,
+                    "density": 0.3073
+                  },
+                  {
+                    "start": 4000,
+                    "density": 0.4214
+                  }
+                ],
+                "percentiles": {
+                  "p75": 5227
+                }
+              },
+              "cumulative_layout_shift": {
+                "histogram": [
+                  {
+                    "start": "0.00",
+                    "end": "0.10",
+                    "density": 0.8634
+                  },
+                  {
+                    "start": "0.10",
+                    "end": "0.25",
+                    "density": 0.0704
+                  },
+                  {
+                    "start": "0.25",
+                    "density": 0.0662
+                  }
+                ],
+                "percentiles": {
+                  "p75": "0.06"
+                }
+              }
+            },
+            "collectionPeriod": {
+              "firstDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 3
+              },
+              "lastDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              }
+            }
+          }
+        }
+      }
+    },
+    "shopify_with_www": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "https://www.shopify.com",
+          "metrics": [
+            "largest_contentful_paint",
+            "interaction_to_next_paint",
+            "cumulative_layout_shift",
+            "first_contentful_paint",
+            "experimental_time_to_first_byte",
+            "form_factors"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "record": {
+            "key": {
+              "origin": "https://www.shopify.com"
+            },
+            "metrics": {
+              "experimental_time_to_first_byte": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 800,
+                    "density": 0.6561
+                  },
+                  {
+                    "start": 800,
+                    "end": 1800,
+                    "density": 0.2582
+                  },
+                  {
+                    "start": 1800,
+                    "density": 0.0857
+                  }
+                ],
+                "percentiles": {
+                  "p75": 1009
+                }
+              },
+              "first_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 1800,
+                    "density": 0.7076
+                  },
+                  {
+                    "start": 1800,
+                    "end": 3000,
+                    "density": 0.1842
+                  },
+                  {
+                    "start": 3000,
+                    "density": 0.1082
+                  }
+                ],
+                "percentiles": {
+                  "p75": 1967
+                }
+              },
+              "form_factors": {
+                "fractions": {
+                  "desktop": 0.4283,
+                  "phone": 0.5608,
+                  "tablet": 0.0109
+                }
+              },
+              "interaction_to_next_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 200,
+                    "density": 0.7677
+                  },
+                  {
+                    "start": 200,
+                    "end": 500,
+                    "density": 0.1582
+                  },
+                  {
+                    "start": 500,
+                    "density": 0.0741
+                  }
+                ],
+                "percentiles": {
+                  "p75": 184
+                }
+              },
+              "largest_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 2500,
+                    "density": 0.7991
+                  },
+                  {
+                    "start": 2500,
+                    "end": 4000,
+                    "density": 0.1178
+                  },
+                  {
+                    "start": 4000,
+                    "density": 0.083
+                  }
+                ],
+                "percentiles": {
+                  "p75": 2187
+                }
+              },
+              "cumulative_layout_shift": {
+                "histogram": [
+                  {
+                    "start": "0.00",
+                    "end": "0.10",
+                    "density": 0.9533
+                  },
+                  {
+                    "start": "0.10",
+                    "end": "0.25",
+                    "density": 0.0218
+                  },
+                  {
+                    "start": "0.25",
+                    "density": 0.0249
+                  }
+                ],
+                "percentiles": {
+                  "p75": "0.01"
+                }
+              }
+            },
+            "collectionPeriod": {
+              "firstDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 3
+              },
+              "lastDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              }
+            }
+          }
+        }
+      }
+    },
+    "http_normalization": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "http://google.com",
+          "metrics": [
+            "largest_contentful_paint"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "record": {
+            "key": {
+              "origin": "http://google.com"
+            },
+            "metrics": {
+              "largest_contentful_paint": {
+                "histogram": [
+                  {
+                    "start": 0,
+                    "end": 2500,
+                    "density": 0.7003
+                  },
+                  {
+                    "start": 2500,
+                    "end": 4000,
+                    "density": 0.1363
+                  },
+                  {
+                    "start": 4000,
+                    "density": 0.1634
+                  }
+                ],
+                "percentiles": {
+                  "p75": 2961
+                }
+              }
+            },
+            "collectionPeriod": {
+              "firstDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 3
+              },
+              "lastDate": {
+                "year": 2026,
+                "month": 7,
+                "day": 30
+              }
+            }
+          }
+        }
+      }
+    },
+    "no_coverage": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://chromeuxreport.googleapis.com/v1/records:queryRecord",
+        "body": {
+          "origin": "https://no-crux-coverage-probe.invalid",
+          "metrics": [
+            "largest_contentful_paint"
+          ]
+        }
+      },
+      "response": {
+        "httpStatus": 404,
+        "body": {
+          "error": {
+            "code": 404,
+            "message": "chrome ux report data not found",
+            "status": "NOT_FOUND"
+          }
+        }
+      }
+    }
+  },
+  "crux_bigquery": {
+    "table_metadata": {
+      "request": {
+        "method": "GET",
+        "endpoint": "https://bigquery.googleapis.com/bigquery/v2/projects/chrome-ux-report/datasets/materialized/tables/metrics_summary"
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "kind": "bigquery#table",
+          "etag": "aV3SVf2hYD4X8iqry4UPyA==",
+          "id": "chrome-ux-report:materialized.metrics_summary",
+          "selfLink": "https://www.googleapis.com/bigquery/v2/projects/chrome-ux-report/datasets/materialized/tables/metrics_summary",
+          "tableReference": {
+            "projectId": "chrome-ux-report",
+            "datasetId": "materialized",
+            "tableId": "metrics_summary"
+          },
+          "schema": {
+            "fields": [
+              {
+                "name": "date",
+                "type": "DATE"
+              },
+              {
+                "name": "yyyymmdd",
+                "type": "STRING"
+              },
+              {
+                "name": "yyyymm",
+                "type": "INTEGER"
+              },
+              {
+                "name": "origin",
+                "type": "STRING"
+              },
+              {
+                "name": "rank",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_fp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_fp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_fp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_fp",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_fcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_fcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_fcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_fcp",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_dcl",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_dcl",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_dcl",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_dcl",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_ol",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_ol",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_ol",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_ol",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_fid",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_fid",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_fid",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_fid",
+                "type": "INTEGER"
+              },
+              {
+                "name": "fast_ttfb",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_ttfb",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_ttfb",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_ttfb",
+                "type": "INTEGER"
+              },
+              {
+                "name": "small_cls",
+                "type": "FLOAT"
+              },
+              {
+                "name": "medium_cls",
+                "type": "FLOAT"
+              },
+              {
+                "name": "large_cls",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_cls",
+                "type": "NUMERIC"
+              },
+              {
+                "name": "fast_lcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_lcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_lcp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_lcp",
+                "type": "INTEGER"
+              },
+              {
+                "name": "notification_permission_accept",
+                "type": "FLOAT"
+              },
+              {
+                "name": "notification_permission_deny",
+                "type": "FLOAT"
+              },
+              {
+                "name": "notification_permission_ignore",
+                "type": "FLOAT"
+              },
+              {
+                "name": "notification_permission_dismiss",
+                "type": "FLOAT"
+              },
+              {
+                "name": "desktopDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "phoneDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "tabletDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "_4GDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "_3GDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "_2GDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow2GDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "offlineDensity",
+                "type": "FLOAT"
+              },
+              {
+                "name": "fast_inp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "avg_inp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "slow_inp",
+                "type": "FLOAT"
+              },
+              {
+                "name": "p75_inp",
+                "type": "INTEGER"
+              },
+              {
+                "name": "navigation_types_navigate",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_navigate_cache",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_reload",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_restore",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_back_forward",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_back_forward_cache",
+                "type": "FLOAT"
+              },
+              {
+                "name": "navigation_types_prerender",
+                "type": "FLOAT"
+              },
+              {
+                "name": "low_rtt",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "medium_rtt",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "high_rtt",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "p75_rtt",
+                "type": "INTEGER",
+                "mode": "NULLABLE"
+              }
+            ]
+          },
+          "timePartitioning": {
+            "type": "DAY",
+            "field": "date"
+          },
+          "numBytes": "478460779302",
+          "numLongTermBytes": "456122127936",
+          "numRows": "1242815328",
+          "creationTime": "1651597607367",
+          "lastModifiedTime": "1784013264851",
+          "type": "TABLE",
+          "location": "US",
+          "clustering": {
+            "fields": [
+              "yyyymm",
+              "origin"
+            ]
+          },
+          "cloneDefinition": {
+            "baseTableReference": {
+              "projectId": "chrome-ux-report",
+              "datasetId": "materialized",
+              "tableId": "metrics_summary_inp"
+            },
+            "cloneTime": "2022-05-03T17:06:45.128Z"
+          },
+          "numTimeTravelPhysicalBytes": "0",
+          "numTotalLogicalBytes": "478460779302",
+          "numActiveLogicalBytes": "22338651366",
+          "numLongTermLogicalBytes": "456122127936",
+          "numTotalPhysicalBytes": "77395840072",
+          "numActivePhysicalBytes": "3616249595",
+          "numLongTermPhysicalBytes": "73779590477",
+          "numPartitions": "106",
+          "partitionDefinition": {
+            "partitionedColumn": [
+              {
+                "field": "date"
+              }
+            ]
+          },
+          "numCurrentPhysicalBytes": "77395840072"
+        }
+      }
+    },
+    "latest_month_lookup": {
+      "request": {
+        "method": "GET",
+        "endpoint": "https://bigquery.googleapis.com/bigquery/v2/projects/chrome-ux-report/datasets/all/tables",
+        "query": {
+          "maxResults": 1000
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "latest_month": "202606",
+          "matched_table_count": 105
+        }
+      },
+      "note": "Only the derived latest YYYYMM and count are retained; no table names are consumed at runtime."
+    },
+    "dry_run": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://bigquery.googleapis.com/bigquery/v2/projects/<billing-project>/queries",
+        "body": {
+          "query": "SELECT\n  origin,\n  CAST(yyyymm AS STRING) AS dataset_month,\n  rank AS popularity_rank,\n  phoneDensity AS phone_density,\n  desktopDensity AS desktop_density,\n  tabletDensity AS tablet_density\nFROM `chrome-ux-report.materialized.metrics_summary`\nWHERE yyyymm = @month\n  AND origin IN UNNEST(@origins)\nORDER BY origin",
+          "useLegacySql": false,
+          "parameterMode": "NAMED",
+          "queryParameters": [
+            {
+              "name": "origins",
+              "parameterType": {
+                "type": "ARRAY",
+                "arrayType": {
+                  "type": "STRING"
+                }
+              },
+              "parameterValue": {
+                "arrayValues": [
+                  {
+                    "value": "https://www.google.com"
+                  },
+                  {
+                    "value": "https://shopify.com"
+                  },
+                  {
+                    "value": "https://www.shopify.com"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "month",
+              "parameterType": {
+                "type": "INT64"
+              },
+              "parameterValue": {
+                "value": "202606"
+              }
+            }
+          ],
+          "location": "US",
+          "dryRun": true
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "kind": "bigquery#queryResponse",
+          "schema": {
+            "fields": [
+              {
+                "name": "origin",
+                "type": "STRING",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "dataset_month",
+                "type": "STRING",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "popularity_rank",
+                "type": "INTEGER",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "phone_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "desktop_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "tablet_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              }
+            ]
+          },
+          "jobReference": {
+            "projectId": "<billing-project>",
+            "location": "US"
+          },
+          "totalBytesProcessed": "83105084",
+          "jobComplete": true,
+          "cacheHit": false,
+          "totalBytesBilled": "0",
+          "location": "US",
+          "creationTime": "1785595834433",
+          "endTime": "1785595834762"
+        }
+      }
+    },
+    "query_success": {
+      "request": {
+        "method": "POST",
+        "endpoint": "https://bigquery.googleapis.com/bigquery/v2/projects/<billing-project>/queries",
+        "body": {
+          "query": "SELECT\n  origin,\n  CAST(yyyymm AS STRING) AS dataset_month,\n  rank AS popularity_rank,\n  phoneDensity AS phone_density,\n  desktopDensity AS desktop_density,\n  tabletDensity AS tablet_density\nFROM `chrome-ux-report.materialized.metrics_summary`\nWHERE yyyymm = @month\n  AND origin IN UNNEST(@origins)\nORDER BY origin",
+          "useLegacySql": false,
+          "parameterMode": "NAMED",
+          "queryParameters": [
+            {
+              "name": "origins",
+              "parameterType": {
+                "type": "ARRAY",
+                "arrayType": {
+                  "type": "STRING"
+                }
+              },
+              "parameterValue": {
+                "arrayValues": [
+                  {
+                    "value": "https://www.google.com"
+                  },
+                  {
+                    "value": "https://shopify.com"
+                  },
+                  {
+                    "value": "https://www.shopify.com"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "month",
+              "parameterType": {
+                "type": "INT64"
+              },
+              "parameterValue": {
+                "value": "202606"
+              }
+            }
+          ],
+          "location": "US",
+          "maximumBytesBilled": "10000000000",
+          "useQueryCache": false,
+          "timeoutMs": 60000
+        }
+      },
+      "response": {
+        "httpStatus": 200,
+        "body": {
+          "kind": "bigquery#queryResponse",
+          "schema": {
+            "fields": [
+              {
+                "name": "origin",
+                "type": "STRING",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "dataset_month",
+                "type": "STRING",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "popularity_rank",
+                "type": "INTEGER",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "phone_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "desktop_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              },
+              {
+                "name": "tablet_density",
+                "type": "FLOAT",
+                "mode": "NULLABLE"
+              }
+            ]
+          },
+          "jobReference": {
+            "projectId": "<billing-project>",
+            "jobId": "<redacted-job-id>",
+            "location": "US"
+          },
+          "totalRows": "3",
+          "rows": [
+            {
+              "f": [
+                {
+                  "v": "https://shopify.com"
+                },
+                {
+                  "v": "202606"
+                },
+                {
+                  "v": "1000"
+                },
+                {
+                  "v": "0.8117"
+                },
+                {
+                  "v": "0.1773"
+                },
+                {
+                  "v": "0.0106"
+                }
+              ]
+            },
+            {
+              "f": [
+                {
+                  "v": "https://www.google.com"
+                },
+                {
+                  "v": "202606"
+                },
+                {
+                  "v": "1000"
+                },
+                {
+                  "v": "0.711"
+                },
+                {
+                  "v": "0.2751"
+                },
+                {
+                  "v": "0.0135"
+                }
+              ]
+            },
+            {
+              "f": [
+                {
+                  "v": "https://www.shopify.com"
+                },
+                {
+                  "v": "202606"
+                },
+                {
+                  "v": "5000"
+                },
+                {
+                  "v": "0.5389"
+                },
+                {
+                  "v": "0.4505"
+                },
+                {
+                  "v": "0.0101"
+                }
+              ]
+            }
+          ],
+          "totalBytesProcessed": "83105084",
+          "jobComplete": true,
+          "cacheHit": false,
+          "queryId": "<redacted-query-id>",
+          "jobCreationReason": {
+            "code": "REQUESTED"
+          },
+          "totalBytesBilled": "83886080",
+          "totalSlotMs": "495",
+          "location": "US",
+          "creationTime": "1785595835261",
+          "startTime": "1785595835412",
+          "endTime": "1785595836182",
+          "pageRowCount": "3"
+        }
+      }
+    }
+  }
+}

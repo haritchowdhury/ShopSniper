@@ -1,0 +1,55 @@
+{
+  "kind": "bigquery#queryResponse",
+  "schema": {
+    "fields": [
+      {
+        "name": "payload",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      }
+    ]
+  },
+  "jobReference": {
+    "projectId": "<billing-project>",
+    "jobId": "<redacted-job-id>",
+    "location": "US"
+  },
+  "totalRows": "3",
+  "rows": [
+    {
+      "f": [
+        {
+          "v": "{\"origin\":\"https://shopify.com\",\"dataset_month\":\"202606\",\"popularity_rank\":1000,\"phone_density\":0.8117,\"desktop_density\":0.1773,\"tablet_density\":0.0106}"
+        }
+      ]
+    },
+    {
+      "f": [
+        {
+          "v": "{\"origin\":\"https://www.google.com\",\"dataset_month\":\"202606\",\"popularity_rank\":1000,\"phone_density\":0.711,\"desktop_density\":0.2751,\"tablet_density\":0.0135}"
+        }
+      ]
+    },
+    {
+      "f": [
+        {
+          "v": "{\"origin\":\"https://www.shopify.com\",\"dataset_month\":\"202606\",\"popularity_rank\":5000,\"phone_density\":0.5389,\"desktop_density\":0.4505,\"tablet_density\":0.0101}"
+        }
+      ]
+    }
+  ],
+  "totalBytesProcessed": "111193442",
+  "jobComplete": true,
+  "cacheHit": false,
+  "queryId": "<redacted-query-id>",
+  "jobCreationReason": {
+    "code": "REQUESTED"
+  },
+  "totalBytesBilled": "112197632",
+  "totalSlotMs": "954",
+  "location": "US",
+  "creationTime": "1785597438483",
+  "startTime": "1785597438644",
+  "endTime": "1785597439193",
+  "pageRowCount": "3"
+}

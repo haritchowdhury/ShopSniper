@@ -1,0 +1,33 @@
+{
+  "version": "0.1.20260731",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.0083 sec.",
+  "cost": 0,
+  "tasks_count": 1,
+  "tasks_error": 1,
+  "tasks": [
+    {
+      "id": "<redacted-task-id>",
+      "status_code": 40501,
+      "status_message": "Invalid Field: 'targets'.",
+      "time": "0 sec.",
+      "cost": 0,
+      "result_count": 0,
+      "path": [
+        "v3",
+        "dataforseo_labs",
+        "google",
+        "bulk_traffic_estimation",
+        "live"
+      ],
+      "data": {
+        "api": "dataforseo_labs",
+        "function": "bulk_traffic_estimation",
+        "se_type": "google",
+        "targets": []
+      },
+      "result": null
+    }
+  ]
+}

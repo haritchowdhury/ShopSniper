@@ -1,0 +1,42 @@
+{
+  "version": "0.1.20260731",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.1415 sec.",
+  "cost": 0.01236,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "<redacted-task-id>",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "0.0920 sec.",
+      "cost": 0.01236,
+      "result_count": 1,
+      "path": [
+        "v3",
+        "dataforseo_labs",
+        "google",
+        "bulk_traffic_estimation",
+        "live"
+      ],
+      "data": {
+        "api": "dataforseo_labs",
+        "function": "bulk_traffic_estimation",
+        "se_type": "google",
+        "targets": [
+          "shopify.com",
+          "allbirds.com",
+          "twolines.co.nz"
+        ],
+        "item_types": [
+          "organic",
+          "paid",
+          "featured_snippet",
+          "local_pack"
+        ]
+      }
+    }
+  ]
+}
