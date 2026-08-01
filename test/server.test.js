@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
-import { RunIntentNotFoundError } from "../src/api-errors.js";
+import {
+  RunAdmissionRejectedError,
+  RunIntentNotFoundError
+} from "../src/api-errors.js";
 import { createLeadServer } from "../src/server.js";
 
 class TestRepository {
@@ -58,13 +61,14 @@ class TestRepository {
     return { count: 0 };
   }
 
-  async claimRunIntent(identifier, ownerId, now) {
+  async claimRunIntent(identifier, ownerId, now, { allowCreate = true } = {}) {
     const intent = this.intents.get(identifier);
     if (!intent || intent.expiresAt <= now) throw new RunIntentNotFoundError();
     if (intent.claimedRunId) {
       if (intent.claimedByUserId !== ownerId) throw new RunIntentNotFoundError();
       return { run: this.runs.get(intent.claimedRunId), created: false };
     }
+    if (!allowCreate) throw new RunAdmissionRejectedError();
     const run = await this.createRun(ownerId, intent.normalizedShopTypes);
     intent.claimedByUserId = ownerId;
     intent.claimedRunId = run.id;
@@ -102,6 +106,7 @@ class TestRepository {
       identifier,
       result.leads.map((lead, index) => ({
         id: `lead_abcdefghijklmnop${index}`,
+        originalShopType: lead.original_shop_type || null,
         shopType: lead.shop_type || null,
         generatedQuery: lead.generated_query || null,
         queryScore: lead.query_score === "" ? null : lead.query_score,
@@ -124,6 +129,8 @@ class TestRepository {
         shopifyConfidence: lead.shopify_confidence || null,
         relevanceScore: lead.relevance_score || null,
         leadScore: lead.lead_score || null,
+        pipelineVersion: lead.pipeline_version ?? 2,
+        scoringVersion: lead.scoring_version ?? 2,
         status: lead.status,
         rejectionReason: lead.rejection_reason || null,
         error: lead.error || null
@@ -257,6 +264,7 @@ test("documented API creates, polls, and returns durable-shaped results", async 
       return {
         leads: [
           {
+            original_shop_type: "Clothing brands",
             shop_type: "clothing",
             generated_query: "site:myshopify.com/products barrel jeans",
             query_score: 90,
@@ -375,6 +383,8 @@ test("documented API creates, polls, and returns durable-shaped results", async 
   });
   assert.equal(body.pagination.totalItems, 1);
   assert.equal(body.items[0].lead_score, 95);
+  assert.equal(body.items[0].original_shop_type, "Clothing brands");
+  assert.equal(body.items[0].score_semantics, "evidence_rank_v2");
   assert.equal(body.items[0].phone, null);
   assert.deepEqual(body.items[0].social_profiles, []);
 
@@ -550,4 +560,54 @@ test("anonymous intent claim is idempotent and runs are owner-scoped", async (co
   const list = await listed.json();
   assert.equal(list.pagination.totalItems, 1);
   assert.equal(list.items[0].runId, firstRun.runId);
+});
+
+test("direct and intent admission share one simultaneous capacity reservation", async (context) => {
+  const fixture = await startTestServer({
+    config: { ...config, runRateLimitMax: 1 },
+    schedule: () => {}
+  });
+  context.after(() => fixture.server.close());
+
+  const intentResponse = await fetch(`${fixture.base}/api/run-intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shopTypes: ["eyewear"] })
+  });
+  const { intentId } = await intentResponse.json();
+  const [direct, claim] = await Promise.all([
+    fetch(`${fixture.base}/api/runs`, {
+      method: "POST",
+      headers: USER_HEADERS,
+      body: JSON.stringify({ shopTypes: ["clothing"] })
+    }),
+    fetch(`${fixture.base}/api/run-intents/${intentId}/claim`, {
+      method: "POST",
+      headers: { "x-user-id": "user_alice" }
+    })
+  ]);
+  const statuses = [direct.status, claim.status];
+  assert.equal(statuses.filter((status) => status === 429).length, 1);
+  assert.equal(statuses.filter((status) => status === 201 || status === 202).length, 1);
+  assert.equal(fixture.repository.runs.size, 1);
+});
+
+test("simultaneous identical intent claims create once and replay outside capacity", async (context) => {
+  const fixture = await startTestServer({
+    config: { ...config, runRateLimitMax: 1 },
+    schedule: () => {}
+  });
+  context.after(() => fixture.server.close());
+  const intent = await (await fetch(`${fixture.base}/api/run-intents`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ shopTypes: ["eyewear"] })
+  })).json();
+  const claim = () => fetch(`${fixture.base}/api/run-intents/${intent.intentId}/claim`, {
+    method: "POST",
+    headers: { "x-user-id": "user_alice" }
+  });
+  const responses = await Promise.all([claim(), claim()]);
+  assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 201]);
+  assert.equal(fixture.repository.runs.size, 1);
 });

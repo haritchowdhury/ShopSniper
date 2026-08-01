@@ -1,6 +1,7 @@
 import { createInitialProgress } from "./status.js";
 
 const TEXT_FIELDS = {
+  original_shop_type: "originalShopType",
   shop_type: "shopType",
   business_qualifier: "businessQualifier",
   generated_query: "generatedQuery",
@@ -69,7 +70,12 @@ export function serializeLead(lead) {
   for (const [publicName, modelName] of Object.entries(JSON_FIELDS)) {
     item[publicName] = lead[modelName] ?? null;
   }
-  item.score_semantics = lead.scoringVersion == null ? "legacy_v1" : "evidence_rank_v2";
+  const isV2 = lead.pipelineVersion === 2 || lead.scoringVersion === 2;
+  item.score_semantics = !isV2
+    ? "legacy_v1"
+    : lead.leadScore == null
+      ? "not_scored_v2"
+      : "evidence_rank_v2";
   return item;
 }
 

@@ -23,7 +23,8 @@ test("G3 CSV fields are appended without shifting legacy columns", () => {
     "relevance_score", "lead_score", "status", "rejection_reason", "error"
   ]);
   assert.equal(OUTPUT_HEADERS[25], "business_qualifier");
-  assert.equal(OUTPUT_HEADERS.at(-1), "matched_categories");
+  assert.equal(OUTPUT_HEADERS.at(-2), "matched_categories");
+  assert.equal(OUTPUT_HEADERS.at(-1), "original_shop_type");
 });
 
 test("CSV writer round-trips special values", () => {

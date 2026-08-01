@@ -22,21 +22,22 @@ enum LeadStatus {
 }
 
 model Run {
-  id                  String    @id
+  id                  String          @id
   ownerId             String?
   state               RunState
   stage               String
   normalizedShopTypes Json
-  createdAt           DateTime  @default(now())
+  createdAt           DateTime        @default(now())
   startedAt           DateTime?
   completedAt         DateTime?
   progress            Json
-  resultsAvailable    Boolean   @default(false)
+  resultsAvailable    Boolean         @default(false)
   leadSummary         Json?
   safeErrorCode       String?
   safeErrorMessage    String?
   pipelineVersion     Int?
   scoringVersion      Int?
+  resultFingerprint   String?
   leads               Lead[]
   queryAudits         QueryAudit[]
   diagnostics         RunDiagnostic[]
@@ -58,46 +59,47 @@ model RunIntent {
 }
 
 model Lead {
-  id                       String     @id
-  runId                    String
-  run                      Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
-  shopType                 String?
-  businessQualifier        String?
-  generatedQuery           String?
-  queryScore               Int?
-  queryGenerationReason    String?
-  searchQuery              String?
-  googleRank               Int?
-  googleResultUrl          String?
-  myshopifyDomain          String?
-  finalUrl                 String?
-  canonicalUrl             String?
-  resolvedDomain           String?
-  storeName                String?
-  email                    String?
-  emailSourceUrl           String?
-  phone                    String?
-  phoneSourceUrl           String?
-  contactUrl               String?
-  socialProfiles           String[]   @default([])
-  additionalInformation    String?
-  shopifyConfidence        Int?
-  relevanceScore           Int?
-  leadScore                Int?
-  pipelineVersion          Int?
-  scoringVersion           Int?
-  storeFitState            String?
-  storeFitEvidence         Json?
-  contactabilityTier       String?
-  contactEvidence          Json?
-  identityConfidence       Int?
-  identityEvidence         Json?
-  scoreBreakdown           Json?
-  discoveryOccurrences     Json?
-  matchedCategories        Json?
-  status                   LeadStatus
-  rejectionReason          String?
-  error                    String?
+  id                    String     @id
+  runId                 String
+  run                   Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shopType              String?
+  originalShopType      String?
+  businessQualifier     String?
+  generatedQuery        String?
+  queryScore            Float?
+  queryGenerationReason String?
+  searchQuery           String?
+  googleRank            Int?
+  googleResultUrl       String?
+  myshopifyDomain       String?
+  finalUrl              String?
+  canonicalUrl          String?
+  resolvedDomain        String?
+  storeName             String?
+  email                 String?
+  emailSourceUrl        String?
+  phone                 String?
+  phoneSourceUrl        String?
+  contactUrl            String?
+  socialProfiles        String[]   @default([])
+  additionalInformation String?
+  shopifyConfidence     Int?
+  relevanceScore        Int?
+  leadScore             Int?
+  pipelineVersion       Int?
+  scoringVersion        Int?
+  storeFitState         String?
+  storeFitEvidence      Json?
+  contactabilityTier    String?
+  contactEvidence       Json?
+  identityConfidence    Int?
+  identityEvidence      Json?
+  scoreBreakdown        Json?
+  discoveryOccurrences  Json?
+  matchedCategories     Json?
+  status                LeadStatus
+  rejectionReason       String?
+  error                 String?
 
   @@index([runId, status])
   @@index([runId, leadScore])
@@ -107,33 +109,33 @@ model Lead {
 }
 
 model QueryAudit {
-  id                    String   @id
-  runId                 String
-  run                   Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
-  sequence              Int
-  shopType              String?
-  businessQualifier     String?
-  query                 String?
-  status                String
-  rejectionReason       String?
-  details               Json
+  id                String  @id
+  runId             String
+  run               Run     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence          Int
+  shopType          String?
+  businessQualifier String?
+  query             String?
+  status            String
+  rejectionReason   String?
+  details           Json
 
   @@unique([runId, sequence])
   @@index([runId, status])
 }
 
 model RunDiagnostic {
-  id                    String   @id
-  runId                 String
-  run                   Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
-  sequence              Int
-  scope                 String
-  code                  String
-  shopType              String?
-  businessQualifier     String?
-  query                 String?
-  resultUrl             String?
-  details               Json
+  id                String  @id
+  runId             String
+  run               Run     @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence          Int
+  scope             String
+  code              String
+  shopType          String?
+  businessQualifier String?
+  query             String?
+  resultUrl         String?
+  details           Json
 
   @@unique([runId, sequence])
   @@index([runId, scope, code])

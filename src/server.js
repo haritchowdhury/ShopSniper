@@ -1,6 +1,11 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
-import { ApiError, RunIntentNotFoundError, errorPayload } from "./api-errors.js";
+import {
+  ApiError,
+  RunAdmissionRejectedError,
+  RunIntentNotFoundError,
+  errorPayload
+} from "./api-errors.js";
 import {
   serializeDiagnostic,
   serializeLead,
@@ -345,6 +350,7 @@ export function createLeadServer(
   } = {}
 ) {
   const acceptedRunTimes = [];
+  let admissionTail = Promise.resolve();
   let drainScheduled = false;
   let draining = false;
   let drainRequested = false;
@@ -361,17 +367,48 @@ export function createLeadServer(
     }
   }
 
-  function checkRunRateLimit() {
-    const cutoff = now() - (config.runRateLimitWindowMs || 60000);
-    while (acceptedRunTimes.length && acceptedRunTimes[0] <= cutoff) {
+  function expireAdmissions(timestamp) {
+    const cutoff = timestamp - (config.runRateLimitWindowMs || 60000);
+    while (acceptedRunTimes.length && acceptedRunTimes[0].at <= cutoff) {
       acceptedRunTimes.shift();
     }
-    if (acceptedRunTimes.length >= (config.runRateLimitMax || 5)) {
-      throw new ApiError(
-        429,
-        "RUN_RATE_LIMITED",
-        "Too many runs were started recently. Please try again later."
-      );
+  }
+
+  function rateLimitError() {
+    return new ApiError(
+      429,
+      "RUN_RATE_LIMITED",
+      "Too many runs were started recently. Please try again later."
+    );
+  }
+
+  async function admitRun(operation) {
+    const previous = admissionTail;
+    let releaseLock;
+    admissionTail = new Promise((resolve) => { releaseLock = resolve; });
+    await previous;
+
+    const timestamp = now();
+    expireAdmissions(timestamp);
+    const hasCapacity = acceptedRunTimes.length < (config.runRateLimitMax || 5);
+    const reservation = hasCapacity ? { at: timestamp } : null;
+    if (reservation) acceptedRunTimes.push(reservation);
+    try {
+      const result = await operation({ allowCreate: hasCapacity });
+      if (result.created && !reservation) throw rateLimitError();
+      if (!result.created && reservation) {
+        acceptedRunTimes.splice(acceptedRunTimes.indexOf(reservation), 1);
+      }
+      return result;
+    } catch (error) {
+      if (reservation) {
+        const index = acceptedRunTimes.indexOf(reservation);
+        if (index >= 0) acceptedRunTimes.splice(index, 1);
+      }
+      if (error instanceof RunAdmissionRejectedError) throw rateLimitError();
+      throw error;
+    } finally {
+      releaseLock();
     }
   }
 
@@ -457,10 +494,13 @@ export function createLeadServer(
         checkRunConfiguration();
         let claimed;
         try {
-          claimed = await repository.claimRunIntent(
-            intentIdentifier,
-            ownerId,
-            new Date(now())
+          claimed = await admitRun(({ allowCreate }) =>
+            repository.claimRunIntent(
+              intentIdentifier,
+              ownerId,
+              new Date(now()),
+              { allowCreate }
+            )
           );
         } catch (error) {
           if (error instanceof RunIntentNotFoundError) {
@@ -472,7 +512,6 @@ export function createLeadServer(
           }
           throw error;
         }
-        if (claimed.created) acceptedRunTimes.push(now());
         queueDrain();
         const payload = startRunPayload(claimed.run);
         return sendJson(response, claimed.created ? 201 : 200, payload, {
@@ -486,9 +525,13 @@ export function createLeadServer(
       const payload = await readJsonBody(request);
       const categories = validateRunRequest(payload, config.maxShopTypes || 100);
       checkRunConfiguration();
-      checkRunRateLimit();
-      const run = await repository.createRun(ownerId, categories);
-      acceptedRunTimes.push(now());
+      const { run } = await admitRun(async ({ allowCreate }) => {
+        if (!allowCreate) throw rateLimitError();
+        return {
+          run: await repository.createRun(ownerId, categories),
+          created: true
+        };
+      });
 
       const startPayload = startRunPayload(run);
       sendJson(

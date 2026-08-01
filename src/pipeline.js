@@ -51,7 +51,7 @@ function blankRecord(overrides = {}) {
     relevance_score: "",
     lead_score: "",
     pipeline_version: 2,
-    scoring_version: "",
+    scoring_version: 2,
     store_fit_state: "",
     store_fit_evidence: null,
     contactability_tier: "",
@@ -334,7 +334,7 @@ async function processStore(candidate, config, dependencies) {
     shopify_confidence: validation.shopifyConfidence,
     relevance_score: validation.relevanceScore,
     lead_score: leadStatus === "qualified" ? scoreBreakdown.total : "",
-    scoring_version: leadStatus === "qualified" ? 2 : "",
+    scoring_version: 2,
     store_fit_state: validation.storeFit?.state || "",
     store_fit_evidence: validations.map(({ intent, validation: item, accepted }) => ({
       intent,

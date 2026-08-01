@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { RunIntentNotFoundError } from "./api-errors.js";
+import {
+  RunAdmissionRejectedError,
+  RunIntentNotFoundError,
+  RunTerminalConflictError
+} from "./api-errors.js";
 import {
   diagnosticRecordToCreate,
   leadRecordToCreate,
@@ -28,6 +32,20 @@ function childId(prefix, runIdentifier, identity) {
 
 function isUniqueConstraint(error) {
   return error?.code === "P2002" || error?.cause?.code === "23505";
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function resultFingerprint(payload) {
+  return createHash("sha256").update(canonicalJson(payload)).digest("hex");
 }
 
 function resultWhere(runIdentifier, ownerId, filters) {
@@ -110,7 +128,12 @@ export class PrismaRunRepository {
     });
   }
 
-  async claimRunIntent(intentIdentifier, ownerId, now = new Date()) {
+  async claimRunIntent(
+    intentIdentifier,
+    ownerId,
+    now = new Date(),
+    { allowCreate = true } = {}
+  ) {
     return this.prisma.$transaction(async (transaction) => {
       const intent = await transaction.runIntent.findUnique({
         where: { id: intentIdentifier }
@@ -128,6 +151,7 @@ export class PrismaRunRepository {
         if (!existingRun) throw new RunIntentNotFoundError();
         return { run: existingRun, created: false };
       }
+      if (!allowCreate) throw new RunAdmissionRejectedError();
 
       const identifier = runId();
       const claimed = await transaction.runIntent.updateMany({
@@ -271,8 +295,44 @@ export class PrismaRunRepository {
     const finalProgress = status
       ? { ...progressFromStatus(status), outputRows: leads.length }
       : undefined;
+    const fingerprint = resultFingerprint({
+      leads: leadRows,
+      queryAudits: auditRows,
+      diagnostics: diagnosticRows,
+      summary,
+      pipelineVersion,
+      scoringVersion
+    });
 
     return this.prisma.$transaction(async (transaction) => {
+      const published = await transaction.run.updateMany({
+        where: { id: runIdentifier, state: { in: ACTIVE_STATES } },
+        data: {
+          state: "completed",
+          stage: "completed",
+          completedAt: new Date(),
+          resultsAvailable: true,
+          leadSummary: summary,
+          pipelineVersion,
+          scoringVersion,
+          resultFingerprint: fingerprint,
+          ...(finalProgress ? { progress: finalProgress } : {}),
+          safeErrorCode: null,
+          safeErrorMessage: null
+        }
+      });
+      if (published.count !== 1) {
+        const existing = await transaction.run.findUnique({
+          where: { id: runIdentifier }
+        });
+        if (
+          existing?.state === "completed" &&
+          existing.resultFingerprint === fingerprint
+        ) {
+          return existing;
+        }
+        throw new RunTerminalConflictError();
+      }
       await transaction.lead.deleteMany({ where: { runId: runIdentifier } });
       await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
       await transaction.runDiagnostic.deleteMany({ where: { runId: runIdentifier } });
@@ -283,21 +343,7 @@ export class PrismaRunRepository {
       if (diagnosticRows.length) {
         await transaction.runDiagnostic.createMany({ data: diagnosticRows });
       }
-      return transaction.run.update({
-        where: { id: runIdentifier },
-        data: {
-          state: "completed",
-          stage: "completed",
-          completedAt: new Date(),
-          resultsAvailable: true,
-          leadSummary: summary,
-          pipelineVersion,
-          scoringVersion,
-          ...(finalProgress ? { progress: finalProgress } : {}),
-          safeErrorCode: null,
-          safeErrorMessage: null
-        }
-      });
+      return transaction.run.findUnique({ where: { id: runIdentifier } });
     });
   }
 
@@ -309,8 +355,8 @@ export class PrismaRunRepository {
     } = {},
     status = null
   ) {
-    return this.prisma.run.update({
-      where: { id: runIdentifier },
+    return this.prisma.run.updateMany({
+      where: { id: runIdentifier, state: { in: ACTIVE_STATES } },
       data: {
         state: "failed",
         stage: "failed",
@@ -318,6 +364,8 @@ export class PrismaRunRepository {
         resultsAvailable: false,
         safeErrorCode: code,
         safeErrorMessage: message,
+        pipelineVersion: 2,
+        scoringVersion: 2,
         ...(status ? { progress: progressFromStatus(status) } : {})
       }
     });

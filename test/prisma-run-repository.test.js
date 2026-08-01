@@ -95,7 +95,10 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
     lead: model("lead"),
     queryAudit: model("queryAudit"),
     runDiagnostic: model("runDiagnostic"),
-    run: { update: async (arguments_) => { calls.push("run.update"); return arguments_.data; } }
+    run: {
+      updateMany: async () => { calls.push("run.updateMany"); return { count: 1 }; },
+      findUnique: async () => { calls.push("run.findUnique"); return { resultsAvailable: true, pipelineVersion: 2 }; }
+    }
   };
   const repository = new PrismaRunRepository({
     $transaction: async (callback) => callback(transaction)
@@ -107,8 +110,9 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
   });
   assert.deepEqual(calls, [
+    "run.updateMany",
     "lead.deleteMany", "queryAudit.deleteMany", "runDiagnostic.deleteMany",
-    "lead.createMany", "queryAudit.createMany", "runDiagnostic.createMany", "run.update"
+    "lead.createMany", "queryAudit.createMany", "runDiagnostic.createMany", "run.findUnique"
   ]);
   assert.equal(result.resultsAvailable, true);
   assert.equal(result.pipelineVersion, 2);
@@ -130,7 +134,7 @@ test("owner scope is applied to audit and diagnostic repository reads", async ()
   for (const [, where] of seen) assert.deepEqual(where.run, { ownerId: "user_alice" });
 });
 
-test("a child-write failure occurs before the publication update", async () => {
+test("a child-write failure occurs after the conditional publication gate", async () => {
   let published = false;
   const noOp = { deleteMany: async () => {}, createMany: async () => {} };
   const repository = new PrismaRunRepository({
@@ -141,7 +145,10 @@ test("a child-write failure occurs before the publication update", async () => {
         deleteMany: async () => {},
         createMany: async () => { throw new Error("injected durable write failure"); }
       },
-      run: { update: async () => { published = true; } }
+      run: {
+        updateMany: async () => { published = true; return { count: 1 }; },
+        findUnique: async () => ({ state: "completed" })
+      }
     })
   });
   await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", {
@@ -150,7 +157,40 @@ test("a child-write failure occurs before the publication update", async () => {
     diagnostics: [{ scope: "query", code: "fixture", details: {} }],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
   }), /injected durable write failure/u);
-  assert.equal(published, false);
+  assert.equal(published, true);
+});
+
+test("completion replay is idempotent only for the same durable payload", async () => {
+  let fingerprint;
+  const transaction = {
+    lead: { deleteMany: async () => {}, createMany: async () => {} },
+    queryAudit: { deleteMany: async () => {}, createMany: async () => {} },
+    runDiagnostic: { deleteMany: async () => {}, createMany: async () => {} },
+    run: {
+      updateMany: async ({ data }) => {
+        if (fingerprint) return { count: 0 };
+        fingerprint = data.resultFingerprint;
+        return { count: 1 };
+      },
+      findUnique: async () => ({ state: "completed", resultFingerprint: fingerprint })
+    }
+  };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback(transaction)
+  });
+  const payload = {
+    leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
+    summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+  };
+  await repository.saveCompletedResults("run_abcdefghijklmnop", payload);
+  await repository.saveCompletedResults("run_abcdefghijklmnop", payload);
+  await assert.rejects(
+    repository.saveCompletedResults("run_abcdefghijklmnop", {
+      ...payload,
+      summary: { total: 1, qualified: 0, rejected: 1, failed: 0 }
+    }),
+    /different terminal result/u
+  );
 });
 
 test("G3 migration is additive and contains no historical-row rewrite", async () => {
@@ -163,4 +203,16 @@ test("G3 migration is additive and contains no historical-row rewrite", async ()
   assert.match(sql, /ADD COLUMN "pipelineVersion" INTEGER/u);
   assert.match(sql, /CREATE TABLE "QueryAudit"/u);
   assert.match(sql, /CREATE TABLE "RunDiagnostic"/u);
+});
+
+test("G-R4 migration preserves rows while widening query scores and adding provenance", async () => {
+  const url = new URL(
+    "../prisma/migrations/20260801000000_gr4_durable_v2/migration.sql",
+    import.meta.url
+  );
+  const sql = await fs.readFile(url, "utf8");
+  assert.doesNotMatch(sql, /^\s*(?:UPDATE|DELETE FROM|DROP TABLE)\b/imu);
+  assert.match(sql, /"queryScore" TYPE DOUBLE PRECISION/u);
+  assert.match(sql, /ADD COLUMN "originalShopType" TEXT/u);
+  assert.match(sql, /ADD COLUMN "resultFingerprint" TEXT/u);
 });

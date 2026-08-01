@@ -15,6 +15,20 @@ export class RunIntentNotFoundError extends Error {
   }
 }
 
+export class RunAdmissionRejectedError extends Error {
+  constructor() {
+    super("Run admission capacity is unavailable");
+    this.name = "RunAdmissionRejectedError";
+  }
+}
+
+export class RunTerminalConflictError extends Error {
+  constructor() {
+    super("Run already has a different terminal result");
+    this.name = "RunTerminalConflictError";
+  }
+}
+
 export function errorPayload(error) {
   if (error instanceof ApiError) {
     return {

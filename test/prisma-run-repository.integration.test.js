@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 import { createInitialStatus } from "../src/status.js";
@@ -12,7 +14,31 @@ test(
   "Prisma repository persists runs atomically on an explicit test database",
   { skip: !enabled },
   async () => {
-    const prisma = createPrismaClient(process.env.TEST_DATABASE_URL);
+    const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+    const schema = `repository_${Date.now()}_${process.pid}`;
+    const scopedUrl = new URL(process.env.TEST_DATABASE_URL);
+    scopedUrl.searchParams.set("schema", schema);
+    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
+    await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+    const migration = spawnSync(
+      "npx",
+      ["prisma", "migrate", "deploy", "--config", "prisma.config.ts"],
+      {
+        cwd: projectRoot,
+        env: {
+          ...process.env,
+          DATABASE_URL: scopedUrl.toString(),
+          DIRECT_URL: ""
+        },
+        encoding: "utf8"
+      }
+    );
+    if (migration.status !== 0) {
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+    }
+    assert.equal(migration.status, 0, `test database migration failed: ${migration.stderr || migration.stdout}`);
+    const prisma = createPrismaClient(scopedUrl.toString());
     const repository = new PrismaRunRepository(prisma);
     const createdIds = [];
 
@@ -102,6 +128,8 @@ test(
         await prisma.run.deleteMany({ where: { id: { in: createdIds } } });
       }
       await prisma.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
     }
   }
 );

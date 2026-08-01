@@ -9,7 +9,7 @@
     "dev": "node --watch src/server.js",
     "run:once": "node src/run-once.js",
     "test": "node --test",
-    "test:integration": "node --test test/prisma-run-repository.integration.test.js",
+    "test:integration": "node -r dotenv/config --test --test-concurrency=1 test/*.integration.test.js",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",

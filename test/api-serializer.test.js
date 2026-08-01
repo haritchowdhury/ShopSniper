@@ -9,6 +9,7 @@ import { log } from "../src/logger.js";
 
 test("lead serialization preserves snake_case types and normalizes blanks", () => {
   const stored = leadRecordToCreate("run_abcdefghijklmnop", "lead_fixture", {
+    original_shop_type: "Independent Eyewear",
     shop_type: "eyewear",
     query_score: "91",
     google_rank: "",
@@ -19,6 +20,7 @@ test("lead serialization preserves snake_case types and normalizes blanks", () =
   const serialized = serializeLead(stored);
 
   assert.equal(serialized.shop_type, "eyewear");
+  assert.equal(serialized.original_shop_type, "Independent Eyewear");
   assert.equal(serialized.query_score, 91);
   assert.equal(serialized.google_rank, null);
   assert.equal(serialized.email, null);
@@ -56,6 +58,7 @@ test("v2 lead evidence round-trips while unversioned rows remain explicitly lega
     business_qualifier: "brand",
     pipeline_version: 2,
     scoring_version: 2,
+    lead_score: 80,
     identity_confidence: 70,
     score_breakdown: { version: 2, components: { identity: 14 }, total: 80 },
     discovery_occurrences: [{ query: "frames", rank: 1 }],
@@ -67,6 +70,25 @@ test("v2 lead evidence round-trips while unversioned rows remain explicitly lega
   assert.equal(serialized.score_semantics, "evidence_rank_v2");
   assert.equal(serialized.score_breakdown.total, 80);
   assert.equal(serializeLead({ id: "legacy", status: "rejected" }).score_semantics, "legacy_v1");
+
+  const rejected = leadRecordToCreate("run_abcdefghijklmnop", "lead_rejected", {
+    original_shop_type: "Eyewear Brand",
+    pipeline_version: 2,
+    scoring_version: 2,
+    lead_score: "",
+    score_breakdown: null,
+    status: "rejected"
+  });
+  assert.equal(serializeLead(rejected).score_semantics, "not_scored_v2");
+  assert.equal(serializeLead(rejected).lead_score, null);
+  assert.equal(serializeLead(rejected).score_breakdown, null);
+
+  const failed = leadRecordToCreate("run_abcdefghijklmnop", "lead_failed", {
+    pipeline_version: 2,
+    scoring_version: 2,
+    status: "failed"
+  });
+  assert.equal(serializeLead(failed).score_semantics, "not_scored_v2");
 });
 
 test("structured logging redacts PostgreSQL credentials", () => {

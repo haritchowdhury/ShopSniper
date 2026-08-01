@@ -7,7 +7,11 @@ export function createPrismaClient(connectionString = process.env.DATABASE_URL) 
   if (!connectionString) {
     throw new Error("DATABASE_URL is required");
   }
-  const adapter = new PrismaNeon({ connectionString });
+  const schema = new URL(connectionString).searchParams.get("schema") || undefined;
+  const adapter = new PrismaNeon(
+    { connectionString },
+    schema ? { schema } : undefined
+  );
   return new PrismaClient({ adapter });
 }
 

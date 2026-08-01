@@ -426,6 +426,8 @@ test("research-only stores are rejected with a null v2 score", async () => {
   assert.equal(result.leads[0].contactability_tier, "research_only");
   assert.equal(result.leads[0].lead_score, "");
   assert.equal(result.leads[0].score_breakdown, null);
+  assert.equal(result.leads[0].pipeline_version, 2);
+  assert.equal(result.leads[0].scoring_version, 2);
 });
 
 test("structural rejects and scalar-only contact URLs cannot score or qualify", async () => {
