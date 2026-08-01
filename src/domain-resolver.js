@@ -25,14 +25,16 @@ export async function resolveStoreIdentity(
   try {
     response = await fetch(original.href, config, {
       request,
-      purpose: "storefront"
+      purpose: "storefront",
+      allowedHostnames: [original.hostname]
     });
   } catch (error) {
     const homepage = new URL("/", original);
     if (homepage.href === original.href) throw error;
     response = await fetch(homepage.href, config, {
       request,
-      purpose: "storefront"
+      purpose: "storefront",
+      allowedHostnames: [homepage.hostname]
     });
   }
 
@@ -77,6 +79,7 @@ export async function resolveStoreIdentity(
     initialFetch: {
       rendered: Boolean(response.rendered),
       renderAttempted: Boolean(response.renderAttempted),
+      renderContractVersion: response.renderContractVersion || "",
       assessment: response.fetchAssessment || null
     },
     identityEvidence: {

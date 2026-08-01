@@ -1,7 +1,10 @@
 import { searchGoogle } from "./search.js";
 import { planGeneratedQueries } from "./query-planner.js";
 import { resolveStoreIdentity } from "./domain-resolver.js";
-import { validateStorefront } from "./storefront-validator.js";
+import {
+  storefrontRejectionPriority,
+  validateStorefront
+} from "./storefront-validator.js";
 import { discoverStorePages } from "./sitemap.js";
 import { fetchPage } from "./page-fetcher.js";
 import {
@@ -19,15 +22,6 @@ function safeErrorType(error) {
     ? error.name
     : "Error";
 }
-
-const REJECTION_PRIORITY = new Map([
-  ["inactive_store", 0],
-  ["storefront_blocked", 1],
-  ["not_shopify", 2],
-  ["wrong_category", 3],
-  ["wrong_store_type", 4],
-  ["insufficient_store_evidence", 5]
-]);
 
 function blankRecord(overrides = {}) {
   return {
@@ -158,7 +152,10 @@ async function processStore(candidate, config, dependencies) {
         rendered = Boolean(candidate.initialFetch?.rendered);
       } else {
         const purpose = new URL(pageUrl).pathname === "/" ? "storefront" : "evidence";
-        const response = await dependencies.fetchPage(pageUrl, config, { purpose });
+        const response = await dependencies.fetchPage(pageUrl, config, {
+          purpose,
+          allowedHostnames: candidate.allowedHostnames
+        });
         if (!sameAllowedHostname(response.finalUrl, candidate.allowedHostnames)) {
           throw new Error("Page redirected outside the verified store hostnames");
         }
@@ -211,8 +208,8 @@ async function processStore(candidate, config, dependencies) {
   }));
   validations.sort((left, right) =>
     Number(right.validation.valid) - Number(left.validation.valid) ||
-    (REJECTION_PRIORITY.get(left.validation.rejectionReason) ?? 99) -
-      (REJECTION_PRIORITY.get(right.validation.rejectionReason) ?? 99) ||
+    storefrontRejectionPriority(left.validation.rejectionReason) -
+      storefrontRejectionPriority(right.validation.rejectionReason) ||
     Number(right.validation.relevanceScore || 0) - Number(left.validation.relevanceScore || 0) ||
     `${left.intent.shopType}:${left.intent.businessQualifier}`.localeCompare(
       `${right.intent.shopType}:${right.intent.businessQualifier}`

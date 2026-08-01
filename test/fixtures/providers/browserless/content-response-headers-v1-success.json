@@ -1,0 +1,10 @@
+{
+  "body": "<html><body>Fictional rendered storefront</body></html>",
+  "contentType": "text/html; charset=utf-8",
+  "responseHeaders": {
+    "x-response-code": "200",
+    "x-response-url": "https://fixture-store.example/pages/contact-us",
+    "x-response-status": "OK",
+    "x-fixture-extension": "ignored"
+  }
+}

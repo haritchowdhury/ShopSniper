@@ -1,0 +1,8 @@
+{
+  "body": "<html><body>Malformed status</body></html>",
+  "contentType": "text/html",
+  "responseHeaders": {
+    "x-response-code": "success",
+    "x-response-url": "https://fixture-store.example/"
+  }
+}

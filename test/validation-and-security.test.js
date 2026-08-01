@@ -33,8 +33,7 @@ test("password-protected Shopify storefront is rejected as inactive", () => {
       snippet: "",
       html: `
         <html><body class="password">
-          Enter using password
-          <script src="/cdn/shop/theme.js"></script>
+          <form action="/password"><input type="password">Enter using password</form>
           Organic coffee opening soon
         </body></html>
       `
@@ -118,4 +117,68 @@ test("store fit distinguishes a general seller from a specialist and enforces br
   assert.equal(fit.state, "specialist");
   assert.deepEqual(fit.sourceUrls, ["https://general.myshopify.com/"]);
   assert.equal(validateStorefront(specialist, {}, { final: true }).valid, true);
+});
+
+test("several isolated category phrases do not promote a broad department store", () => {
+  const candidate = {
+    resolvedDomain: "general.example",
+    myshopifyDomain: "general.myshopify.com",
+    finalUrl: "https://general.example/",
+    shopType: "eyewear",
+    businessQualifier: "brand",
+    categoryVocabulary: ["aviator glasses", "reading glasses"],
+    html: `<html><head><title>General Department Store</title></head><body><script src="/cdn/shop/theme.js"></script>${"Home furniture electronics groceries and toys. ".repeat(8)} Aviator glasses. Reading glasses.</body></html>`
+  };
+  const result = validateStorefront(candidate, {}, { final: true });
+  assert.equal(result.storeFit.state, "category_seller");
+  assert.equal(result.rejectionReason, "wrong_store_type");
+  assert.deepEqual(
+    result.storeFit.breadthEvidence[0].terms,
+    ["electronics", "furniture", "groceries", "home", "toys"]
+  );
+});
+
+test("incidental opening-soon About copy cannot make an active storefront inactive", () => {
+  const candidate = {
+    resolvedDomain: "active.example",
+    myshopifyDomain: "active.myshopify.com",
+    finalUrl: "https://active.example/",
+    shopType: "eyewear",
+    businessQualifier: "brand",
+    html: `<html><head><title>Active Eyewear Studio</title></head><body><script src="/cdn/shop/theme.js"></script>${"Eyewear frames and lenses available now. ".repeat(8)}</body></html>`,
+    evidencePages: [{
+      url: "https://active.example/pages/about",
+      html: `<html><body>${"Our active eyewear studio serves customers daily. ".repeat(4)} Second location opening soon.</body></html>`
+    }]
+  };
+  const result = validateStorefront(candidate, {}, { final: true });
+  assert.equal(result.activityState, "active");
+  assert.equal(result.valid, true);
+});
+
+test("rejection precedence favors proven structural and fit reasons over insufficiency", () => {
+  const base = {
+    resolvedDomain: "fixture.example",
+    myshopifyDomain: "fixture.myshopify.com",
+    finalUrl: "https://fixture.example/",
+    shopType: "eyewear",
+    businessQualifier: "brand"
+  };
+  const inactive = validateStorefront({
+    ...base,
+    html: '<html><body class="password"><form action="/password"><input type="password"></form></body></html>'
+  }, {}, { final: true });
+  assert.equal(inactive.rejectionReason, "inactive_store");
+
+  const wrongType = validateStorefront({
+    ...base,
+    html: `<html><body><script src="/cdn/shop/theme.js"></script>${"General store catalog and checkout. ".repeat(8)} One eyewear promotion.</body></html>`
+  }, {}, { final: true });
+  assert.equal(wrongType.rejectionReason, "wrong_store_type");
+
+  const blocked = validateStorefront({
+    ...base,
+    html: "<html><body>Checking your browser. Verify you are human.</body></html>"
+  }, {}, { final: true });
+  assert.equal(blocked.rejectionReason, "storefront_blocked");
 });

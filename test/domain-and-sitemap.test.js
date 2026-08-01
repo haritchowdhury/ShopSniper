@@ -109,6 +109,7 @@ test("initial identity resolution uses the storefront render policy", async () =
   assert.deepEqual(candidate.initialFetch, {
     rendered: true,
     renderAttempted: true,
+    renderContractVersion: "",
     assessment: { usable: true, reason: "usable_html" }
   });
 });

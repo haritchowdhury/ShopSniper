@@ -1,16 +1,46 @@
 import { requestText } from "./http-client.js";
 import { stripHtml } from "./html.js";
-import { assertPublicUrl } from "./url-security.js";
+import { parseBrowserlessContentResponse } from "./browserless-adapter.js";
+import {
+  assertPublicUrl,
+  normalizeHostname,
+  parseHttpUrl,
+  sameAllowedHostname
+} from "./url-security.js";
 
 const CHALLENGE_PATTERN =
   /(?:captcha|cf-chl-|cloudflare ray id|checking your browser|verify you are human|access denied|bot detection|unusual traffic)/i;
 const CONSENT_SHELL_PATTERN =
   /(?:enable javascript|javascript is required|please turn javascript on|cookie consent).{0,160}(?:continue|view|site|shop)/i;
-const PASSWORD_PATTERN =
-  /(?:\/password(?:["'/?#])|class=["'][^"']*password|enter using password|opening soon)/i;
 const SHOPIFY_PATTERN =
   /(?:cdn\.shopify\.com|\/cdn\/shop\/|shopifycloud|Shopify\.(?:theme|routes|shop)|shopify-section|shopify-payment-button|name=["']form_type["'])/i;
 const PRODUCT_PATTERN = /(?:\/products\/|\/collections\/|add-to-cart|product-form)/i;
+const PASSWORD_FORM_ACTION =
+  /<form\b[^>]*\baction\s*=\s*["'][^"']*\/password(?:[/?#][^"']*)?["'][^>]*>/i;
+const PASSWORD_INPUT = /<input\b[^>]*\btype\s*=\s*["']password["'][^>]*>/i;
+const PASSWORD_TEMPLATE =
+  /(?:<body\b[^>]*\bclass\s*=\s*["'][^"']*\bpassword\b|data-template\s*=\s*["']password["'])/i;
+
+function passwordLockAssessment(response, body, hasProductEvidence) {
+  let passwordRoute = false;
+  try {
+    passwordRoute = /^\/password(?:\/|$)/iu.test(new URL(response?.finalUrl || "").pathname);
+  } catch {
+    passwordRoute = false;
+  }
+  const formAction = PASSWORD_FORM_ACTION.test(body);
+  const templateWithInput = PASSWORD_TEMPLATE.test(body) && PASSWORD_INPUT.test(body);
+  const signals = [
+    passwordRoute ? "password_route" : "",
+    formAction ? "password_form_action" : "",
+    templateWithInput ? "password_template_and_input" : ""
+  ].filter(Boolean);
+  return {
+    passwordProtected: signals.length > 0 && !hasProductEvidence,
+    signals,
+    normalCommerceContent: hasProductEvidence
+  };
+}
 
 export function assessPageResponse(response, { purpose = "evidence" } = {}) {
   const body = response?.body || "";
@@ -18,10 +48,11 @@ export function assessPageResponse(response, { purpose = "evidence" } = {}) {
   const contentType = response?.contentType || "";
   const htmlLike = contentType.includes("html") || /<html|<body|<main/i.test(body);
   const challenge = CHALLENGE_PATTERN.test(body);
-  const passwordProtected = PASSWORD_PATTERN.test(body);
   const consentOrJsShell = CONSENT_SHELL_PATTERN.test(text);
   const hasShopifyEvidence = SHOPIFY_PATTERN.test(body);
   const hasProductEvidence = PRODUCT_PATTERN.test(body);
+  const lock = passwordLockAssessment(response, body, hasProductEvidence);
+  const passwordProtected = lock.passwordProtected;
   const minimumText = purpose === "storefront" ? 120 : 80;
   const insufficientText = text.length < minimumText;
   const suspicious = challenge || consentOrJsShell;
@@ -46,6 +77,7 @@ export function assessPageResponse(response, { purpose = "evidence" } = {}) {
     textLength: text.length,
     challenge,
     passwordProtected,
+    lockEvidence: lock,
     consentOrJsShell,
     hasShopifyEvidence,
     hasProductEvidence
@@ -55,7 +87,7 @@ export function assessPageResponse(response, { purpose = "evidence" } = {}) {
 export async function fetchPage(
   url,
   config,
-  { request = requestText, purpose = "evidence" } = {}
+  { request = requestText, purpose = "evidence", allowedHostnames = [] } = {}
 ) {
   let ordinaryResponse;
   let ordinaryError;
@@ -98,6 +130,12 @@ export async function fetchPage(
   }
 
   await assertPublicUrl(url);
+  const renderAllowedHostnames = new Set(
+    [parseHttpUrl(url).hostname, ...allowedHostnames].map(normalizeHostname)
+  );
+  if (ordinaryResponse?.finalUrl) {
+    renderAllowedHostnames.add(normalizeHostname(parseHttpUrl(ordinaryResponse.finalUrl).hostname));
+  }
   const browserlessErrors = [];
   for (const token of browserlessTokens) {
     const browserlessUrl = new URL(config.browserlessUrl);
@@ -112,15 +150,24 @@ export async function fetchPage(
         }),
         timeoutMs: config.requestTimeoutMs + 5000,
         retries: 0,
-        maxBytes: 3_000_000
+        maxBytes: 3_000_000,
+        responseHeaderNames: ["x-response-code", "x-response-url"]
       });
-      const normalized = { ...rendered, finalUrl: url };
+      const normalized = parseBrowserlessContentResponse(rendered);
+      await assertPublicUrl(normalized.finalUrl);
+      if (!sameAllowedHostname(normalized.finalUrl, [...renderAllowedHostnames])) {
+        throw new Error("Browserless redirected outside verified store hostnames");
+      }
+      if (normalized.status < 200 || normalized.status >= 300) {
+        throw new Error(`Browserless target returned HTTP ${normalized.status}`);
+      }
       return {
         ...normalized,
         rendered: true,
         fetchAssessment: assessPageResponse(normalized, { purpose }),
         renderAttempted: true,
-        ordinaryAssessment
+        ordinaryAssessment,
+        renderContractVersion: normalized.contractVersion
       };
     } catch (browserlessError) {
       browserlessErrors.push(
