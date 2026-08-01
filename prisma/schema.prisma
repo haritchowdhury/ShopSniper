@@ -38,11 +38,18 @@ model Run {
   pipelineVersion     Int?
   scoringVersion      Int?
   resultFingerprint   String?
+  leaseOwner          String?
+  leaseToken          String?         @unique
+  leaseAcquiredAt     DateTime?
+  leaseExpiresAt      DateTime?
+  lastHeartbeatAt     DateTime?
+  leaseAttempt        Int             @default(0)
   leads               Lead[]
   queryAudits         QueryAudit[]
   diagnostics         RunDiagnostic[]
 
   @@index([state])
+  @@index([state, leaseExpiresAt])
   @@index([createdAt])
   @@index([ownerId, createdAt])
 }

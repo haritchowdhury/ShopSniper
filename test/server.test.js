@@ -75,7 +75,7 @@ class TestRepository {
     return { run, created: true };
   }
 
-  async claimNextQueuedRun() {
+  async claimNextQueuedRun(owner, now = new Date(), leaseDurationMs = 90_000) {
     if ([...this.runs.values()].some((run) => run.state === "running")) {
       return null;
     }
@@ -84,18 +84,41 @@ class TestRepository {
     run.state = "running";
     run.stage = "reading_categories";
     run.startedAt = new Date();
+    run.leaseOwner = owner;
+    run.leaseToken = `lease_${run.id}`;
+    run.leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
+    return {
+      run,
+      lease: { owner, token: run.leaseToken, expiresAt: run.leaseExpiresAt }
+    };
+  }
+
+  assertLease(identifier, lease, now = new Date()) {
+    const run = this.runs.get(identifier);
+    if (
+      run?.state !== "running" ||
+      run.leaseOwner !== lease.owner ||
+      run.leaseToken !== lease.token ||
+      run.leaseExpiresAt <= now
+    ) throw new Error("lease lost");
     return run;
   }
 
-  async updateProgress(identifier, status) {
-    const run = this.runs.get(identifier);
+  async updateProgress(identifier, lease, status, now) {
+    const run = this.assertLease(identifier, lease, now);
     run.stage = status.stage;
     run.progress = { ...status };
     return { count: 1 };
   }
 
-  async saveCompletedResults(identifier, result, status) {
-    const run = this.runs.get(identifier);
+  async heartbeatRun(identifier, lease, now, leaseDurationMs) {
+    const run = this.assertLease(identifier, lease, now);
+    run.leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
+    return { ...lease, expiresAt: run.leaseExpiresAt };
+  }
+
+  async saveCompletedResults(identifier, lease, result, status, now) {
+    const run = this.assertLease(identifier, lease, now);
     run.state = "completed";
     run.stage = "completed";
     run.completedAt = new Date();
@@ -157,14 +180,26 @@ class TestRepository {
     })));
   }
 
-  async markFailed(identifier, safeError, status) {
-    const run = this.runs.get(identifier);
+  async markFailed(identifier, lease, safeError, status, now) {
+    const run = this.assertLease(identifier, lease, now);
     run.state = "failed";
     run.stage = "failed";
     run.completedAt = new Date();
     run.progress = { ...status };
     run.safeErrorCode = safeError.code;
     run.safeErrorMessage = safeError.message;
+  }
+
+  async recoverExpiredRuns(now = new Date()) {
+    let count = 0;
+    for (const run of this.runs.values()) {
+      if (run.state === "running" && (!run.leaseExpiresAt || run.leaseExpiresAt <= now)) {
+        run.state = "failed";
+        run.stage = "failed";
+        count += 1;
+      }
+    }
+    return { count };
   }
 
   async listRuns(ownerId, { page, pageSize }) {
@@ -610,4 +645,31 @@ test("simultaneous identical intent claims create once and replay outside capaci
   const responses = await Promise.all([claim(), claim()]);
   assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 201]);
   assert.equal(fixture.repository.runs.size, 1);
+});
+
+test("heartbeat loss prevents terminal publication and emits only a safe event", async () => {
+  const repository = new TestRepository();
+  const run = await repository.createRun("user_alice", [{ shopType: "eyewear" }]);
+  repository.heartbeatRun = async () => { throw new Error("database lease rejected"); };
+  const events = [];
+  const server = createLeadServer(config, {
+    repository,
+    pipeline: async () => ({
+      leads: [{ resolved_domain: "should-not-publish.example", status: "qualified" }],
+      summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+    }),
+    schedule: (callback) => callback(),
+    logger: (event, details) => events.push({ event, details }),
+    setIntervalFn: () => ({ unref() {} }),
+    clearIntervalFn: () => {}
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  server.close();
+
+  assert.equal(repository.runs.get(run.id).state, "running");
+  assert.equal(repository.items.has(run.id), false);
+  assert.deepEqual(events.filter(({ event }) => event === "run_lease_lost"), [{
+    event: "run_lease_lost",
+    details: { runId: run.id, code: "RUN_LEASE_LOST" }
+  }]);
 });

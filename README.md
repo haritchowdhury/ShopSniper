@@ -140,6 +140,13 @@ index and atomic claim permit only one `running` row at a time. Status, result,
 and list reads require the same trusted `X-User-Id`; foreign and missing run IDs
 both return `404`. Completed result rows have no application expiry.
 
+The HTTP service is a long-running Node worker. Each database claim carries an
+opaque owner/token lease, and progress, heartbeat, failure, and completion writes
+must present that active unexpired lease. Another instance cannot fail or publish
+the run. Workers renew leases during long provider calls; expired or legacy
+unleased running work is marked failed once with a safe interruption error. This
+does not make the complete scraper suitable for a single AWS Lambda invocation.
+
 The private backend contract also provides:
 
 - `POST /api/run-intents` to validate and store an anonymous search for one hour;
@@ -221,6 +228,7 @@ for audit only and do not drive selection.
 
 ```bash
 npm test
+npm run check:secrets
 ```
 
 The suite covers API contract behavior, result serialization, category safety and
@@ -233,3 +241,8 @@ probe handoff, and server job control.
 Default tests make no Google, Browserless, OpenAI, or database calls. Database
 integration tests require both `ALLOW_DATABASE_TESTS=true` and a dedicated
 `TEST_DATABASE_URL`.
+
+Local n8n workflow exports are deliberately ignored and must not be force-added.
+The redacted secret check scans repository files but reports only a pattern class,
+path, and line number. Credential values must never be copied into test output or
+handoff evidence.

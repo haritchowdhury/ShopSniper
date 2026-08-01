@@ -22,8 +22,7 @@ test("pipeline deduplicates results and emits one evidence-backed store row", as
     outputCsv: "/unused/output.csv",
     maxQueries: 10,
     storeConcurrency: 2,
-    maxPagesPerStore: 5,
-    qualificationThreshold: 45
+    maxPagesPerStore: 5
   };
   const currentStatus = status();
   const result = await runPipeline(config, currentStatus, {
@@ -83,8 +82,7 @@ test("one failed query does not stop later queries", async () => {
       inputCsv: "unused",
       outputCsv: "unused",
       maxQueries: 10,
-      storeConcurrency: 1,
-      qualificationThreshold: 0
+      storeConcurrency: 1
     },
     currentStatus,
     {
@@ -123,8 +121,7 @@ test("selected probe results enter the lead pipeline without another Google sear
     {
       outputCsv: "/unused/output.csv",
       storeConcurrency: 1,
-      maxPagesPerStore: 1,
-      qualificationThreshold: 0
+      maxPagesPerStore: 1
     },
     currentStatus,
     {
@@ -217,8 +214,7 @@ test("per-store page fetching is bounded and preserves ranked discovery order", 
   ];
   const result = await runPipeline({
     storeConcurrency: 1,
-    pageFetchConcurrency: 2,
-    qualificationThreshold: 0
+    pageFetchConcurrency: 2
   }, status(), {
     readQueries: async () => ({ queries: ["eyewear"], blanksSkipped: 0 }),
     search: async (query) => [{
@@ -305,8 +301,7 @@ test("manual categories reach the planner without CSV reads or writes", async ()
   const result = await runPipeline(
     {
       storeConcurrency: 1,
-      maxPagesPerStore: 1,
-      qualificationThreshold: 0
+      maxPagesPerStore: 1
     },
     currentStatus,
     {

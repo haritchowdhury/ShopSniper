@@ -6,3 +6,5 @@ data/generated-queries.csv
 data/*.tmp
 *.log
 .DS_Store
+/My workflow 3.json
+/My workflow 4.json

@@ -79,9 +79,10 @@ const occurrence = {
   myshopifyDomain: "fixture-fashion.myshopify.com"
 };
 
-await repository.claimNextQueuedRun();
+const claimed = await repository.claimNextQueuedRun("frontend_seed_worker");
 await repository.saveCompletedResults(
   run.id,
+  claimed.lease,
   {
     leads: [
       {

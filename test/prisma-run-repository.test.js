@@ -3,6 +3,9 @@ import fs from "node:fs/promises";
 import test from "node:test";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 
+const LEASE = { owner: "worker_fixture", token: "lease_fixture" };
+const NOW = new Date("2026-08-01T00:00:00.000Z");
+
 function fakePrisma() {
   let findArguments;
   const prisma = {
@@ -68,7 +71,7 @@ test("repository default ordering is deterministic with null scores last", async
   ]);
 });
 
-test("restart recovery fails only running work and preserves queued runs", async () => {
+test("restart recovery fails only expired or legacy-unleased running work", async () => {
   let updateArguments;
   const repository = new PrismaRunRepository({
     run: {
@@ -79,10 +82,46 @@ test("restart recovery fails only running work and preserves queued runs", async
     }
   });
 
-  await repository.recoverInterruptedRuns();
-  assert.deepEqual(updateArguments.where, { state: "running" });
+  await repository.recoverExpiredRuns(NOW);
+  assert.equal(updateArguments.where.state, "running");
+  assert.deepEqual(updateArguments.where.OR, [
+    { leaseExpiresAt: { lte: NOW } },
+    { leaseExpiresAt: null }
+  ]);
   assert.equal(updateArguments.data.state, "failed");
-  assert.equal(updateArguments.data.safeErrorCode, "RUN_INTERRUPTED");
+  assert.equal(updateArguments.data.safeErrorCode, "RUN_LEASE_EXPIRED");
+});
+
+test("progress, heartbeat, and failure writes require the active lease fence", async () => {
+  const updates = [];
+  const repository = new PrismaRunRepository({
+    run: {
+      updateMany: async (arguments_) => {
+        updates.push(arguments_);
+        return { count: 1 };
+      }
+    }
+  });
+  await repository.updateProgress("run_abcdefghijklmnop", LEASE, { stage: "running" }, NOW);
+  await repository.heartbeatRun("run_abcdefghijklmnop", LEASE, NOW, 60_000);
+  await repository.markFailed("run_abcdefghijklmnop", LEASE, {}, null, NOW);
+  for (const update of updates) {
+    assert.deepEqual(update.where, {
+      id: "run_abcdefghijklmnop",
+      state: "running",
+      leaseOwner: LEASE.owner,
+      leaseToken: LEASE.token,
+      leaseExpiresAt: { gt: NOW }
+    });
+  }
+
+  const rejected = new PrismaRunRepository({
+    run: { updateMany: async () => ({ count: 0 }) }
+  });
+  await assert.rejects(
+    rejected.updateProgress("run_abcdefghijklmnop", LEASE, {}, NOW),
+    /no longer owns/u
+  );
 });
 
 test("completion writes leads, audits, diagnostics, and publication in one transaction", async () => {
@@ -103,7 +142,7 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
   const repository = new PrismaRunRepository({
     $transaction: async (callback) => callback(transaction)
   });
-  const result = await repository.saveCompletedResults("run_abcdefghijklmnop", {
+  const result = await repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
     leads: [{ resolved_domain: "fixture.example", status: "qualified", lead_score: 80 }],
     queryAudits: [{ query: "fixture", status: "selected" }],
     diagnostics: [{ scope: "query", code: "fixture", details: {} }],
@@ -151,7 +190,7 @@ test("a child-write failure occurs after the conditional publication gate", asyn
       }
     })
   });
-  await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", {
+  await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
     leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
     queryAudits: [{ query: "fixture", status: "selected" }],
     diagnostics: [{ scope: "query", code: "fixture", details: {} }],
@@ -182,10 +221,16 @@ test("completion replay is idempotent only for the same durable payload", async 
     leads: [{ resolved_domain: "fixture.example", status: "qualified" }],
     summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
   };
-  await repository.saveCompletedResults("run_abcdefghijklmnop", payload);
-  await repository.saveCompletedResults("run_abcdefghijklmnop", payload);
+  await repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, payload);
+  transaction.run.findUnique = async () => ({
+    state: "completed",
+    leaseOwner: LEASE.owner,
+    leaseToken: LEASE.token,
+    resultFingerprint: fingerprint
+  });
+  await repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, payload);
   await assert.rejects(
-    repository.saveCompletedResults("run_abcdefghijklmnop", {
+    repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
       ...payload,
       summary: { total: 1, qualified: 0, rejected: 1, failed: 0 }
     }),
@@ -215,4 +260,17 @@ test("G-R4 migration preserves rows while widening query scores and adding prove
   assert.match(sql, /"queryScore" TYPE DOUBLE PRECISION/u);
   assert.match(sql, /ADD COLUMN "originalShopType" TEXT/u);
   assert.match(sql, /ADD COLUMN "resultFingerprint" TEXT/u);
+});
+
+test("G-R6 migration is additive and introduces the lease fence", async () => {
+  const url = new URL(
+    "../prisma/migrations/20260801090000_gr6_worker_leases/migration.sql",
+    import.meta.url
+  );
+  const sql = await fs.readFile(url, "utf8");
+  assert.doesNotMatch(sql, /^\s*(?:UPDATE|DELETE FROM|DROP TABLE)\b/imu);
+  assert.match(sql, /ADD COLUMN "leaseOwner" TEXT/u);
+  assert.match(sql, /ADD COLUMN "leaseToken" TEXT/u);
+  assert.match(sql, /ADD COLUMN "leaseExpiresAt" TIMESTAMP/u);
+  assert.match(sql, /ADD COLUMN "leaseAttempt" INTEGER NOT NULL DEFAULT 0/u);
 });

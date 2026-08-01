@@ -29,6 +29,13 @@ export class RunTerminalConflictError extends Error {
   }
 }
 
+export class RunLeaseLostError extends Error {
+  constructor() {
+    super("The worker no longer owns an active lease for this run");
+    this.name = "RunLeaseLostError";
+  }
+}
+
 export function errorPayload(error) {
   if (error instanceof ApiError) {
     return {

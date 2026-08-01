@@ -109,14 +109,6 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     requestTimeoutMs: integer("REQUEST_TIMEOUT_MS", 20000, {
       min: 1000,
       max: 120000
-    }),
-    qualificationThreshold: integer("QUALIFICATION_THRESHOLD", 45, {
-      min: 0,
-      max: 100
-    }),
-    minRelevanceScore: integer("MIN_RELEVANCE_SCORE", 15, {
-      min: 0,
-      max: 100
     })
   };
 

@@ -28,7 +28,8 @@ test(
         env: {
           ...process.env,
           DATABASE_URL: scopedUrl.toString(),
-          DIRECT_URL: ""
+          DIRECT_URL: "",
+          PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
         },
         encoding: "utf8"
       }
@@ -43,7 +44,7 @@ test(
     const createdIds = [];
 
     try {
-      await repository.recoverInterruptedRuns();
+      await repository.recoverExpiredRuns();
       const first = await repository.createRun("integration_user", [
         { originalShopType: "clothing", shopType: "clothing" }
       ]);
@@ -60,11 +61,12 @@ test(
         queriesProcessed: 1,
         outputRows: 1
       };
-      const claimed = await repository.claimNextQueuedRun();
-      assert.equal(claimed.id, first.id);
-      await repository.updateProgress(first.id, status);
+      const claimed = await repository.claimNextQueuedRun("integration_worker");
+      assert.equal(claimed.run.id, first.id);
+      await repository.updateProgress(first.id, claimed.lease, status);
       await repository.saveCompletedResults(
         first.id,
+        claimed.lease,
         {
           leads: [
             {
@@ -89,6 +91,7 @@ test(
 
       await repository.saveCompletedResults(
         first.id,
+        claimed.lease,
         {
           leads: [
             {

@@ -1,9 +1,11 @@
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   ApiError,
   RunAdmissionRejectedError,
   RunIntentNotFoundError,
+  RunLeaseLostError,
   errorPayload
 } from "./api-errors.js";
 import {
@@ -38,6 +40,17 @@ const SORT_FIELDS = new Set([
   "shop_type",
   "google_rank"
 ]);
+const DEFAULT_LEASE_DURATION_MS = 90_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
+const DEFAULT_RECOVERY_INTERVAL_MS = 15_000;
+
+function workerId() {
+  return `worker_${randomBytes(18).toString("base64url")}`;
+}
+
+function currentDate(now) {
+  return new Date(now());
+}
 
 function sendJson(response, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload);
@@ -256,7 +269,13 @@ function startRunPayload(run) {
   };
 }
 
-function createProgressTracker(repository, identifier, status) {
+function createProgressTracker(
+  repository,
+  identifier,
+  lease,
+  status,
+  { now, onLeaseLost }
+) {
   let timer = null;
   let pending = Promise.resolve();
 
@@ -265,9 +284,9 @@ function createProgressTracker(repository, identifier, status) {
       clearTimeout(timer);
       timer = null;
     }
-    pending = pending
-      .catch(() => {})
-      .then(() => repository.updateProgress(identifier, status));
+    pending = pending.then(() =>
+      repository.updateProgress(identifier, lease, status, currentDate(now))
+    );
     return pending;
   };
 
@@ -277,23 +296,77 @@ function createProgressTracker(repository, identifier, status) {
       if (timer == null) {
         timer = setTimeout(() => {
           timer = null;
-          void flush().catch(() => {});
+          void flush().catch(onLeaseLost);
         }, 250);
       }
       return true;
     }
   });
 
-  return { status: tracked, flush };
+  const stop = async () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    await pending;
+  };
+
+  return { status: tracked, flush, stop };
+}
+
+function createHeartbeatMonitor({
+  repository,
+  identifier,
+  lease,
+  now,
+  leaseDurationMs,
+  heartbeatIntervalMs,
+  setIntervalFn,
+  clearIntervalFn,
+  onLeaseLost
+}) {
+  let stopped = false;
+  let pending = Promise.resolve();
+
+  const renew = () => {
+    if (stopped) return pending;
+    pending = pending.then(async () => {
+      if (stopped) return;
+      await repository.heartbeatRun(
+        identifier,
+        lease,
+        currentDate(now),
+        leaseDurationMs
+      );
+    });
+    pending.catch(onLeaseLost);
+    return pending;
+  };
+
+  const timer = setIntervalFn(() => { void renew(); }, heartbeatIntervalMs);
+  timer?.unref?.();
+
+  return {
+    renew,
+    async stop() {
+      stopped = true;
+      clearIntervalFn(timer);
+      await pending;
+    }
+  };
 }
 
 async function executeRun({
   config,
   identifier,
   categories,
+  lease,
   pipeline,
   repository,
-  logger
+  logger,
+  now,
+  leaseDurationMs,
+  heartbeatIntervalMs,
+  setIntervalFn,
+  clearIntervalFn
 }) {
   const baseStatus = {
     ...createInitialStatus(),
@@ -303,14 +376,42 @@ async function executeRun({
     shopTypesTotal: categories.length,
     startedAt: new Date().toISOString()
   };
-  const tracker = createProgressTracker(repository, identifier, baseStatus);
+  let leaseLoss = null;
+  const onLeaseLost = (error) => {
+    if (!leaseLoss) leaseLoss = error;
+  };
+  const tracker = createProgressTracker(repository, identifier, lease, baseStatus, {
+    now,
+    onLeaseLost
+  });
+  const heartbeat = createHeartbeatMonitor({
+    repository,
+    identifier,
+    lease,
+    now,
+    leaseDurationMs,
+    heartbeatIntervalMs,
+    setIntervalFn,
+    clearIntervalFn,
+    onLeaseLost
+  });
 
   try {
     const result = await pipeline(config, tracker.status, { categories });
     tracker.status.stage = "writing_results";
     tracker.status.outputRows = result.leads.length;
     await tracker.flush();
-    await repository.saveCompletedResults(identifier, result, tracker.status);
+    if (leaseLoss) throw leaseLoss;
+    await heartbeat.renew();
+    if (leaseLoss) throw leaseLoss;
+    await heartbeat.stop();
+    await repository.saveCompletedResults(
+      identifier,
+      lease,
+      result,
+      tracker.status,
+      currentDate(now)
+    );
     logger("run_completed", {
       runId: identifier,
       outputRows: result.summary.total,
@@ -319,15 +420,27 @@ async function executeRun({
       failures: result.summary.failed
     });
   } catch (error) {
-    await tracker.flush().catch(() => {});
+    await heartbeat.stop().catch(onLeaseLost);
+    await tracker.stop().catch(onLeaseLost);
+    if (leaseLoss || error instanceof RunLeaseLostError) {
+      logger("run_lease_lost", { runId: identifier, code: "RUN_LEASE_LOST" });
+      return;
+    }
+    await tracker.flush().catch(onLeaseLost);
+    if (leaseLoss) {
+      logger("run_lease_lost", { runId: identifier, code: "RUN_LEASE_LOST" });
+      return;
+    }
     await repository
       .markFailed(
         identifier,
+        lease,
         {
           code: "RUN_FAILED",
           message: "The run could not be completed. Please try again."
         },
-        tracker.status
+        tracker.status,
+        currentDate(now)
       )
       .catch((persistenceError) => {
         logger("run_failure_persistence_failed", {
@@ -336,6 +449,9 @@ async function executeRun({
         });
       });
     logger("run_failed", { runId: identifier, error });
+  } finally {
+    await heartbeat.stop().catch(() => {});
+    await tracker.stop().catch(() => {});
   }
 }
 
@@ -346,7 +462,13 @@ export function createLeadServer(
     repository = createPrismaRunRepository(),
     schedule = setImmediate,
     logger = log,
-    now = () => Date.now()
+    now = () => Date.now(),
+    leaseOwner = workerId(),
+    leaseDurationMs = DEFAULT_LEASE_DURATION_MS,
+    heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+    recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS,
+    setIntervalFn = setInterval,
+    clearIntervalFn = clearInterval
   } = {}
 ) {
   const acceptedRunTimes = [];
@@ -419,17 +541,27 @@ export function createLeadServer(
       do {
         drainRequested = false;
         let run;
-        while ((run = await repository.claimNextQueuedRun())) {
-          const categories = Array.isArray(run.normalizedShopTypes)
-            ? run.normalizedShopTypes
+        while ((run = await repository.claimNextQueuedRun(
+          leaseOwner,
+          currentDate(now),
+          leaseDurationMs
+        ))) {
+          const categories = Array.isArray(run.run.normalizedShopTypes)
+            ? run.run.normalizedShopTypes
             : [];
           await executeRun({
             config,
-            identifier: run.id,
+            identifier: run.run.id,
             categories,
+            lease: run.lease,
             pipeline,
             repository,
-            logger
+            logger,
+            now,
+            leaseDurationMs,
+            heartbeatIntervalMs,
+            setIntervalFn,
+            clearIntervalFn
           });
         }
       } while (drainRequested);
@@ -663,6 +795,19 @@ export function createLeadServer(
     });
   });
 
+  const recoveryTimer = setIntervalFn(() => {
+    void repository.recoverExpiredRuns(currentDate(now))
+      .then((recovered) => {
+        if (recovered.count) {
+          logger("expired_runs_recovered", { count: recovered.count });
+        }
+        queueDrain();
+      })
+      .catch((error) => logger("run_recovery_failed", { error }));
+  }, recoveryIntervalMs);
+  recoveryTimer?.unref?.();
+  server.on("close", () => clearIntervalFn(recoveryTimer));
+
   queueDrain();
   return server;
 }
@@ -673,8 +818,8 @@ export async function startServer(config = loadConfig()) {
   }
   const repository = createPrismaRunRepository();
   try {
-    const recovered = await repository.recoverInterruptedRuns();
-    if (recovered.count) log("interrupted_runs_recovered", { count: recovered.count });
+    const recovered = await repository.recoverExpiredRuns();
+    if (recovered.count) log("expired_runs_recovered", { count: recovered.count });
   } catch (error) {
     log("run_recovery_failed", { error });
   }

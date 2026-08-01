@@ -38,7 +38,7 @@ test("password-protected Shopify storefront is rejected as inactive", () => {
         </body></html>
       `
     },
-    { minRelevanceScore: 15 }
+    {}
   );
   assert.equal(result.valid, false);
   assert.equal(result.rejectionReason, "inactive_store");
@@ -54,7 +54,7 @@ test("Google metadata cannot manufacture fetched storefront relevance", () => {
     title: "Organic Coffee Store",
     snippet: "Organic coffee beans and roasts",
     html: `<html><body><script src="/cdn/shop/theme.js"></script>${"unrelated stationery and office supplies ".repeat(8)}</body></html>`
-  }, { minRelevanceScore: 15 }, { final: true });
+  }, {}, { final: true });
   assert.equal(result.storeFit.state, "mismatch");
   assert.equal(result.relevanceScore, 0);
   assert.equal(result.rejectionReason, "wrong_category");

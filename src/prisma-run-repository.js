@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   RunAdmissionRejectedError,
   RunIntentNotFoundError,
+  RunLeaseLostError,
   RunTerminalConflictError
 } from "./api-errors.js";
 import {
@@ -20,6 +21,25 @@ function runId() {
 
 function runIntentId() {
   return `intent_${randomBytes(24).toString("base64url")}`;
+}
+
+function leaseToken() {
+  return `lease_${randomBytes(24).toString("base64url")}`;
+}
+
+function activeLeaseWhere(runIdentifier, lease, now) {
+  return {
+    id: runIdentifier,
+    state: "running",
+    leaseOwner: lease.owner,
+    leaseToken: lease.token,
+    leaseExpiresAt: { gt: now }
+  };
+}
+
+function requireLeaseMutation(result) {
+  if (result.count !== 1) throw new RunLeaseLostError();
+  return result;
 }
 
 function childId(prefix, runIdentifier, identity) {
@@ -193,7 +213,14 @@ export class PrismaRunRepository {
     });
   }
 
-  async claimNextQueuedRun() {
+  async claimNextQueuedRun(
+    owner,
+    now = new Date(),
+    leaseDurationMs = 90_000
+  ) {
+    if (!owner) throw new Error("A worker lease owner is required");
+    const token = leaseToken();
+    const expiresAt = new Date(now.getTime() + leaseDurationMs);
     try {
       return await this.prisma.$transaction(async (transaction) => {
         const next = await transaction.run.findFirst({
@@ -206,13 +233,20 @@ export class PrismaRunRepository {
           data: {
             state: "running",
             stage: "reading_categories",
-            startedAt: new Date(),
+            startedAt: now,
+            leaseOwner: owner,
+            leaseToken: token,
+            leaseAcquiredAt: now,
+            leaseExpiresAt: expiresAt,
+            lastHeartbeatAt: now,
+            leaseAttempt: { increment: 1 },
             safeErrorCode: null,
             safeErrorMessage: null
           }
         });
         if (claimed.count !== 1) return null;
-        return transaction.run.findUnique({ where: { id: next.id } });
+        const run = await transaction.run.findUnique({ where: { id: next.id } });
+        return { run, lease: { owner, token, expiresAt } };
       });
     } catch (error) {
       if (isUniqueConstraint(error)) return null;
@@ -257,24 +291,40 @@ export class PrismaRunRepository {
     });
   }
 
-  async updateProgress(runIdentifier, status) {
-    return this.prisma.run.updateMany({
-      where: { id: runIdentifier, state: { in: ACTIVE_STATES } },
+  async updateProgress(runIdentifier, lease, status, now = new Date()) {
+    const result = await this.prisma.run.updateMany({
+      where: activeLeaseWhere(runIdentifier, lease, now),
       data: {
         stage: status.stage || "running",
         progress: progressFromStatus(status)
       }
     });
+    return requireLeaseMutation(result);
   }
 
-  async saveCompletedResults(runIdentifier, {
+  async heartbeatRun(
+    runIdentifier,
+    lease,
+    now = new Date(),
+    leaseDurationMs = 90_000
+  ) {
+    const expiresAt = new Date(now.getTime() + leaseDurationMs);
+    const result = await this.prisma.run.updateMany({
+      where: activeLeaseWhere(runIdentifier, lease, now),
+      data: { lastHeartbeatAt: now, leaseExpiresAt: expiresAt }
+    });
+    requireLeaseMutation(result);
+    return { ...lease, expiresAt };
+  }
+
+  async saveCompletedResults(runIdentifier, lease, {
     leads,
     queryAudits = [],
     diagnostics = [],
     summary,
     pipelineVersion = 2,
     scoringVersion = 2
-  }, status = null) {
+  }, status = null, now = new Date()) {
     const leadRows = leads.map((record, index) =>
       leadRecordToCreate(
         runIdentifier,
@@ -306,11 +356,11 @@ export class PrismaRunRepository {
 
     return this.prisma.$transaction(async (transaction) => {
       const published = await transaction.run.updateMany({
-        where: { id: runIdentifier, state: { in: ACTIVE_STATES } },
+        where: activeLeaseWhere(runIdentifier, lease, now),
         data: {
           state: "completed",
           stage: "completed",
-          completedAt: new Date(),
+          completedAt: now,
           resultsAvailable: true,
           leadSummary: summary,
           pipelineVersion,
@@ -327,6 +377,8 @@ export class PrismaRunRepository {
         });
         if (
           existing?.state === "completed" &&
+          existing.leaseOwner === lease.owner &&
+          existing.leaseToken === lease.token &&
           existing.resultFingerprint === fingerprint
         ) {
           return existing;
@@ -349,18 +401,20 @@ export class PrismaRunRepository {
 
   async markFailed(
     runIdentifier,
+    lease,
     {
       code = "RUN_FAILED",
       message = "The run could not be completed. Please try again."
     } = {},
-    status = null
+    status = null,
+    now = new Date()
   ) {
-    return this.prisma.run.updateMany({
-      where: { id: runIdentifier, state: { in: ACTIVE_STATES } },
+    const result = await this.prisma.run.updateMany({
+      where: activeLeaseWhere(runIdentifier, lease, now),
       data: {
         state: "failed",
         stage: "failed",
-        completedAt: new Date(),
+        completedAt: now,
         resultsAvailable: false,
         safeErrorCode: code,
         safeErrorMessage: message,
@@ -369,6 +423,7 @@ export class PrismaRunRepository {
         ...(status ? { progress: progressFromStatus(status) } : {})
       }
     });
+    return requireLeaseMutation(result);
   }
 
   async getResultsPage(runIdentifier, ownerId, filters) {
@@ -406,17 +461,23 @@ export class PrismaRunRepository {
     return { totalItems, items };
   }
 
-  async recoverInterruptedRuns() {
+  async recoverExpiredRuns(now = new Date()) {
     return this.prisma.run.updateMany({
-      where: { state: "running" },
+      where: {
+        state: "running",
+        OR: [
+          { leaseExpiresAt: { lte: now } },
+          { leaseExpiresAt: null }
+        ]
+      },
       data: {
         state: "failed",
         stage: "failed",
-        completedAt: new Date(),
+        completedAt: now,
         resultsAvailable: false,
-        safeErrorCode: "RUN_INTERRUPTED",
+        safeErrorCode: "RUN_LEASE_EXPIRED",
         safeErrorMessage:
-          "The backend restarted before this run completed. Please start a new run."
+          "The worker stopped renewing this run. Please start a new run."
       }
     });
   }

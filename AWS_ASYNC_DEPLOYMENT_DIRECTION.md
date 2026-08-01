@@ -28,6 +28,12 @@ can initially run almost unchanged inside a Fargate container. Individual stages
 can later move to Lambda when scaling data shows that the additional distribution
 is worthwhile.
 
+The current PostgreSQL-backed HTTP implementation fences work with expiring
+worker leases and is safe to run as multiple long-running Node instances while
+retaining its one-running-job policy. Those leases are an application safety
+boundary, not a way to extend Lambda's platform execution limit. The queue and
+Step Functions split described below remains future deployment work.
+
 AWS references:
 
 - Lambda execution limits:

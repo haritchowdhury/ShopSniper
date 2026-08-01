@@ -27,7 +27,12 @@ function deploy(databaseUrl, configPath) {
     ["prisma", "migrate", "deploy", "--config", configPath],
     {
       cwd: projectRoot,
-      env: { ...process.env, DATABASE_URL: databaseUrl, DIRECT_URL: "" },
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl,
+        DIRECT_URL: "",
+        PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
+      },
       encoding: "utf8"
     }
   );
@@ -193,9 +198,9 @@ test(
         shopType: "eyewear",
         businessQualifier: "brand"
       }]);
-      await repository.claimNextQueuedRun();
+      const floatClaim = await repository.claimNextQueuedRun("gr4_float_worker");
       const scores = [82.29, 82.0, 0, 100];
-      await repository.saveCompletedResults(floatRun.id, {
+      await repository.saveCompletedResults(floatRun.id, floatClaim.lease, {
         leads: scores.map((queryScore, index) => ({
           original_shop_type: "Eyewear Brand",
           shop_type: "eyewear",
@@ -219,7 +224,7 @@ test(
         originalShopType: "Clothing",
         shopType: "clothing"
       }]);
-      await repository.claimNextQueuedRun();
+      const rollbackClaim = await repository.claimNextQueuedRun("gr4_rollback_worker");
       await prisma.lead.create({ data: {
         id: "rollback_sentinel_lead",
         runId: rollbackRun.id,
@@ -255,7 +260,7 @@ test(
       ]) {
         const failing = new PrismaRunRepository(failureClient(prisma, stage));
         await assert.rejects(
-          failing.saveCompletedResults(rollbackRun.id, replacement),
+          failing.saveCompletedResults(rollbackRun.id, rollbackClaim.lease, replacement),
           new RegExp(`injected failure after ${stage.replace(".", "\\.")}`, "u")
         );
         assert.equal((await prisma.run.findUnique({ where: { id: rollbackRun.id } })).state, "running");
@@ -264,10 +269,10 @@ test(
         assert.equal(await prisma.runDiagnostic.count({ where: { id: "rollback_sentinel_diag" } }), 1);
       }
 
-      await repository.saveCompletedResults(rollbackRun.id, replacement);
-      await repository.saveCompletedResults(rollbackRun.id, replacement);
+      await repository.saveCompletedResults(rollbackRun.id, rollbackClaim.lease, replacement);
+      await repository.saveCompletedResults(rollbackRun.id, rollbackClaim.lease, replacement);
       await assert.rejects(
-        repository.saveCompletedResults(rollbackRun.id, {
+        repository.saveCompletedResults(rollbackRun.id, rollbackClaim.lease, {
           ...replacement,
           summary: { total: 1, qualified: 0, rejected: 1, failed: 0 }
         }),

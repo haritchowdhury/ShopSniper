@@ -10,6 +10,7 @@
     "run:once": "node src/run-once.js",
     "test": "node --test",
     "test:integration": "node -r dotenv/config --test --test-concurrency=1 test/*.integration.test.js",
+    "check:secrets": "node scripts/check-secrets.js",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
