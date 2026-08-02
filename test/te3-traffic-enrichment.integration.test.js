@@ -275,12 +275,12 @@ test(
         trafficEnrichments: [{
           leadId,
           source: "dataforseo",
-          state: "available",
+          state: "partial",
           contractVersion: "dataforseo-traffic-v1",
           normalizedPayload: { records: [value] },
           fetchedAt: value.fetchedAt
         }],
-        trafficEnrichmentSummary: { dataforseo: { available: 1, costUsd: 0.012 } },
+        trafficEnrichmentSummary: { dataforseo: { partial: 1, costUsd: 0.012 } },
         summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
       };
       await repositoryA.saveCompletedResults(
@@ -292,13 +292,15 @@ test(
       await assert.rejects(
         repositoryB.saveCompletedResults(publicationRun.id, publicationClaim.lease, {
           ...payload,
-          trafficEnrichmentSummary: { dataforseo: { available: 0, costUsd: 0.012 } }
+          trafficEnrichmentSummary: { dataforseo: { partial: 0, costUsd: 0.012 } }
         }, null, publicationStart),
         /different terminal result/u
       );
-      assert.equal((await repositoryA.getTrafficEnrichmentsForRun(
+      const publishedTraffic = await repositoryA.getTrafficEnrichmentsForRun(
         publicationRun.id, "owner_a"
-      )).length, 1);
+      );
+      assert.equal(publishedTraffic.length, 1);
+      assert.equal(publishedTraffic[0].state, "partial");
       assert.equal((await repositoryB.getTrafficEnrichmentsForRun(
         publicationRun.id, "owner_b"
       )).length, 0);
@@ -720,7 +722,7 @@ test(
           trafficEnrichments: [{
             leadId: rollbackLeadId,
             source: "dataforseo",
-            state: "available",
+            state: "partial",
             contractVersion: "dataforseo-traffic-v1",
             normalizedPayload: { records: [dataForSeoValue("rollback.example")] },
             fetchedAt: value.fetchedAt
