@@ -383,6 +383,99 @@ test(
         plannedRecoveryStart
       );
 
+      const te4PrimitiveRun = await repositoryA.createRun("owner_te4", [{ shopType: "optics" }]);
+      const te4PrimitiveStart = new Date(plannedRecoveryStart.getTime() + 120000);
+      const te4PrimitiveClaim = await repositoryA.claimNextQueuedRun(
+        "worker_te4_primitives", te4PrimitiveStart, 60000
+      );
+      const cruxOrigin = "https://te4-cache.example";
+      await repositoryA.saveCruxTrafficCache(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        [{
+          source: "crux_bigquery",
+          identity: cruxOrigin,
+          scopeKey: "month:202606",
+          metricSetKey: "desktop_density,phone_density,popularity_rank,tablet_density",
+          contractVersion: "crux-popularity-v1",
+          state: "no_coverage",
+          fetchedAt: te4PrimitiveStart,
+          expiresAt: new Date(te4PrimitiveStart.getTime() + 86400000)
+        }],
+        te4PrimitiveStart
+      );
+      assert.equal((await repositoryA.readFreshLatestCruxBigQueryCache(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        [cruxOrigin],
+        te4PrimitiveStart
+      )).length, 1);
+
+      const immediateAmbiguousFingerprint = "d".repeat(64);
+      await repositoryA.planDataForSeoRequest(te4PrimitiveRun.id, te4PrimitiveClaim.lease, {
+        requestFingerprint: immediateAmbiguousFingerprint,
+        targetCount: 1,
+        scopeKey: "worldwide"
+      }, te4PrimitiveStart);
+      await repositoryA.claimDataForSeoRequest(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        immediateAmbiguousFingerprint,
+        te4PrimitiveStart
+      );
+      await repositoryA.markDataForSeoRequestAmbiguous(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        immediateAmbiguousFingerprint,
+        te4PrimitiveStart
+      );
+      assert.equal((await prismaA.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint: immediateAmbiguousFingerprint }
+      })).state, "ambiguous");
+
+      const costFingerprint = "e".repeat(64);
+      const costDomain = "te4-cost.example";
+      const costValue = dataForSeoValue(costDomain);
+      await repositoryA.planDataForSeoRequest(te4PrimitiveRun.id, te4PrimitiveClaim.lease, {
+        requestFingerprint: costFingerprint,
+        targetCount: 1,
+        scopeKey: "worldwide"
+      }, te4PrimitiveStart);
+      await repositoryA.claimDataForSeoRequest(
+        te4PrimitiveRun.id, te4PrimitiveClaim.lease, costFingerprint, te4PrimitiveStart
+      );
+      await repositoryA.markDataForSeoRequestSucceeded(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        costFingerprint,
+        {
+          providerCostUsd: 0.02,
+          cacheRows: [{
+            source: "dataforseo",
+            identity: costDomain,
+            scopeKey: "worldwide",
+            metricSetKey: "featured_snippet,local_pack,organic,paid",
+            contractVersion: "dataforseo-traffic-v1",
+            state: "available",
+            normalizedPayload: costValue,
+            fetchedAt: costValue.fetchedAt,
+            expiresAt: "2026-09-01T00:00:00.000Z"
+          }]
+        },
+        te4PrimitiveStart
+      );
+      assert.equal(await repositoryA.getDataForSeoRunCostUsd(
+        te4PrimitiveRun.id, te4PrimitiveClaim.lease, te4PrimitiveStart
+      ), 0.02);
+
+      await repositoryA.markFailed(
+        te4PrimitiveRun.id,
+        te4PrimitiveClaim.lease,
+        { code: "TE4_PRIMITIVES_PROVEN", message: "TE4 primitives were proven." },
+        null,
+        te4PrimitiveStart
+      );
+
       const rollbackRun = await repositoryA.createRun("rollback_owner", [{ shopType: "shoes" }]);
       const rollbackStart = new Date(plannedRecoveryStart.getTime() + 120000);
       const rollbackClaim = await repositoryA.claimNextQueuedRun(
@@ -492,6 +585,9 @@ test(
         plannedBeforeCallRecovered: true,
         successBeforePublicationRecovered: true,
         ambiguousPaidRetryBlocked: true,
+        immediateAmbiguousTransition: true,
+        cruxCacheFence: true,
+        durableCostRecovery: true,
         tenantIsolation: true,
         terminalReplay: true,
         rollbackStages: rollbackStages.length,

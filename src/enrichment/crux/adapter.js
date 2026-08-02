@@ -61,10 +61,10 @@ export function normalizeCruxOriginMetricsResponse(
 
 export async function fetchCruxOriginMetrics(
   { origin, config },
-  { request, now = () => new Date() } = {}
+  { request, delay, now = () => new Date() } = {}
 ) {
   const descriptor = buildCruxApiRequest(origin);
-  const body = await executeCruxApiRequest(descriptor, config, { request });
+  const body = await executeCruxApiRequest(descriptor, config, { request, delay });
   return normalizeCruxOriginMetricsResponse({ descriptor, body }, { now });
 }
 
@@ -72,12 +72,40 @@ export async function fetchCruxPopularity(
   { origins, config },
   { request, tokenProvider, now = () => new Date() } = {}
 ) {
-  const execute = (descriptor) => executeCruxBigQueryRequest(descriptor, config, {
+  const datasetMonth = await fetchCruxLatestDatasetMonth(
+    { config },
+    { request, tokenProvider }
+  );
+  const dryRun = await dryRunCruxPopularity(
+    { origins, datasetMonth, config },
+    { request, tokenProvider }
+  );
+  return fetchCruxPopularityForMonth(
+    { origins, datasetMonth, config, dryRun },
+    { request, tokenProvider, now }
+  );
+}
+
+function bigQueryExecutor(config, request, tokenProvider) {
+  return (descriptor) => executeCruxBigQueryRequest(descriptor, config, {
     request,
     tokenProvider
   });
-  const tableBody = await execute(buildCruxTableListRequest());
-  const datasetMonth = parseCruxTableList(tableBody);
+}
+
+export async function fetchCruxLatestDatasetMonth(
+  { config },
+  { request, tokenProvider } = {}
+) {
+  const execute = bigQueryExecutor(config, request, tokenProvider);
+  return parseCruxTableList(await execute(buildCruxTableListRequest()));
+}
+
+export async function dryRunCruxPopularity(
+  { origins, datasetMonth, config },
+  { request, tokenProvider } = {}
+) {
+  const execute = bigQueryExecutor(config, request, tokenProvider);
   const common = {
     origins,
     month: datasetMonth,
@@ -93,6 +121,32 @@ export async function fetchCruxPopularity(
       CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION
     );
   }
+  return Object.freeze({
+    datasetMonth,
+    bytesProcessed: dryRun.bytesProcessed
+  });
+}
+
+export async function fetchCruxPopularityForMonth(
+  { origins, datasetMonth, config, dryRun },
+  { request, tokenProvider, now = () => new Date() } = {}
+) {
+  if (dryRun?.datasetMonth !== datasetMonth ||
+      !Number.isSafeInteger(dryRun?.bytesProcessed) || dryRun.bytesProcessed < 0 ||
+      dryRun.bytesProcessed > config.cruxBigQueryMaxBytesBilled) {
+    throw cruxError(
+      ENRICHMENT_ERROR_CODES.invalidRequest,
+      "CrUX BigQuery live query requires an accepted matching dry run",
+      CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION
+    );
+  }
+  const execute = bigQueryExecutor(config, request, tokenProvider);
+  const common = {
+    origins,
+    month: datasetMonth,
+    projectId: config.cruxBigQueryProjectId,
+    location: config.cruxBigQueryLocation
+  };
   const liveDescriptor = buildCruxBigQueryLiveRequest({
     ...common,
     maximumBytesBilled: config.cruxBigQueryMaxBytesBilled

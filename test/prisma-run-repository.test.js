@@ -82,6 +82,7 @@ test("run creation snapshots exact server-owned traffic enrichment policy withou
   const data = repository.runCreateData("user", [], "run_fixture");
   assert.deepEqual(data.trafficEnrichmentConfig, trafficEnrichmentConfigSnapshot(config));
   assert.equal(data.trafficEnrichmentConfig.dataForSeo.scopes.length, 10);
+  assert.equal(data.trafficEnrichmentConfig.dataForSeo.estimatedCostPerTaskUsd, 0.024);
   assert.equal(data.trafficEnrichmentConfig.dataForSeo.contractVersion, "dataforseo-traffic-v1");
   assert.equal(data.trafficEnrichmentConfig.crux.rest.contractVersion, "crux-origin-metrics-v1");
   assert.equal(data.trafficEnrichmentConfig.crux.bigQuery.contractVersion, "crux-popularity-v1");
@@ -181,6 +182,42 @@ test("paid request claim commits in-flight before granting network permission", 
   );
   assert.equal(competing.networkAllowed, false);
   assert.equal(competing.outcome, "in_flight");
+});
+
+test("successful paid fingerprints refresh only after their cache freshness window", async () => {
+  const fingerprint = "f".repeat(64);
+  const descriptor = {
+    requestFingerprint: fingerprint,
+    targetCount: 1,
+    scopeKey: "worldwide",
+    refreshSucceededAfterMs: 86400000
+  };
+  let ledger = {
+    requestFingerprint: fingerprint,
+    runId: "run_previous_abcdefghijkl",
+    targetCount: 1,
+    scopeKey: "worldwide",
+    state: "succeeded",
+    completedAt: new Date(NOW.getTime() - 1000)
+  };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      run: { updateMany: async () => ({ count: 1 }) },
+      dataForSeoRequestLedger: {
+        findUnique: async () => ledger,
+        update: async ({ data }) => { ledger = { ...ledger, ...data }; return ledger; }
+      }
+    })
+  });
+  assert.equal((await repository.planDataForSeoRequest(
+    "run_current_abcdefghijkl", LEASE, descriptor, NOW
+  )).outcome, "succeeded");
+  ledger.completedAt = new Date(NOW.getTime() - 86400001);
+  assert.equal((await repository.planDataForSeoRequest(
+    "run_current_abcdefghijkl", LEASE, descriptor, NOW
+  )).outcome, "planned");
+  assert.equal(ledger.runId, "run_current_abcdefghijkl");
+  assert.equal(ledger.providerCostUsd, null);
 });
 
 test("paid success fences the lease and commits ledger plus normalized cache atomically", async () => {

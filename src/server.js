@@ -20,6 +20,7 @@ import {
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
+import { enrichTraffic } from "./enrichment/orchestrator.js";
 import {
   planQueriesForReview,
   runDiscoveryFromQueryPlans,
@@ -428,6 +429,9 @@ async function executeRun({
   planningPipeline,
   queryValidationPipeline,
   discoveryPipeline,
+  trafficOrchestrator,
+  trafficDependencyOverrides,
+  trafficSnapshot,
   repository,
   logger,
   now,
@@ -550,6 +554,38 @@ async function executeRun({
     } else {
       result = await pipeline(config, tracker.status, { categories: categories.items });
     }
+    const trafficEnabled = trafficSnapshot?.dataForSeo?.enabled === true ||
+      trafficSnapshot?.crux?.enabled === true;
+    if (trafficEnabled) {
+      tracker.status.stage = "enriching_traffic";
+      await tracker.flush();
+      if (leaseLoss) throw leaseLoss;
+      await heartbeat.renew();
+      if (leaseLoss) throw leaseLoss;
+      const traffic = await trafficOrchestrator({
+        runId: identifier,
+        lease,
+        runSnapshot: trafficSnapshot,
+        runtimeConfig: config,
+        leads: result.leads,
+        repository,
+        now: () => currentDate(now),
+        assertLeaseActive: () => {
+          if (leaseLoss) throw leaseLoss;
+        },
+        dependencyOverrides: trafficDependencyOverrides
+      });
+      result = {
+        ...result,
+        trafficEnrichments: traffic.trafficEnrichments,
+        trafficEnrichmentSummary: traffic.trafficEnrichmentSummary,
+        diagnostics: [...result.diagnostics, ...traffic.diagnostics]
+      };
+      logger("traffic_enrichment_completed", {
+        runId: identifier,
+        summary: traffic.trafficEnrichmentSummary
+      });
+    }
     tracker.status.stage = "writing_results";
     tracker.status.outputRows = result.leads.length;
     await tracker.flush();
@@ -614,6 +650,8 @@ export function createLeadServer(
     planningPipeline = planQueriesForReview,
     queryValidationPipeline = validateConfirmedQueries,
     discoveryPipeline = runDiscoveryFromQueryPlans,
+    trafficOrchestrator = enrichTraffic,
+    trafficDependencyOverrides = {},
     repository = createPrismaRunRepository(),
     schedule = setImmediate,
     logger = log,
@@ -730,6 +768,9 @@ export function createLeadServer(
             planningPipeline,
             queryValidationPipeline,
             discoveryPipeline,
+            trafficOrchestrator,
+            trafficDependencyOverrides,
+            trafficSnapshot: run.run.trafficEnrichmentConfig,
             repository,
             logger,
             now,

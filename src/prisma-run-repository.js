@@ -142,6 +142,7 @@ export function trafficEnrichmentConfigSnapshot(config = {}) {
       cacheFreshnessMs: config.dataForSeoCacheFreshnessMs ?? 2592000000,
       noCoverageFreshnessMs,
       maxCostPerRunUsd: config.dataForSeoMaxCostPerRunUsd ?? 2,
+      estimatedCostPerTaskUsd: 0.024,
       paidRequestStaleMs: config.trafficPaidRequestStaleMs ?? 900000
     }),
     crux: Object.freeze({
@@ -197,6 +198,11 @@ function requirePaidDescriptor(descriptor) {
   }
   if (!/^(?:worldwide|country:[A-Z]{2}:[1-9]\d*)$/u.test(descriptor.scopeKey)) {
     throw new Error("DataForSEO scope key is invalid");
+  }
+  if (descriptor.refreshSucceededAfterMs != null &&
+      (!Number.isSafeInteger(descriptor.refreshSucceededAfterMs) ||
+       descriptor.refreshSucceededAfterMs < 1)) {
+    throw new Error("DataForSEO refresh freshness is invalid");
   }
   return descriptor;
 }
@@ -819,6 +825,71 @@ export class PrismaRunRepository {
     });
   }
 
+  async readFreshLatestCruxBigQueryCache(
+    runIdentifier,
+    lease,
+    identities,
+    now = new Date()
+  ) {
+    if (!Array.isArray(identities) || identities.length === 0) return [];
+    if (identities.some((identity) => typeof identity !== "string" || !identity)) {
+      throw new Error("CrUX BigQuery cache identities are invalid");
+    }
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      return transaction.trafficEnrichmentCache.findMany({
+        where: {
+          source: "crux_bigquery",
+          identity: { in: [...new Set(identities)] },
+          scopeKey: { startsWith: "month:" },
+          expiresAt: { gt: now }
+        },
+        orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
+      });
+    });
+  }
+
+  async saveCruxTrafficCache(
+    runIdentifier,
+    lease,
+    cacheRows,
+    now = new Date()
+  ) {
+    if (!Array.isArray(cacheRows)) throw new Error("CrUX cache rows are required");
+    if (cacheRows.some(({ source }) => !["crux_rest", "crux_bigquery"].includes(source))) {
+      throw new Error("Only CrUX cache rows can be written through this method");
+    }
+    const rows = cacheRows.map((record) =>
+      trafficCacheRecordToUpsert(cacheId(record), record)
+    );
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      for (const row of rows) {
+        const unique = {
+          source: row.source,
+          identity: row.identity,
+          scopeKey: row.scopeKey,
+          metricSetKey: row.metricSetKey,
+          contractVersion: row.contractVersion
+        };
+        const update = { ...row };
+        delete update.id;
+        await transaction.trafficEnrichmentCache.upsert({
+          where: { source_identity_scopeKey_metricSetKey_contractVersion: unique },
+          create: row,
+          update
+        });
+      }
+      return rows.length;
+    });
+  }
+
   async planDataForSeoRequest(
     runIdentifier,
     lease,
@@ -840,8 +911,27 @@ export class PrismaRunRepository {
             (existing.targetCount !== request.targetCount || existing.scopeKey !== request.scopeKey)) {
           throw new Error("DataForSEO request fingerprint metadata does not match");
         }
+        if (existing?.state === "planned" && existing.runId !== runIdentifier) {
+          const priorRun = await transaction.run.findUnique({
+            where: { id: existing.runId },
+            select: { state: true, leaseExpiresAt: true }
+          });
+          if (priorRun?.state === "running" && priorRun.leaseExpiresAt > now) {
+            return { outcome: "in_flight", ledger: existing };
+          }
+        }
         if (existing && existing.state !== "planned") {
-          return { outcome: existing.state, ledger: existing };
+          const succeededExpired =
+            existing.state === "succeeded" &&
+            existing.runId !== runIdentifier &&
+            Number.isSafeInteger(request.refreshSucceededAfterMs) &&
+            existing.completedAt instanceof Date &&
+            existing.completedAt.getTime() + request.refreshSucceededAfterMs <= now.getTime();
+          const knownFailureRetryable =
+            existing.state === "failed" && existing.runId !== runIdentifier;
+          if (!succeededExpired && !knownFailureRetryable) {
+            return { outcome: existing.state, ledger: existing };
+          }
         }
         const data = {
           runId: runIdentifier,
@@ -1000,6 +1090,54 @@ export class PrismaRunRepository {
       });
       requireLeaseMutation(failed);
       return transaction.dataForSeoRequestLedger.findUnique({ where: { requestFingerprint } });
+    });
+  }
+
+  async markDataForSeoRequestAmbiguous(
+    runIdentifier,
+    lease,
+    requestFingerprint,
+    now = new Date()
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const ambiguous = await transaction.dataForSeoRequestLedger.updateMany({
+        where: {
+          requestFingerprint,
+          runId: runIdentifier,
+          state: "in_flight",
+          leaseOwner: lease.owner,
+          leaseToken: lease.token
+        },
+        data: {
+          state: "ambiguous",
+          safeErrorCode: "PAID_REQUEST_OUTCOME_AMBIGUOUS",
+          safeErrorMessage: "The paid request outcome could not be confirmed safely.",
+          completedAt: now
+        }
+      });
+      requireLeaseMutation(ambiguous);
+      return transaction.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint }
+      });
+    });
+  }
+
+  async getDataForSeoRunCostUsd(runIdentifier, lease, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const aggregate = await transaction.dataForSeoRequestLedger.aggregate({
+        where: { runId: runIdentifier, state: "succeeded" },
+        _sum: { providerCostUsd: true }
+      });
+      const value = aggregate._sum.providerCostUsd;
+      return value == null ? 0 : Number(value);
     });
   }
 

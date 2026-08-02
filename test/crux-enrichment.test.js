@@ -133,9 +133,38 @@ test("REST client sends key only at dispatch and never retries an origin variant
   });
   assert.equal(calls.length, 1);
   assert.equal(new URL(calls[0].url).searchParams.get("key"), "fixture-api-key");
-  assert.equal(calls[0].options.retries, 2);
+  assert.equal(calls[0].options.retries, 0);
   assert.equal(calls[0].options.maxRedirects, 0);
   assert.equal(result.coverage, "available");
+});
+
+test("REST retries bounded network/5xx failures but not rate limits", async () => {
+  let transientCalls = 0;
+  const recovered = await fetchCruxOriginMetrics({ origin: ORIGIN, config: config() }, {
+    now: NOW,
+    delay: async () => {},
+    request: async () => {
+      transientCalls += 1;
+      if (transientCalls < 3) throw new HttpError("HTTP 503", { status: 503 });
+      return { status: 200, body: JSON.stringify(fixture("query-record-v1-success.json")) };
+    }
+  });
+  assert.equal(recovered.coverage, "available");
+  assert.equal(transientCalls, 3);
+
+  let rateLimitCalls = 0;
+  await assert.rejects(
+    fetchCruxOriginMetrics({ origin: ORIGIN, config: config() }, {
+      now: NOW,
+      delay: async () => {},
+      request: async () => {
+        rateLimitCalls += 1;
+        throw new HttpError("HTTP 429", { status: 429 });
+      }
+    }),
+    (error) => error instanceof EnrichmentError && error.code === "provider_http_error"
+  );
+  assert.equal(rateLimitCalls, 1);
 });
 
 test("REST exact 404 through client normalizes unavailable", async () => {

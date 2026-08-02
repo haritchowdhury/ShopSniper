@@ -5,6 +5,7 @@ import {
   RunAdmissionRejectedError,
   RunIntentNotFoundError
 } from "../src/api-errors.js";
+import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
 import { createLeadServer } from "../src/server.js";
 
 class TestRepository {
@@ -284,6 +285,83 @@ async function startTestServer(options = {}) {
     base: `http://127.0.0.1:${server.address().port}`
   };
 }
+
+test("worker enriches from the stored run snapshot before atomic publication", async (context) => {
+  const repository = new TestRepository();
+  const originalCreateRun = repository.createRun.bind(repository);
+  repository.createRun = async (...arguments_) => {
+    const run = await originalCreateRun(...arguments_);
+    run.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot({
+      dataForSeoEnrichmentEnabled: true,
+      cruxEnrichmentEnabled: false
+    });
+    return run;
+  };
+  const stages = [];
+  const originalUpdate = repository.updateProgress.bind(repository);
+  repository.updateProgress = async (identifier, lease, status, now) => {
+    stages.push(status.stage);
+    return originalUpdate(identifier, lease, status, now);
+  };
+  let published;
+  const originalSave = repository.saveCompletedResults.bind(repository);
+  repository.saveCompletedResults = async (identifier, lease, result, status, now) => {
+    published = result;
+    return originalSave(identifier, lease, result, status, now);
+  };
+  let observedSnapshot;
+  const fixture = await startTestServer({
+    repository,
+    config: { ...config, dataForSeoEnrichmentEnabled: false },
+    pipeline: async () => ({
+      leads: [{
+        resolved_domain: "traffic.example",
+        final_url: "https://traffic.example/products/item",
+        status: "qualified",
+        pipeline_version: 2,
+        scoring_version: 2,
+        lead_score: 80,
+        score_breakdown: {
+          version: 2,
+          components: {
+            identity: 14,
+            shopifyValidation: 20,
+            categoryFit: 24,
+            contactEvidence: 22
+          },
+          total: 80,
+          semantics: "deterministic_evidence_rank_not_probability"
+        }
+      }],
+      queryAudits: [],
+      diagnostics: [],
+      summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+    }),
+    trafficOrchestrator: async ({ runSnapshot }) => {
+      observedSnapshot = runSnapshot;
+      return {
+        trafficEnrichments: [],
+        trafficEnrichmentSummary: { version: "traffic-enrichment-summary-v1" },
+        diagnostics: [{ scope: "run", code: "traffic_fixture", details: {} }]
+      };
+    }
+  });
+  context.after(() => fixture.server.close());
+  const response = await fetch(`${fixture.base}/api/runs`, {
+    method: "POST",
+    headers: USER_HEADERS,
+    body: JSON.stringify({ shopTypes: ["eyewear"] })
+  });
+  const { runId } = await response.json();
+  for (let attempt = 0; attempt < 30 && !published; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(observedSnapshot.dataForSeo.enabled, true);
+  assert.ok(stages.includes("enriching_traffic"));
+  assert.equal(published.trafficEnrichmentSummary.version, "traffic-enrichment-summary-v1");
+  assert.equal(published.diagnostics.at(-1).code, "traffic_fixture");
+  assert.equal(repository.runs.get(runId).state, "completed");
+});
 
 test("documented API creates, polls, and returns durable-shaped results", async (context) => {
   let release;
