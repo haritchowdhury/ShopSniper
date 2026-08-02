@@ -10,6 +10,7 @@ import {
   PrismaRunRepository,
   stableLeadId
 } from "../src/prisma-run-repository.js";
+import { recoverInterruptedWork } from "../src/server.js";
 
 const enabled =
   process.env.ALLOW_DATABASE_TESTS === "true" &&
@@ -314,11 +315,46 @@ test(
         staleRun.id, staleClaim.lease, staleFingerprint, staleStart
       );
       const recoveryTime = new Date(staleStart.getTime() + 960000);
-      await repositoryB.recoverExpiredRuns(recoveryTime);
-      assert.equal((await repositoryA.markStaleDataForSeoRequestsAmbiguous(recoveryTime)).count, 1);
+      await recoverInterruptedWork(repositoryB, recoveryTime, () => {});
       assert.equal((await prismaA.dataForSeoRequestLedger.findUnique({
         where: { requestFingerprint: staleFingerprint }
       })).state, "ambiguous");
+
+      const activeRun = await repositoryA.createRun(
+        "owner_active_paid", [{ shopType: "active-paid" }]
+      );
+      const activeStart = new Date(recoveryTime.getTime() + 60000);
+      const activeClaim = await repositoryA.claimNextQueuedRun(
+        "worker_active_paid", activeStart, 60000
+      );
+      const activeFingerprint = "f".repeat(64);
+      await repositoryA.planDataForSeoRequest(activeRun.id, activeClaim.lease, {
+        requestFingerprint: activeFingerprint,
+        targetCount: 1,
+        scopeKey: "worldwide"
+      }, activeStart);
+      await repositoryA.claimDataForSeoRequest(
+        activeRun.id, activeClaim.lease, activeFingerprint, activeStart
+      );
+      const activeRecoveryTime = new Date(activeStart.getTime() + 30000);
+      await recoverInterruptedWork(repositoryB, activeRecoveryTime, () => {});
+      assert.equal((await prismaA.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint: activeFingerprint }
+      })).state, "in_flight");
+      await repositoryA.markDataForSeoRequestFailed(
+        activeRun.id,
+        activeClaim.lease,
+        activeFingerprint,
+        { code: "DATAFORSEO_NOT_DISPATCHED" },
+        activeRecoveryTime
+      );
+      await repositoryA.markFailed(
+        activeRun.id,
+        activeClaim.lease,
+        { code: "ACTIVE_RECOVERY_PROVEN", message: "Active paid work remained unchanged." },
+        null,
+        activeRecoveryTime
+      );
 
       const ambiguousRun = await repositoryA.createRun("owner_d", [{ shopType: "bags" }]);
       const ambiguousStart = new Date(recoveryTime.getTime() + 120000);

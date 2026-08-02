@@ -6,7 +6,11 @@ import {
   RunIntentNotFoundError
 } from "../src/api-errors.js";
 import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
-import { createLeadServer } from "../src/server.js";
+import {
+  createLeadServer,
+  recoverInterruptedWork,
+  startServer
+} from "../src/server.js";
 
 class TestRepository {
   constructor() {
@@ -810,6 +814,153 @@ test("simultaneous identical intent claims create once and replay outside capaci
   const responses = await Promise.all([claim(), claim()]);
   assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 201]);
   assert.equal(fixture.repository.runs.size, 1);
+});
+
+test("combined recovery preserves order, compatibility, and safe failure isolation", async () => {
+  const recoveryTime = new Date("2026-08-02T12:00:00.000Z");
+  const calls = [];
+  const events = [];
+  const repository = {
+    async recoverExpiredRuns(now) {
+      calls.push(["runs", now]);
+      throw new Error("postgresql://user:secret@host/private");
+    },
+    async markStaleDataForSeoRequestsAmbiguous(now) {
+      calls.push(["paid", now]);
+      return { count: 2 };
+    }
+  };
+
+  await recoverInterruptedWork(
+    repository,
+    recoveryTime,
+    (event, details) => events.push({ event, details })
+  );
+
+  assert.deepEqual(calls, [
+    ["runs", recoveryTime],
+    ["paid", recoveryTime]
+  ]);
+  assert.deepEqual(events, [
+    { event: "run_recovery_failed", details: { code: "RUN_RECOVERY_FAILED" } },
+    { event: "stale_paid_requests_marked_ambiguous", details: { count: 2 } }
+  ]);
+  assert.equal(JSON.stringify(events).includes("secret"), false);
+
+  const paidFailureEvents = [];
+  await recoverInterruptedWork({
+    async recoverExpiredRuns() {
+      return { count: 1 };
+    },
+    async markStaleDataForSeoRequestsAmbiguous() {
+      throw new Error("fingerprint-and-domain-must-not-escape");
+    }
+  }, recoveryTime, (event, details) => paidFailureEvents.push({ event, details }));
+  assert.deepEqual(paidFailureEvents, [
+    { event: "expired_runs_recovered", details: { count: 1 } },
+    {
+      event: "paid_request_recovery_failed",
+      details: { code: "PAID_REQUEST_RECOVERY_FAILED" }
+    }
+  ]);
+  assert.equal(JSON.stringify(paidFailureEvents).includes("fingerprint"), false);
+
+  const legacyCalls = [];
+  await recoverInterruptedWork({
+    async recoverExpiredRuns(now) {
+      legacyCalls.push(now);
+      return { count: 0 };
+    }
+  }, recoveryTime, () => {});
+  assert.deepEqual(legacyCalls, [recoveryTime]);
+});
+
+test("startup and periodic recovery use the same combined production seam", async () => {
+  const timestamp = Date.parse("2026-08-02T12:30:00.000Z");
+  const startupCalls = [];
+  const startupRepository = {
+    async recoverExpiredRuns(now) {
+      startupCalls.push(["runs", now.toISOString()]);
+      return { count: 0 };
+    },
+    async markStaleDataForSeoRequestsAmbiguous(now) {
+      startupCalls.push(["paid", now.toISOString()]);
+      return { count: 0 };
+    }
+  };
+  const fakeServer = {
+    listen(port, host, callback) {
+      startupCalls.push(["listen", port, host]);
+      callback();
+    }
+  };
+  const started = await startServer(
+    { ...config, host: "127.0.0.1", port: 0 },
+    {
+      repository: startupRepository,
+      logger: () => {},
+      now: () => timestamp,
+      serverFactory(runtimeConfig, dependencies) {
+        assert.equal(runtimeConfig.port, 0);
+        assert.equal(dependencies.repository, startupRepository);
+        startupCalls.push(["factory"]);
+        return fakeServer;
+      }
+    }
+  );
+  assert.equal(started, fakeServer);
+  assert.deepEqual(startupCalls, [
+    ["runs", "2026-08-02T12:30:00.000Z"],
+    ["paid", "2026-08-02T12:30:00.000Z"],
+    ["factory"],
+    ["listen", 0, "127.0.0.1"]
+  ]);
+
+  const periodicCalls = [];
+  let recoveryCallback;
+  let scheduledDrains = 0;
+  let resolvePaidRecovery;
+  const paidRecoveryComplete = new Promise((resolve) => {
+    resolvePaidRecovery = resolve;
+  });
+  const periodicServer = createLeadServer(config, {
+    repository: {
+      async recoverExpiredRuns(now) {
+        periodicCalls.push(["runs", now.toISOString()]);
+        throw new Error("run recovery unavailable");
+      },
+      async markStaleDataForSeoRequestsAmbiguous(now) {
+        periodicCalls.push(["paid", now.toISOString()]);
+        resolvePaidRecovery();
+        throw new Error("paid recovery unavailable");
+      },
+      async claimNextQueuedRun() {
+        return null;
+      }
+    },
+    now: () => timestamp,
+    schedule: (callback) => {
+      scheduledDrains += 1;
+      callback();
+    },
+    logger: () => {},
+    setIntervalFn(callback) {
+      recoveryCallback = callback;
+      return { unref() {} };
+    },
+    clearIntervalFn: () => {}
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduledDrains, 1);
+  recoveryCallback();
+  await paidRecoveryComplete;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(periodicCalls, [
+    ["runs", "2026-08-02T12:30:00.000Z"],
+    ["paid", "2026-08-02T12:30:00.000Z"]
+  ]);
+  assert.equal(scheduledDrains, 2);
+  periodicServer.close();
 });
 
 test("heartbeat loss prevents terminal publication and emits only a safe event", async () => {

@@ -62,6 +62,36 @@ function currentDate(now) {
   return new Date(now());
 }
 
+export async function recoverInterruptedWork(
+  repository,
+  now = new Date(),
+  logger = log
+) {
+  try {
+    const recovered = await repository.recoverExpiredRuns(now);
+    if (recovered.count) {
+      logger("expired_runs_recovered", { count: recovered.count });
+    }
+  } catch {
+    logger("run_recovery_failed", { code: "RUN_RECOVERY_FAILED" });
+  }
+
+  if (typeof repository.markStaleDataForSeoRequestsAmbiguous !== "function") {
+    return;
+  }
+
+  try {
+    const recovered = await repository.markStaleDataForSeoRequestsAmbiguous(now);
+    if (recovered.count) {
+      logger("stale_paid_requests_marked_ambiguous", { count: recovered.count });
+    }
+  } catch {
+    logger("paid_request_recovery_failed", {
+      code: "PAID_REQUEST_RECOVERY_FAILED"
+    });
+  }
+}
+
 function sendJson(response, statusCode, payload, headers = {}) {
   const body = JSON.stringify(payload);
   response.writeHead(statusCode, {
@@ -1176,14 +1206,11 @@ export function createLeadServer(
   });
 
   const recoveryTimer = setIntervalFn(() => {
-    void repository.recoverExpiredRuns(currentDate(now))
-      .then((recovered) => {
-        if (recovered.count) {
-          logger("expired_runs_recovered", { count: recovered.count });
-        }
+    void recoverInterruptedWork(repository, currentDate(now), logger)
+      .then(() => {
         queueDrain();
       })
-      .catch((error) => logger("run_recovery_failed", { error }));
+      .catch(() => logger("recovery_cycle_failed", { code: "RECOVERY_CYCLE_FAILED" }));
   }, recoveryIntervalMs);
   recoveryTimer?.unref?.();
   server.on("close", () => clearIntervalFn(recoveryTimer));
@@ -1192,20 +1219,22 @@ export function createLeadServer(
   return server;
 }
 
-export async function startServer(config = loadConfig()) {
+export async function startServer(
+  config = loadConfig(),
+  {
+    repository = createPrismaRunRepository(),
+    logger = log,
+    serverFactory = createLeadServer,
+    now = () => Date.now()
+  } = {}
+) {
   if (process.env.NODE_ENV === "production" && !config.backendApiToken) {
     throw new Error("BACKEND_API_TOKEN is required in production");
   }
-  const repository = createPrismaRunRepository();
-  try {
-    const recovered = await repository.recoverExpiredRuns();
-    if (recovered.count) log("expired_runs_recovered", { count: recovered.count });
-  } catch (error) {
-    log("run_recovery_failed", { error });
-  }
-  const server = createLeadServer(config, { repository });
+  await recoverInterruptedWork(repository, currentDate(now), logger);
+  const server = serverFactory(config, { repository, logger, now });
   server.listen(config.port, config.host, () => {
-    log("server_started", { host: config.host, port: config.port });
+    logger("server_started", { host: config.host, port: config.port });
   });
   return server;
 }
