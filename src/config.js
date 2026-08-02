@@ -50,6 +50,14 @@ function boolean(name, fallback) {
   throw new Error(`${name} must be true or false`);
 }
 
+function strictBoolean(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  if (/^true$/i.test(raw)) return true;
+  if (/^false$/i.test(raw)) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 export function loadConfig({ cwd = process.cwd() } = {}) {
   loadDotEnv(path.join(cwd, ".env"));
 
@@ -88,6 +96,12 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
       process.env.BROWSERLESS_URL || "https://production-sfo.browserless.io/content",
     browserlessToken: process.env.BROWSERLESS_TOKEN || "",
     browserlessFallbackToken: process.env.BROWSERLESS_FALLBACK_TOKEN || "",
+    dataForSeoEnrichmentEnabled: strictBoolean(
+      "ENABLE_DATAFORSEO_ENRICHMENT",
+      false
+    ),
+    dataForSeoLogin: process.env.DATAFORSEO_LOGIN || "",
+    dataForSeoPassword: process.env.DATAFORSEO_PASSWORD || "",
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openaiModel: process.env.OPENAI_MODEL || "gpt-4.1-mini",
     enableAiNormalization: boolean("ENABLE_AI_NORMALIZATION", false),
@@ -168,6 +182,16 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     throw new Error("WEB_SEARCH_CONTEXT_SIZE must be low, medium, or high");
   }
   return Object.freeze(config);
+}
+
+export function assertDataForSeoConfig(config) {
+  if (!config.dataForSeoEnrichmentEnabled) return;
+  const missing = [];
+  if (!config.dataForSeoLogin) missing.push("DATAFORSEO_LOGIN");
+  if (!config.dataForSeoPassword) missing.push("DATAFORSEO_PASSWORD");
+  if (missing.length) {
+    throw new Error(`Missing required DataForSEO configuration: ${missing.join(", ")}`);
+  }
 }
 
 export function assertRunConfig(config) {
