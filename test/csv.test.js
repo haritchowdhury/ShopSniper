@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseCsv, readQueries, stringifyCsv } from "../src/csv.js";
-import { OUTPUT_HEADERS } from "../src/output.js";
+import { OUTPUT_HEADERS, outputHeaders } from "../src/output.js";
 import { writeOutput } from "../src/output.js";
 
 test("CSV parser handles commas, escaped quotes, and newlines", () => {
@@ -90,6 +90,94 @@ test("backend CSV export rejects contradictory v2 score states", async () => {
       }
     }]), /Lead score state/u);
     await assert.rejects(fs.access(output));
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+function publicTraffic({ dataForSeo = false, crux = false, material = true } = {}) {
+  return {
+    version: "traffic-enrichment-public-v1",
+    ...(dataForSeo && {
+      dataforseo: {
+        state: material ? "partial" : "no_coverage",
+        ...(material && {
+          label: "Estimated Google search traffic",
+          worldwide: {
+            estimated_google_search_traffic: 12,
+            organic_estimated_traffic: 10.5,
+            paid_estimated_traffic: 1.5
+          },
+          markets: [{ country_code: "IN", estimated_google_search_traffic: 4 }],
+          observed_at: "2026-08-01T00:00:00.000Z"
+        })
+      }
+    }),
+    ...(crux && {
+      crux: {
+        state: material ? "partial" : "no_coverage",
+        origin_metrics: material ? {
+          state: "available",
+          origin: "https://fixture.example",
+          metrics: { largest_contentful_paint_p75_ms: 2400 },
+          observed_form_factor_fractions: { desktop: 0.4, phone: 0.6, tablet: 0 },
+          collection_period: { first_date: "2026-07-01", last_date: "2026-07-28" },
+          observed_at: "2026-08-01T00:00:00.000Z"
+        } : { state: "no_coverage" },
+        popularity: { state: "no_coverage" }
+      }
+    }),
+    ...(material && {
+      traffic_sources: [dataForSeo ? "dataforseo" : null, crux ? "crux" : null].filter(Boolean),
+      traffic_attributions: [{
+        text: "=provider attribution",
+        source_url: "https://example.com/source",
+        license_url: crux ? "https://creativecommons.org/licenses/by/4.0/" : undefined,
+        transformation: crux ? "Selected and renamed" : undefined
+      }]
+    })
+  };
+}
+
+test("backend traffic CSV headers reflect source enablement without changing legacy headers", () => {
+  assert.deepEqual(outputHeaders([{ status: "rejected" }]), OUTPUT_HEADERS);
+  const dataHeaders = outputHeaders([{
+    status: "rejected",
+    traffic_enrichment: publicTraffic({ dataForSeo: true, material: false })
+  }]);
+  assert(dataHeaders.includes("dataforseo_state"));
+  assert(dataHeaders.includes("dataforseo_in_estimated_google_search_traffic"));
+  assert.equal(dataHeaders.some((header) => header.startsWith("crux_")), false);
+  assert.equal(dataHeaders.includes("traffic_attribution_text"), false);
+
+  const bothHeaders = outputHeaders([{
+    status: "rejected",
+    traffic_enrichment: publicTraffic({ dataForSeo: true, crux: true })
+  }]);
+  assert(bothHeaders.includes("dataforseo_state"));
+  assert(bothHeaders.includes("crux_state"));
+  assert(bothHeaders.includes("traffic_license_urls"));
+});
+
+test("backend traffic CSV flattens metrics and safely emits attribution", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "traffic-csv-"));
+  const output = path.join(directory, "leads.csv");
+  try {
+    await writeOutput(output, [{
+      status: "rejected",
+      traffic_enrichment: publicTraffic({ dataForSeo: true, crux: true })
+    }]);
+    const [headers, values] = parseCsv(await fs.readFile(output, "utf8"));
+    const row = Object.fromEntries(headers.map((header, index) => [header, values[index]]));
+    assert.equal(row.dataforseo_worldwide_estimated_google_search_traffic, "12");
+    assert.equal(row.dataforseo_in_estimated_google_search_traffic, "4");
+    assert.equal(row.dataforseo_us_estimated_google_search_traffic, "");
+    assert.equal(row.crux_largest_contentful_paint_p75_ms, "2400");
+    assert.equal(row.traffic_sources, "dataforseo | crux");
+    assert.equal(row.traffic_attribution_text, "'=provider attribution");
+    assert.match(row.traffic_license_urls, /creativecommons/u);
+    assert.equal(values.includes("[object Object]"), false);
+    assert.equal(values.some((value) => value.includes("traffic-enrichment-public-v1")), false);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

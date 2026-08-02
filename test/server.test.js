@@ -14,6 +14,7 @@ class TestRepository {
     this.items = new Map();
     this.audits = new Map();
     this.diagnostics = new Map();
+    this.trafficEnrichments = new Map();
     this.intents = new Map();
     this.healthy = true;
     this.nextRun = 0;
@@ -241,6 +242,11 @@ class TestRepository {
         filters.page * filters.pageSize
       )
     };
+  }
+
+  async getTrafficEnrichmentsForRun(identifier, ownerId) {
+    const run = this.runs.get(identifier);
+    return run?.ownerId === ownerId ? this.trafficEnrichments.get(identifier) || [] : [];
   }
 
   async getQueryAuditsPage(identifier, _ownerId, pagination) {
@@ -530,6 +536,73 @@ test("documented API creates, polls, and returns durable-shaped results", async 
     { headers: { "x-user-id": "user_bob" } }
   );
   assert.equal(crossOwner.status, 404);
+});
+
+test("results API publishes owned optional traffic material and fails closed on malformed rows", async (context) => {
+  const repository = new TestRepository();
+  const fixture = await startTestServer({ repository });
+  context.after(() => fixture.server.close());
+  const run = await repository.createRun("user_alice", [{ original: "eyewear", normalized: "eyewear" }]);
+  run.state = "completed";
+  run.stage = "completed";
+  run.resultsAvailable = true;
+  run.leadSummary = { total: 2, qualified: 2, rejected: 0, failed: 0 };
+  run.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot({
+    dataForSeoEnrichmentEnabled: true,
+    cruxEnrichmentEnabled: true
+  });
+  const leads = ["lead_traffic_valid", "lead_traffic_malformed"].map((id) => ({
+    id,
+    status: "qualified",
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    leadScore: 80,
+    scoreBreakdown: {
+      version: 2,
+      components: { identity: 14, shopifyValidation: 20, categoryFit: 24, contactEvidence: 22 },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    }
+  }));
+  repository.items.set(run.id, leads);
+  repository.trafficEnrichments.set(run.id, [{
+    leadId: leads[0].id,
+    source: "crux_bigquery",
+    state: "available",
+    normalizedPayload: {
+      contractVersion: "crux-popularity-v1",
+      origin: "https://fixture.example",
+      coverage: "available",
+      datasetMonth: "202606",
+      popularityRank: 100000,
+      deviceFractions: { phone: 0.7, desktop: 0.3, tablet: 0 },
+      fetchedAt: "2026-08-01T00:00:00.000Z"
+    }
+  }, {
+    leadId: leads[1].id,
+    source: "dataforseo",
+    state: "contract_mismatch",
+    normalizedPayload: { rawBody: ["forbidden"] },
+    providerCostUsd: 99
+  }]);
+
+  const response = await fetch(`${fixture.base}/api/runs/${run.id}/results`, {
+    headers: { "x-user-id": "user_alice" }
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.items[0].traffic_enrichment.crux.state, "partial");
+  assert.equal(body.items[0].traffic_enrichment.crux.popularity.popularity_rank, 100000);
+  assert.equal(body.items[0].traffic_enrichment.crux.popularity.popularity_band, "top_100000");
+  assert.deepEqual(body.items[0].traffic_enrichment.traffic_sources, ["crux"]);
+  assert.deepEqual(body.items[1].traffic_enrichment.dataforseo, { state: "unavailable" });
+  assert.equal(JSON.stringify(body).includes("forbidden"), false);
+  assert.equal(JSON.stringify(body).includes("providerCostUsd"), false);
+
+  const foreign = await fetch(`${fixture.base}/api/runs/${run.id}/results`, {
+    headers: { "x-user-id": "user_bob" }
+  });
+  assert.equal(foreign.status, 404);
 });
 
 test("API rejects invalid bodies, unsafe parameters, and unavailable database safely", async (context) => {

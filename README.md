@@ -205,6 +205,41 @@ unversioned rows remain readable as legacy score-v1 records.
 `data/leads.csv`. The frontend is responsible for building downloadable CSV from
 the paginated JSON results.
 
+### Optional traffic enrichment
+
+Traffic enrichment is disabled by default and is controlled by the independent
+`ENABLE_DATAFORSEO_ENRICHMENT` and `ENABLE_CRUX_ENRICHMENT` server flags. Their
+values, provider contracts, cache policy, scopes, and cost/byte caps are
+snapshotted when a run is created. Clients cannot choose or change them.
+
+When both sources were disabled, or when reading a historical run without a
+snapshot, result leads retain the legacy shape and omit `traffic_enrichment`.
+An enabled source has an explicit state, but source lists and attribution are
+emitted only when accepted metrics are present. Missing coverage and provider
+failure are not numeric zero. DataForSEO values are labelled estimated Google
+search traffic and must not be presented as total site visits. CrUX popularity
+is a coarse navigation rank, and its device fractions describe observed form
+factors rather than geography.
+
+The versioned `traffic-enrichment-public-v1` object groups current CrUX origin
+metrics and monthly popularity under one `crux` source while keeping their
+states separate. API and backend CSV output contain only normalized metrics;
+cache entries, paid-request ledger details, provider task IDs, raw responses,
+costs, and internal errors are never public lead data. CSV source columns are
+selected dynamically, so a disabled provider contributes no columns.
+
+CrUX-derived API and CSV material includes links to the Chrome UX Report source
+and its CC BY 4.0 license plus a transformation notice. Final attribution
+wording still requires legal review before commercial release. Customer-facing
+DataForSEO display/export must remain operationally disabled until written
+permission for the intended use is recorded.
+
+Before production enablement, also verify current provider pricing and quotas,
+the DataForSEO per-run cost cap, the BigQuery maximum-bytes cap, and an approved
+short-lived AWS-to-Google credential mechanism such as Workload Identity
+Federation. Do not deploy Application Default Credential files or long-lived
+Google service-account JSON keys.
+
 See `FRONTEND_BACKEND_QUICKSTART.md` for proxy routes, TypeScript shapes,
 polling, filters, and fixture seeding.
 

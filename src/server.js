@@ -1108,6 +1108,19 @@ export function createLeadServer(
           ownerId,
           filters
         );
+        const trafficConfig = run.trafficEnrichmentConfig;
+        const trafficEnabled = trafficConfig?.dataForSeo?.enabled === true ||
+          trafficConfig?.crux?.enabled === true;
+        const trafficRows = trafficEnabled &&
+          typeof repository.getTrafficEnrichmentsForRun === "function"
+          ? await repository.getTrafficEnrichmentsForRun(resultsIdentifier, ownerId)
+          : [];
+        const trafficByLead = new Map();
+        for (const row of trafficRows) {
+          const rows = trafficByLead.get(row.leadId) || [];
+          rows.push(row);
+          trafficByLead.set(row.leadId, rows);
+        }
         const summary = run.leadSummary || {
           total: 0,
           qualified: 0,
@@ -1123,7 +1136,10 @@ export function createLeadServer(
             totalItems: page.totalItems,
             totalPages: Math.ceil(page.totalItems / filters.pageSize)
           },
-          items: page.items.map(serializeLead)
+          items: page.items.map((lead) => serializeLead(lead, {
+            trafficEnrichmentConfig: trafficConfig,
+            trafficEnrichments: trafficByLead.get(lead.id) || []
+          }))
         });
       }
 

@@ -6,6 +6,7 @@ import {
   leadRecordToCreate,
   serializeLead,
   serializeRun,
+  serializeTrafficEnrichment,
   trafficCacheRecordToUpsert
 } from "../src/api-serializer.js";
 import {
@@ -130,6 +131,123 @@ test("traffic persistence accepts normalized contracts and rejects raw or secret
     "traffic_bad", "run_fixture", "lead_fixture",
     { ...published, contractVersion: "wrong-version" }
   ), /does not match/u);
+});
+
+const trafficSnapshot = (dataForSeo, crux) => ({
+  dataForSeo: { enabled: dataForSeo },
+  crux: { enabled: crux }
+});
+
+function dataForSeoPublished(scope = "worldwide") {
+  return {
+    source: "dataforseo",
+    state: "available",
+    fetchedAt: new Date("2026-08-01T00:00:00.000Z"),
+    normalizedPayload: {
+      records: [{
+        contractVersion: "dataforseo-traffic-v1",
+        target: "fixture.example",
+        scope,
+        languageScope: "all_available",
+        metrics: {
+          organic: { etv: 10.5, count: 7 },
+          paid: { etv: 1.5, count: 2 },
+          featuredSnippet: { etv: 3, count: 1 },
+          localPack: { etv: 4, count: 1 }
+        },
+        fetchedAt: "2026-08-01T00:00:00.000Z"
+      }]
+    }
+  };
+}
+
+function cruxRestPublished() {
+  return {
+    source: "crux_rest",
+    state: "available",
+    normalizedPayload: {
+      contractVersion: "crux-origin-metrics-v1",
+      origin: "https://fixture.example",
+      coverage: "available",
+      metrics: {
+        largestContentfulPaintP75Ms: 2400,
+        cumulativeLayoutShiftP75: "0.12"
+      },
+      formFactors: { desktop: 0.4, phone: 0.6, tablet: 0 },
+      collectionPeriod: { firstDate: "2026-07-01", lastDate: "2026-07-28" },
+      fetchedAt: "2026-08-01T00:00:00.000Z"
+    }
+  };
+}
+
+test("public traffic serialization preserves the legacy shape when disabled or historical", () => {
+  assert.equal(serializeTrafficEnrichment([dataForSeoPublished()], undefined), undefined);
+  assert.equal(serializeTrafficEnrichment([], trafficSnapshot(false, false)), undefined);
+  const lead = serializeLead({ id: "legacy", status: "rejected" }, {
+    trafficEnrichmentConfig: trafficSnapshot(false, false),
+    trafficEnrichments: [dataForSeoPublished()]
+  });
+  assert.equal("traffic_enrichment" in lead, false);
+});
+
+test("public traffic serialization derives labelled DataForSEO metrics without overlap", () => {
+  const worldwide = dataForSeoPublished();
+  const country = dataForSeoPublished({ countryIsoCode: "IN", locationCode: 2356 });
+  worldwide.state = "partial";
+  worldwide.normalizedPayload.records.push(country.normalizedPayload.records[0]);
+  const serialized = serializeTrafficEnrichment([worldwide], trafficSnapshot(true, false));
+  assert.equal(serialized.version, "traffic-enrichment-public-v1");
+  assert.equal(serialized.dataforseo.state, "partial");
+  assert.equal(serialized.dataforseo.worldwide.estimated_google_search_traffic, 12);
+  assert.equal(serialized.dataforseo.worldwide.featured_snippet_estimated_traffic, 3);
+  assert.deepEqual(serialized.dataforseo.markets.map(({ country_code }) => country_code), ["IN"]);
+  assert.deepEqual(serialized.traffic_sources, ["dataforseo"]);
+  assert.equal(serialized.traffic_attributions[0].source, "dataforseo");
+  assert.equal(JSON.stringify(serialized).includes("providerCost"), false);
+});
+
+test("public CrUX serialization groups components and attributes only material", () => {
+  const rest = cruxRestPublished();
+  const noPopularity = { source: "crux_bigquery", state: "no_coverage", normalizedPayload: null };
+  const serialized = serializeTrafficEnrichment([rest, noPopularity], trafficSnapshot(false, true));
+  assert.equal(serialized.crux.state, "partial");
+  assert.equal(serialized.crux.origin_metrics.metrics.largest_contentful_paint_p75_ms, 2400);
+  assert.equal(serialized.crux.popularity.state, "no_coverage");
+  assert.deepEqual(serialized.traffic_sources, ["crux"]);
+  assert.match(serialized.traffic_attributions[0].license_url, /creativecommons/u);
+  assert.match(serialized.traffic_attributions[0].transformation, /selected and renamed/u);
+
+  const noMaterial = serializeTrafficEnrichment([
+    { source: "crux_rest", state: "no_coverage", normalizedPayload: null },
+    noPopularity
+  ], trafficSnapshot(false, true));
+  assert.equal(noMaterial.crux.state, "no_coverage");
+  assert.equal("traffic_sources" in noMaterial, false);
+  assert.equal("traffic_attributions" in noMaterial, false);
+
+  const both = serializeTrafficEnrichment([
+    dataForSeoPublished(),
+    rest,
+    noPopularity
+  ], trafficSnapshot(true, true));
+  assert.deepEqual(both.traffic_sources, ["dataforseo", "crux"]);
+  assert.deepEqual(
+    both.traffic_attributions.map(({ source }) => source),
+    ["dataforseo", "crux"]
+  );
+});
+
+test("malformed stored traffic fails closed without exposing payload or internal failure states", () => {
+  const serialized = serializeTrafficEnrichment([{
+    source: "dataforseo",
+    state: "available",
+    normalizedPayload: { rawBody: ["forbidden"] },
+    providerCostUsd: 99
+  }], trafficSnapshot(true, false));
+  assert.deepEqual(serialized.dataforseo, { state: "unavailable" });
+  assert.equal("traffic_sources" in serialized, false);
+  assert.equal(JSON.stringify(serialized).includes("forbidden"), false);
+  assert.equal(JSON.stringify(serialized).includes("providerCostUsd"), false);
 });
 
 test("v2 lead evidence round-trips while unversioned rows remain explicitly legacy", () => {

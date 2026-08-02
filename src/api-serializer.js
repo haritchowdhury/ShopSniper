@@ -125,6 +125,26 @@ const CACHE_STATES = new Set(["available", "no_coverage"]);
 const PUBLISHED_STATES = new Set([
   "available", "partial", "no_coverage", "unavailable", "ambiguous", "contract_mismatch"
 ]);
+const PUBLIC_TRAFFIC_VERSION = "traffic-enrichment-public-v1";
+const DATAFORSEO_COUNTRY_ORDER = Object.freeze([
+  "US", "GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"
+]);
+const PUBLIC_SOURCE_STATES = new Set(["available", "partial", "no_coverage", "unavailable"]);
+const CRUX_ATTRIBUTION = Object.freeze({
+  source: "crux",
+  name: "Chrome UX Report",
+  text: "Performance and popularity data sourced from the Chrome UX Report by Google, licensed under CC BY 4.0. Values are selected, renamed, and may be combined by Email Scraper.",
+  source_url: "https://developer.chrome.com/docs/crux/",
+  license: "CC BY 4.0",
+  license_url: "https://creativecommons.org/licenses/by/4.0/",
+  transformation: "Metrics are selected and renamed; DataForSEO values are not combined with CrUX values."
+});
+const DATAFORSEO_ATTRIBUTION = Object.freeze({
+  source: "dataforseo",
+  name: "DataForSEO Labs",
+  text: "Estimated Google search traffic data sourced from DataForSEO Labs.",
+  source_url: "https://dataforseo.com/apis/dataforseo-labs-api"
+});
 const SOURCE_STORAGE_CONTRACTS = Object.freeze({
   dataforseo: {
     contractVersion: "dataforseo-traffic-v1",
@@ -260,7 +280,177 @@ function nullableNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-export function serializeLead(lead) {
+function publicState(value) {
+  return PUBLIC_SOURCE_STATES.has(value) ? value : "unavailable";
+}
+
+function isoValue(value) {
+  if (value == null) return undefined;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function dataForSeoMetrics(metrics) {
+  return {
+    estimated_google_search_traffic: metrics.organic.etv + metrics.paid.etv,
+    organic_estimated_traffic: metrics.organic.etv,
+    organic_keyword_count: metrics.organic.count,
+    paid_estimated_traffic: metrics.paid.etv,
+    paid_keyword_count: metrics.paid.count,
+    featured_snippet_estimated_traffic: metrics.featuredSnippet.etv,
+    featured_snippet_keyword_count: metrics.featuredSnippet.count,
+    local_pack_estimated_traffic: metrics.localPack.etv,
+    local_pack_keyword_count: metrics.localPack.count
+  };
+}
+
+function materializeDataForSeo(row) {
+  const state = publicState(row?.state);
+  const parsed = PUBLISHED_PAYLOAD_SCHEMAS.dataforseo.safeParse(row?.normalizedPayload);
+  if (!parsed.success && ["available", "partial"].includes(state)) {
+    return { value: { state: "unavailable" }, material: false };
+  }
+  if (!parsed.success || !["available", "partial"].includes(state)) {
+    return { value: { state }, material: false };
+  }
+  const worldwideRecord = parsed.data.records.find(({ scope }) => scope === "worldwide");
+  const countryRecords = new Map(parsed.data.records
+    .filter(({ scope }) => scope !== "worldwide")
+    .map((record) => [record.scope.countryIsoCode, record]));
+  const value = {
+    state,
+    label: "Estimated Google search traffic",
+    ...(worldwideRecord && {
+      target: worldwideRecord.target,
+      worldwide: dataForSeoMetrics(worldwideRecord.metrics)
+    }),
+    markets: DATAFORSEO_COUNTRY_ORDER.flatMap((country_code) => {
+      const record = countryRecords.get(country_code);
+      return record ? [{ country_code, ...dataForSeoMetrics(record.metrics) }] : [];
+    }),
+    ...(isoValue(row.fetchedAt) && { observed_at: isoValue(row.fetchedAt) })
+  };
+  return { value, material: Boolean(worldwideRecord || countryRecords.size) };
+}
+
+function cruxRestMetrics(payload) {
+  return {
+    ...(payload.metrics.largestContentfulPaintP75Ms != null && {
+      largest_contentful_paint_p75_ms: payload.metrics.largestContentfulPaintP75Ms
+    }),
+    ...(payload.metrics.interactionToNextPaintP75Ms != null && {
+      interaction_to_next_paint_p75_ms: payload.metrics.interactionToNextPaintP75Ms
+    }),
+    ...(payload.metrics.cumulativeLayoutShiftP75 != null && {
+      cumulative_layout_shift_p75: payload.metrics.cumulativeLayoutShiftP75
+    }),
+    ...(payload.metrics.firstContentfulPaintP75Ms != null && {
+      first_contentful_paint_p75_ms: payload.metrics.firstContentfulPaintP75Ms
+    }),
+    ...(payload.metrics.timeToFirstByteP75Ms != null && {
+      time_to_first_byte_p75_ms: payload.metrics.timeToFirstByteP75Ms
+    })
+  };
+}
+
+function materializeCruxComponent(row, source) {
+  const state = publicState(row?.state);
+  const parsed = PUBLISHED_PAYLOAD_SCHEMAS[source].safeParse(row?.normalizedPayload);
+  if (!parsed.success && state === "available") {
+    return { value: { state: "unavailable" }, material: false };
+  }
+  if (!parsed.success || state !== "available") return { value: { state }, material: false };
+  if (source === "crux_rest") {
+    const metrics = cruxRestMetrics(parsed.data);
+    const material = Object.keys(metrics).length > 0 || parsed.data.formFactors != null;
+    return {
+      value: {
+        state,
+        origin: parsed.data.origin,
+        metrics,
+        ...(parsed.data.formFactors && {
+          observed_form_factor_fractions: {
+            desktop: parsed.data.formFactors.desktop,
+            phone: parsed.data.formFactors.phone,
+            tablet: parsed.data.formFactors.tablet
+          }
+        }),
+        collection_period: {
+          first_date: parsed.data.collectionPeriod.firstDate,
+          last_date: parsed.data.collectionPeriod.lastDate
+        },
+        observed_at: parsed.data.fetchedAt
+      },
+      material
+    };
+  }
+  return {
+    value: {
+      state,
+      origin: parsed.data.origin,
+      label: "Coarse CrUX navigation popularity rank",
+      dataset_month: parsed.data.datasetMonth,
+      popularity_rank: parsed.data.popularityRank,
+      popularity_band: `top_${parsed.data.popularityRank}`,
+      observed_device_fractions: {
+        phone: parsed.data.deviceFractions.phone,
+        desktop: parsed.data.deviceFractions.desktop,
+        tablet: parsed.data.deviceFractions.tablet
+      },
+      observed_at: parsed.data.fetchedAt
+    },
+    material: true
+  };
+}
+
+function combinedCruxState(rest, popularity) {
+  const states = [rest.value.state, popularity.value.state];
+  const materialCount = Number(rest.material) + Number(popularity.material);
+  if (materialCount === 2) return "available";
+  if (materialCount === 1) return "partial";
+  if (states.every((state) => state === "no_coverage")) return "no_coverage";
+  return "unavailable";
+}
+
+export function serializeTrafficEnrichment(rows, runSnapshot) {
+  const dataForSeoEnabled = runSnapshot?.dataForSeo?.enabled === true;
+  const cruxEnabled = runSnapshot?.crux?.enabled === true;
+  if (!dataForSeoEnabled && !cruxEnabled) return undefined;
+  const bySource = new Map((Array.isArray(rows) ? rows : []).map((row) => [row.source, row]));
+  const value = { version: PUBLIC_TRAFFIC_VERSION };
+  const sources = [];
+  const attributions = [];
+  if (dataForSeoEnabled) {
+    const dataForSeo = materializeDataForSeo(bySource.get("dataforseo"));
+    value.dataforseo = dataForSeo.value;
+    if (dataForSeo.material) {
+      sources.push("dataforseo");
+      attributions.push(DATAFORSEO_ATTRIBUTION);
+    }
+  }
+  if (cruxEnabled) {
+    const rest = materializeCruxComponent(bySource.get("crux_rest"), "crux_rest");
+    const popularity = materializeCruxComponent(
+      bySource.get("crux_bigquery"), "crux_bigquery"
+    );
+    value.crux = {
+      state: combinedCruxState(rest, popularity),
+      origin_metrics: rest.value,
+      popularity: popularity.value
+    };
+    if (rest.material || popularity.material) {
+      sources.push("crux");
+      attributions.push(CRUX_ATTRIBUTION);
+    }
+  }
+  if (sources.length) {
+    value.traffic_sources = sources;
+    value.traffic_attributions = attributions;
+  }
+  return value;
+}
+
+export function serializeLead(lead, { trafficEnrichments, trafficEnrichmentConfig } = {}) {
   const scoreSemantics = assertLeadScoreState({
     status: lead.status,
     pipelineVersion: lead.pipelineVersion,
@@ -283,6 +473,11 @@ export function serializeLead(lead) {
     item[publicName] = lead[modelName] ?? null;
   }
   item.score_semantics = scoreSemantics;
+  const trafficEnrichment = serializeTrafficEnrichment(
+    trafficEnrichments,
+    trafficEnrichmentConfig
+  );
+  if (trafficEnrichment) item.traffic_enrichment = trafficEnrichment;
   return item;
 }
 
