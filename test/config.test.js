@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertDataForSeoConfig, loadConfig } from "../src/config.js";
+import {
+  assertCruxConfig,
+  assertDataForSeoConfig,
+  loadConfig
+} from "../src/config.js";
 
 function withEnvironment(values, callback) {
   const previous = Object.fromEntries(
@@ -83,5 +87,62 @@ test("DataForSEO uses strict booleans and enabled-only credential validation", (
     const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
     assert.equal(config.dataForSeoEnrichmentEnabled, true);
     assert.doesNotThrow(() => assertDataForSeoConfig(config));
+  });
+});
+
+test("CrUX enrichment is disabled by default with bounded safe defaults", () => {
+  withEnvironment({
+    ENABLE_CRUX_ENRICHMENT: null,
+    CRUX_API_KEY: null,
+    CRUX_BIGQUERY_PROJECT_ID: null,
+    CRUX_BIGQUERY_LOCATION: null,
+    CRUX_REST_CONCURRENCY: null,
+    CRUX_REST_CACHE_FRESHNESS_MS: null,
+    CRUX_BIGQUERY_MAX_BYTES_BILLED: null
+  }, () => {
+    const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
+    assert.equal(config.cruxEnrichmentEnabled, false);
+    assert.equal(config.cruxApiKey, "");
+    assert.equal(config.cruxBigQueryProjectId, "");
+    assert.equal(config.cruxBigQueryLocation, "US");
+    assert.equal(config.cruxRestConcurrency, 2);
+    assert.equal(config.cruxRestCacheFreshnessMs, 86400000);
+    assert.equal(config.cruxBigQueryMaxBytesBilled, 10000000000);
+    assert.doesNotThrow(() => assertCruxConfig(config));
+  });
+});
+
+test("CrUX uses strict flags and validates enabled-only settings", () => {
+  withEnvironment({ ENABLE_CRUX_ENRICHMENT: "yes" }, () => {
+    assert.throws(
+      () => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }),
+      /ENABLE_CRUX_ENRICHMENT must be true or false/u
+    );
+  });
+  withEnvironment({
+    ENABLE_CRUX_ENRICHMENT: "true",
+    CRUX_API_KEY: "fixture-key",
+    CRUX_BIGQUERY_PROJECT_ID: null
+  }, () => {
+    const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
+    assert.throws(() => assertCruxConfig(config), /CRUX_BIGQUERY_PROJECT_ID/u);
+  });
+  withEnvironment({
+    ENABLE_CRUX_ENRICHMENT: "TRUE",
+    CRUX_API_KEY: "fixture-key",
+    CRUX_BIGQUERY_PROJECT_ID: "fixture-project",
+    CRUX_BIGQUERY_LOCATION: "US"
+  }, () => {
+    const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
+    assert.doesNotThrow(() => assertCruxConfig(config));
+  });
+});
+
+test("CrUX numeric safety settings reject out-of-range values", () => {
+  withEnvironment({ CRUX_REST_CONCURRENCY: "11" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
+  });
+  withEnvironment({ CRUX_BIGQUERY_MAX_BYTES_BILLED: "0" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
   });
 });

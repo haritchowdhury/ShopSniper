@@ -102,6 +102,21 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     ),
     dataForSeoLogin: process.env.DATAFORSEO_LOGIN || "",
     dataForSeoPassword: process.env.DATAFORSEO_PASSWORD || "",
+    cruxEnrichmentEnabled: strictBoolean("ENABLE_CRUX_ENRICHMENT", false),
+    cruxApiKey: process.env.CRUX_API_KEY || "",
+    cruxBigQueryProjectId: process.env.CRUX_BIGQUERY_PROJECT_ID || "",
+    cruxBigQueryLocation: process.env.CRUX_BIGQUERY_LOCATION || "US",
+    cruxRestConcurrency: integer("CRUX_REST_CONCURRENCY", 2, { max: 10 }),
+    cruxRestCacheFreshnessMs: integer(
+      "CRUX_REST_CACHE_FRESHNESS_MS",
+      86400000,
+      { min: 60000, max: 604800000 }
+    ),
+    cruxBigQueryMaxBytesBilled: integer(
+      "CRUX_BIGQUERY_MAX_BYTES_BILLED",
+      10000000000,
+      { min: 1 }
+    ),
     openaiApiKey: process.env.OPENAI_API_KEY || "",
     openaiModel: process.env.OPENAI_MODEL || "gpt-4.1-mini",
     enableAiNormalization: boolean("ENABLE_AI_NORMALIZATION", false),
@@ -191,6 +206,22 @@ export function assertDataForSeoConfig(config) {
   if (!config.dataForSeoPassword) missing.push("DATAFORSEO_PASSWORD");
   if (missing.length) {
     throw new Error(`Missing required DataForSEO configuration: ${missing.join(", ")}`);
+  }
+}
+
+export function assertCruxConfig(config) {
+  if (!config.cruxEnrichmentEnabled) return;
+  const missing = [];
+  if (!config.cruxApiKey) missing.push("CRUX_API_KEY");
+  if (!config.cruxBigQueryProjectId) missing.push("CRUX_BIGQUERY_PROJECT_ID");
+  if (missing.length) {
+    throw new Error(`Missing required CrUX configuration: ${missing.join(", ")}`);
+  }
+  if (!/^[A-Za-z0-9_-]{1,1024}$/u.test(config.cruxBigQueryProjectId)) {
+    throw new Error("CRUX_BIGQUERY_PROJECT_ID is invalid");
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(config.cruxBigQueryLocation)) {
+    throw new Error("CRUX_BIGQUERY_LOCATION is invalid");
   }
 }
 

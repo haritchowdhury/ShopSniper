@@ -33,3 +33,12 @@ export function dataForSeoError(code, message, options = {}) {
     ...options
   });
 }
+
+export function cruxError(code, message, contractVersion, options = {}) {
+  return new EnrichmentError(message, {
+    code,
+    provider: "crux",
+    contractVersion,
+    ...options
+  });
+}

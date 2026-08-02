@@ -26,6 +26,8 @@ repeat the paid call.
 - `test/dataforseo-enrichment.test.js`
 - `src/config.js` — DataForSEO settings and enabled-provider assertion only
 - `test/config.test.js` — matching DataForSEO tests only
+- `../TRAFFIC_ENRICHMENT_IMPLEMENTATION_CHECKLIST.md` — TE1 status and
+  completed checks only
 - `review-evidence/traffic-enrichment/TE1_HANDOFF.md`
 
 No Prisma, pipeline, API serializer, CSV, frontend, package, fixture, or CrUX
