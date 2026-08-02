@@ -113,6 +113,23 @@ test("traffic persistence accepts normalized contracts and rejects raw or secret
     fetchedAt: value.fetchedAt,
     expiresAt: "2026-08-02T00:00:00.000Z"
   }), /cannot contain a payload/u);
+  assert.throws(() => trafficCacheRecordToUpsert("cache_identity", {
+    ...cache,
+    identity: "www.fixture.example",
+    normalizedPayload: { ...value, target: "www.fixture.example" },
+    fetchedAt: value.fetchedAt,
+    expiresAt: "2026-08-31T00:00:00.000Z"
+  }), /normalized contract/u);
+  assert.throws(() => trafficCacheRecordToUpsert("cache_scope", {
+    ...cache,
+    scopeKey: "country:IN:2840",
+    normalizedPayload: {
+      ...value,
+      scope: { countryIsoCode: "IN", locationCode: 2840 }
+    },
+    fetchedAt: value.fetchedAt,
+    expiresAt: "2026-08-31T00:00:00.000Z"
+  }), /normalized contract/u);
 
   const published = leadTrafficEnrichmentRecordToCreate(
     "traffic_fixture",
@@ -130,7 +147,98 @@ test("traffic persistence accepts normalized contracts and rejects raw or secret
   assert.throws(() => leadTrafficEnrichmentRecordToCreate(
     "traffic_bad", "run_fixture", "lead_fixture",
     { ...published, contractVersion: "wrong-version" }
-  ), /does not match/u);
+  ), /source contract|does not match/u);
+});
+
+test("normalized traffic storage rejects impossible cross-field material", () => {
+  const metric = { etv: 1, count: 1 };
+  const data = {
+    contractVersion: "dataforseo-traffic-v1",
+    target: "fixture.example",
+    scope: "worldwide",
+    languageScope: "all_available",
+    metrics: {
+      organic: metric,
+      paid: metric,
+      featuredSnippet: metric,
+      localPack: metric
+    },
+    fetchedAt: "2026-08-01T00:00:00.000Z"
+  };
+  const publishedData = (records) => leadTrafficEnrichmentRecordToCreate(
+    "traffic_data", "run_fixture", "lead_fixture", {
+      source: "dataforseo",
+      state: "partial",
+      contractVersion: "dataforseo-traffic-v1",
+      normalizedPayload: { records },
+      fetchedAt: data.fetchedAt
+    }
+  );
+  for (const records of [
+    [{ ...data, target: "www.fixture.example" }],
+    [data, { ...data }],
+    [data, { ...data, target: "other.example", scope: { countryIsoCode: "IN", locationCode: 2356 } }],
+    [{ ...data, scope: { countryIsoCode: "ZZ", locationCode: 9999 } }],
+    [{ ...data, scope: { countryIsoCode: "IN", locationCode: 2840 } }]
+  ]) {
+    assert.throws(() => publishedData(records), /normalized contract/u);
+  }
+
+  const rest = {
+    contractVersion: "crux-origin-metrics-v1",
+    origin: "https://fixture.example",
+    coverage: "available",
+    metrics: { largestContentfulPaintP75Ms: 2400 },
+    formFactors: { desktop: 0.4, phone: 0.6, tablet: 0 },
+    collectionPeriod: { firstDate: "2026-07-01", lastDate: "2026-07-28" },
+    fetchedAt: "2026-08-01T00:00:00.000Z"
+  };
+  const publishedRest = (normalizedPayload) => leadTrafficEnrichmentRecordToCreate(
+    "traffic_rest", "run_fixture", "lead_fixture", {
+      source: "crux_rest",
+      state: "available",
+      contractVersion: "crux-origin-metrics-v1",
+      normalizedPayload,
+      fetchedAt: rest.fetchedAt,
+      coverageStartedAt: rest.collectionPeriod.firstDate,
+      coverageEndedAt: rest.collectionPeriod.lastDate
+    }
+  );
+  for (const payload of [
+    { ...rest, origin: "http://fixture.example/path" },
+    { ...rest, metrics: {}, formFactors: undefined },
+    { ...rest, formFactors: { desktop: 1, phone: 1, tablet: 1 } },
+    { ...rest, collectionPeriod: { firstDate: "2026-07-28", lastDate: "2026-07-01" } }
+  ]) {
+    assert.throws(() => publishedRest(payload), /normalized contract/u);
+  }
+  assert.throws(() => publishedRest({ ...rest, fetchedAt: "2026-08-02T00:00:00.000Z" }),
+    /fetch time/u);
+
+  const popularity = {
+    contractVersion: "crux-popularity-v1",
+    origin: "https://fixture.example",
+    coverage: "available",
+    datasetMonth: "202606",
+    popularityRank: 100000,
+    deviceFractions: { phone: 0.7, desktop: 0.3, tablet: 0 },
+    fetchedAt: "2026-08-01T00:00:00.000Z"
+  };
+  for (const payload of [
+    { ...popularity, datasetMonth: "202613" },
+    { ...popularity, origin: "https://fixture.example/path" },
+    { ...popularity, deviceFractions: { phone: 1, desktop: 1, tablet: 1 } }
+  ]) {
+    assert.throws(() => leadTrafficEnrichmentRecordToCreate(
+      "traffic_popularity", "run_fixture", "lead_fixture", {
+        source: "crux_bigquery",
+        state: "available",
+        contractVersion: "crux-popularity-v1",
+        normalizedPayload: payload,
+        fetchedAt: popularity.fetchedAt
+      }
+    ), /normalized contract/u);
+  }
 });
 
 const trafficSnapshot = (dataForSeo, crux) => ({
@@ -141,7 +249,8 @@ const trafficSnapshot = (dataForSeo, crux) => ({
 function dataForSeoPublished(scope = "worldwide") {
   return {
     source: "dataforseo",
-    state: "available",
+    state: "partial",
+    contractVersion: "dataforseo-traffic-v1",
     fetchedAt: new Date("2026-08-01T00:00:00.000Z"),
     normalizedPayload: {
       records: [{
@@ -165,6 +274,10 @@ function cruxRestPublished() {
   return {
     source: "crux_rest",
     state: "available",
+    contractVersion: "crux-origin-metrics-v1",
+    fetchedAt: new Date("2026-08-01T00:00:00.000Z"),
+    coverageStartedAt: new Date("2026-07-01T00:00:00.000Z"),
+    coverageEndedAt: new Date("2026-07-28T00:00:00.000Z"),
     normalizedPayload: {
       contractVersion: "crux-origin-metrics-v1",
       origin: "https://fixture.example",
@@ -175,6 +288,24 @@ function cruxRestPublished() {
       },
       formFactors: { desktop: 0.4, phone: 0.6, tablet: 0 },
       collectionPeriod: { firstDate: "2026-07-01", lastDate: "2026-07-28" },
+      fetchedAt: "2026-08-01T00:00:00.000Z"
+    }
+  };
+}
+
+function cruxPopularityPublished(origin = "https://fixture.example") {
+  return {
+    source: "crux_bigquery",
+    state: "available",
+    contractVersion: "crux-popularity-v1",
+    fetchedAt: new Date("2026-08-01T00:00:00.000Z"),
+    normalizedPayload: {
+      contractVersion: "crux-popularity-v1",
+      origin,
+      coverage: "available",
+      datasetMonth: "202606",
+      popularityRank: 100000,
+      deviceFractions: { phone: 0.7, desktop: 0.3, tablet: 0 },
       fetchedAt: "2026-08-01T00:00:00.000Z"
     }
   };
@@ -208,7 +339,12 @@ test("public traffic serialization derives labelled DataForSEO metrics without o
 
 test("public CrUX serialization groups components and attributes only material", () => {
   const rest = cruxRestPublished();
-  const noPopularity = { source: "crux_bigquery", state: "no_coverage", normalizedPayload: null };
+  const noPopularity = {
+    source: "crux_bigquery",
+    state: "no_coverage",
+    contractVersion: "crux-popularity-v1",
+    normalizedPayload: null
+  };
   const serialized = serializeTrafficEnrichment([rest, noPopularity], trafficSnapshot(false, true));
   assert.equal(serialized.crux.state, "partial");
   assert.equal(serialized.crux.origin_metrics.metrics.largest_contentful_paint_p75_ms, 2400);
@@ -235,6 +371,33 @@ test("public CrUX serialization groups components and attributes only material",
     both.traffic_attributions.map(({ source }) => source),
     ["dataforseo", "crux"]
   );
+});
+
+test("public traffic material and attribution fail closed on semantic conflicts", () => {
+  const unsupported = dataForSeoPublished({ countryIsoCode: "ZZ", locationCode: 9999 });
+  const data = serializeTrafficEnrichment([unsupported], trafficSnapshot(true, false));
+  assert.deepEqual(data.dataforseo, { state: "unavailable" });
+  assert.equal("traffic_sources" in data, false);
+  assert.equal("traffic_attributions" in data, false);
+
+  const crux = serializeTrafficEnrichment([
+    cruxRestPublished(),
+    cruxPopularityPublished("https://other.example")
+  ], trafficSnapshot(false, true));
+  assert.equal(crux.crux.state, "unavailable");
+  assert.deepEqual(crux.crux.origin_metrics, { state: "unavailable" });
+  assert.deepEqual(crux.crux.popularity, { state: "unavailable" });
+  assert.equal("traffic_sources" in crux, false);
+  assert.equal("traffic_attributions" in crux, false);
+
+  const missingStoredTime = cruxPopularityPublished();
+  missingStoredTime.fetchedAt = null;
+  const missingTime = serializeTrafficEnrichment(
+    [missingStoredTime],
+    trafficSnapshot(false, true)
+  );
+  assert.deepEqual(missingTime.crux.popularity, { state: "unavailable" });
+  assert.equal("traffic_sources" in missingTime, false);
 });
 
 test("malformed stored traffic fails closed without exposing payload or internal failure states", () => {

@@ -466,7 +466,7 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
     trafficEnrichments: [{
       leadId,
       source: "dataforseo",
-      state: "available",
+      state: "partial",
       contractVersion: "dataforseo-traffic-v1",
       normalizedPayload: { records: [dataForSeoValue()] },
       fetchedAt: "2026-08-01T00:00:00.000Z"
@@ -483,6 +483,29 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
   ]);
   assert.equal(result.resultsAvailable, true);
   assert.equal(result.pipelineVersion, 2);
+});
+
+test("completion mapper rejects semantically impossible enrichment before persistence", async () => {
+  let transactionStarted = false;
+  const repository = new PrismaRunRepository({
+    $transaction: async () => { transactionStarted = true; }
+  });
+  const lead = qualifiedLead();
+  const leadId = stableLeadId("run_abcdefghijklmnop", lead, 0);
+  const value = dataForSeoValue();
+  await assert.rejects(repository.saveCompletedResults("run_abcdefghijklmnop", LEASE, {
+    leads: [lead],
+    trafficEnrichments: [{
+      leadId,
+      source: "dataforseo",
+      state: "partial",
+      contractVersion: "dataforseo-traffic-v1",
+      normalizedPayload: { records: [value, { ...value }] },
+      fetchedAt: value.fetchedAt
+    }],
+    summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
+  }), /normalized contract/u);
+  assert.equal(transactionStarted, false);
 });
 
 test("query-planning shortfall stores audits and releases the lease atomically", async () => {

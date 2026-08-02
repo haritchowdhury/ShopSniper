@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { stringifyCsv } from "./csv.js";
 import { assertPublicLeadScoreState } from "./lead-state.js";
+import { parsePublicTrafficEnrichment } from "./api-serializer.js";
 
 export const OUTPUT_HEADERS = [
   "shop_type",
@@ -98,7 +99,13 @@ const TRAFFIC_PROVENANCE_HEADERS = Object.freeze([
   "traffic_transformations"
 ]);
 
-export function outputHeaders(records) {
+function validateTrafficRecords(records) {
+  return records.map((record) => record.traffic_enrichment == null
+    ? record
+    : { ...record, traffic_enrichment: parsePublicTrafficEnrichment(record.traffic_enrichment) });
+}
+
+function headersForValidatedRecords(records) {
   const enrichments = records.map(({ traffic_enrichment }) => traffic_enrichment)
     .filter((value) => value && typeof value === "object");
   const hasDataForSeo = enrichments.some(({ dataforseo }) => dataforseo != null);
@@ -112,6 +119,10 @@ export function outputHeaders(records) {
     ...(hasCrux ? CRUX_HEADERS : []),
     ...(hasMaterial ? TRAFFIC_PROVENANCE_HEADERS : [])
   ];
+}
+
+export function outputHeaders(records) {
+  return headersForValidatedRecords(validateTrafficRecords(records));
 }
 
 function trafficCsvFields(record) {
@@ -180,7 +191,8 @@ function trafficCsvFields(record) {
 
 export async function writeOutput(filePath, records) {
   records.forEach(assertPublicLeadScoreState);
-  const headers = outputHeaders(records);
+  const validatedRecords = validateTrafficRecords(records);
+  const headers = headersForValidatedRecords(validatedRecords);
   const directory = path.dirname(filePath);
   await fs.mkdir(directory, { recursive: true });
   const temporaryPath = path.join(
@@ -188,7 +200,7 @@ export async function writeOutput(filePath, records) {
     `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`
   );
 
-  const normalized = records.map((record) => ({
+  const normalized = validatedRecords.map((record) => ({
     ...record,
     ...trafficCsvFields(record),
     social_profiles: Array.isArray(record.social_profiles)

@@ -4,6 +4,11 @@ import {
   assertLeadScoreState,
   LeadStateInvariantError
 } from "./lead-state.js";
+import {
+  DATAFORSEO_COUNTRY_LOCATION_CODES,
+  normalizeDataForSeoHostname
+} from "./enrichment/dataforseo/request.js";
+import { normalizeCruxOrigin } from "./enrichment/crux/api-request.js";
 
 const TEXT_FIELDS = {
   original_shop_type: "originalShopType",
@@ -54,19 +59,53 @@ const finiteNonNegative = z.number().finite().nonnegative();
 const isoTimestamp = z.string().datetime({ offset: true });
 const isoDate = z.string().date();
 const fraction = z.number().finite().min(0).max(1);
+const canonicalDataForSeoHostname = z.string().refine((value) => {
+  try {
+    return normalizeDataForSeoHostname(value) === value;
+  } catch {
+    return false;
+  }
+}, "DataForSEO target must be a canonical hostname");
+const canonicalCruxOrigin = z.string().refine((value) => {
+  try {
+    return normalizeCruxOrigin(value) === value;
+  } catch {
+    return false;
+  }
+}, "CrUX origin must be an exact canonical HTTPS origin");
+const fractions = z.object({
+  desktop: fraction,
+  phone: fraction,
+  tablet: fraction
+}).strict().refine(
+  ({ desktop, phone, tablet }) =>
+    Math.abs(desktop + phone + tablet - 1) <= 0.010000001,
+  "Traffic fractions must sum to one"
+);
+const collectionPeriod = z.object({
+  firstDate: isoDate,
+  lastDate: isoDate
+}).strict().refine(
+  ({ firstDate, lastDate }) => firstDate <= lastDate,
+  "CrUX collection period must be ordered"
+);
 const dataForSeoMetric = z.object({
   etv: finiteNonNegative,
   count: z.number().int().nonnegative()
 }).strict();
 const dataForSeoPayload = z.object({
   contractVersion: z.literal("dataforseo-traffic-v1"),
-  target: z.string().min(1),
+  target: canonicalDataForSeoHostname,
   scope: z.union([
     z.literal("worldwide"),
     z.object({
-      countryIsoCode: z.string().regex(/^[A-Z]{2}$/u),
+      countryIsoCode: z.enum(Object.keys(DATAFORSEO_COUNTRY_LOCATION_CODES)),
       locationCode: z.number().int().positive()
-    }).strict()
+    }).strict().refine(
+      ({ countryIsoCode, locationCode }) =>
+        DATAFORSEO_COUNTRY_LOCATION_CODES[countryIsoCode] === locationCode,
+      "DataForSEO country and location code must match"
+    )
   ]),
   languageScope: z.literal("all_available"),
   metrics: z.object({
@@ -79,7 +118,7 @@ const dataForSeoPayload = z.object({
 }).strict();
 const cruxRestPayload = z.object({
   contractVersion: z.literal("crux-origin-metrics-v1"),
-  origin: z.string().url(),
+  origin: canonicalCruxOrigin,
   coverage: z.literal("available"),
   metrics: z.object({
     largestContentfulPaintP75Ms: finiteNonNegative.optional(),
@@ -88,25 +127,20 @@ const cruxRestPayload = z.object({
     firstContentfulPaintP75Ms: finiteNonNegative.optional(),
     timeToFirstByteP75Ms: finiteNonNegative.optional()
   }).strict(),
-  formFactors: z.object({
-    desktop: fraction,
-    phone: fraction,
-    tablet: fraction
-  }).strict().optional(),
-  collectionPeriod: z.object({ firstDate: isoDate, lastDate: isoDate }).strict(),
+  formFactors: fractions.optional(),
+  collectionPeriod,
   fetchedAt: isoTimestamp
-}).strict();
+}).strict().refine(
+  ({ metrics, formFactors }) => Object.keys(metrics).length > 0 || formFactors != null,
+  "Available CrUX REST material must contain a metric or form factors"
+);
 const cruxPopularityPayload = z.object({
   contractVersion: z.literal("crux-popularity-v1"),
-  origin: z.string().url(),
+  origin: canonicalCruxOrigin,
   coverage: z.literal("available"),
-  datasetMonth: z.string().regex(/^20\d{4}$/u),
+  datasetMonth: z.string().regex(/^20\d{2}(?:0[1-9]|1[0-2])$/u),
   popularityRank: z.number().int().positive(),
-  deviceFractions: z.object({
-    phone: fraction,
-    desktop: fraction,
-    tablet: fraction
-  }).strict(),
+  deviceFractions: fractions,
   fetchedAt: isoTimestamp
 }).strict();
 const NORMALIZED_PAYLOAD_SCHEMAS = Object.freeze({
@@ -117,7 +151,13 @@ const NORMALIZED_PAYLOAD_SCHEMAS = Object.freeze({
 const PUBLISHED_PAYLOAD_SCHEMAS = Object.freeze({
   dataforseo: z.object({
     records: z.array(dataForSeoPayload).min(1).max(10)
-  }).strict(),
+  }).strict().refine(({ records }) => {
+    const targets = new Set(records.map(({ target }) => target));
+    const scopes = records.map(({ scope }) => scope === "worldwide"
+      ? "worldwide"
+      : `country:${scope.countryIsoCode}:${scope.locationCode}`);
+    return targets.size === 1 && new Set(scopes).size === scopes.length;
+  }, "Published DataForSEO records must use one target and unique scopes"),
   crux_rest: cruxRestPayload,
   crux_bigquery: cruxPopularityPayload
 });
@@ -159,8 +199,135 @@ const SOURCE_STORAGE_CONTRACTS = Object.freeze({
     metricSetKey: "desktop_density,phone_density,popularity_rank,tablet_density"
   }
 });
+const publicDataForSeoMetricShape = {
+  estimated_google_search_traffic: finiteNonNegative,
+  organic_estimated_traffic: finiteNonNegative,
+  organic_keyword_count: z.number().int().nonnegative(),
+  paid_estimated_traffic: finiteNonNegative,
+  paid_keyword_count: z.number().int().nonnegative(),
+  featured_snippet_estimated_traffic: finiteNonNegative,
+  featured_snippet_keyword_count: z.number().int().nonnegative(),
+  local_pack_estimated_traffic: finiteNonNegative,
+  local_pack_keyword_count: z.number().int().nonnegative()
+};
+const derivedSearchTotalMatches = (value) => value.estimated_google_search_traffic ===
+  value.organic_estimated_traffic + value.paid_estimated_traffic;
+const publicDataForSeoMetric = z.object(publicDataForSeoMetricShape).strict().refine(
+  derivedSearchTotalMatches,
+  "Estimated search traffic must equal organic plus paid"
+);
+const publicDataForSeoMaterial = z.object({
+  state: z.enum(["available", "partial"]),
+  label: z.literal("Estimated Google search traffic"),
+  target: canonicalDataForSeoHostname.optional(),
+  worldwide: publicDataForSeoMetric.optional(),
+  markets: z.array(z.object({
+    country_code: z.enum(Object.keys(DATAFORSEO_COUNTRY_LOCATION_CODES)),
+    ...publicDataForSeoMetricShape
+  }).strict().refine(derivedSearchTotalMatches)).max(9),
+  observed_at: isoTimestamp.optional()
+}).strict().refine(({ worldwide, markets }) => worldwide != null || markets.length > 0,
+  "DataForSEO public material cannot be empty").refine(({ state, worldwide, markets }) =>
+  (state === "available") === (worldwide != null && markets.length === 9),
+  "DataForSEO public state must match complete scope material").refine(({ markets }) => {
+  const positions = markets.map(({ country_code }) => DATAFORSEO_COUNTRY_ORDER.indexOf(country_code));
+  return new Set(positions).size === positions.length &&
+    positions.every((position, index) => index === 0 || position > positions[index - 1]);
+}, "DataForSEO public markets must be unique and ordered");
+const publicDataForSeo = z.union([
+  publicDataForSeoMaterial,
+  z.object({ state: z.enum(["no_coverage", "unavailable"]) }).strict()
+]);
+const publicCruxRest = z.union([
+  z.object({
+    state: z.literal("available"),
+    origin: canonicalCruxOrigin,
+    metrics: z.object({
+      largest_contentful_paint_p75_ms: finiteNonNegative.optional(),
+      interaction_to_next_paint_p75_ms: finiteNonNegative.optional(),
+      cumulative_layout_shift_p75: z.string().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/u).optional(),
+      first_contentful_paint_p75_ms: finiteNonNegative.optional(),
+      time_to_first_byte_p75_ms: finiteNonNegative.optional()
+    }).strict(),
+    observed_form_factor_fractions: fractions.optional(),
+    collection_period: z.object({ first_date: isoDate, last_date: isoDate }).strict()
+      .refine(({ first_date, last_date }) => first_date <= last_date),
+    observed_at: isoTimestamp
+  }).strict().refine(({ metrics, observed_form_factor_fractions: formFactors }) =>
+    Object.keys(metrics).length > 0 || formFactors != null),
+  z.object({ state: z.enum(["no_coverage", "unavailable"]) }).strict()
+]);
+const publicCruxPopularity = z.union([
+  z.object({
+    state: z.literal("available"),
+    origin: canonicalCruxOrigin,
+    label: z.literal("Coarse CrUX navigation popularity rank"),
+    dataset_month: z.string().regex(/^20\d{2}(?:0[1-9]|1[0-2])$/u),
+    popularity_rank: z.number().int().positive(),
+    popularity_band: z.string(),
+    observed_device_fractions: fractions,
+    observed_at: isoTimestamp
+  }).strict().refine(({ popularity_rank, popularity_band }) =>
+    popularity_band === `top_${popularity_rank}`),
+  z.object({ state: z.enum(["no_coverage", "unavailable"]) }).strict()
+]);
+const publicCrux = z.object({
+  state: z.enum(["available", "partial", "no_coverage", "unavailable"]),
+  origin_metrics: publicCruxRest,
+  popularity: publicCruxPopularity
+}).strict().refine(({ state, origin_metrics: rest, popularity }) => {
+  const restMaterial = rest.state === "available";
+  const popularityMaterial = popularity.state === "available";
+  const expected = restMaterial && popularityMaterial
+    ? "available"
+    : restMaterial || popularityMaterial
+      ? "partial"
+      : rest.state === "no_coverage" && popularity.state === "no_coverage"
+        ? "no_coverage"
+        : "unavailable";
+  return state === expected && (!restMaterial || !popularityMaterial || rest.origin === popularity.origin);
+}, "CrUX public state and origin must agree");
+const publicAttribution = z.object({
+  source: z.enum(["dataforseo", "crux"]),
+  name: z.string().min(1),
+  text: z.string().min(1),
+  source_url: z.string().url().refine((value) => value.startsWith("https://")),
+  license: z.string().optional(),
+  license_url: z.string().url().refine((value) => value.startsWith("https://")).optional(),
+  transformation: z.string().optional()
+}).strict();
+const publicTrafficEnrichmentSchema = z.object({
+  version: z.literal(PUBLIC_TRAFFIC_VERSION),
+  dataforseo: publicDataForSeo.optional(),
+  crux: publicCrux.optional(),
+  traffic_sources: z.array(z.enum(["dataforseo", "crux"])).optional(),
+  traffic_attributions: z.array(publicAttribution).optional()
+}).refine(({ dataforseo, crux }) => dataforseo != null || crux != null)
+  .refine((value) => {
+    const expected = [];
+    if (value.dataforseo && ["available", "partial"].includes(value.dataforseo.state)) {
+      expected.push("dataforseo");
+    }
+    if (value.crux && ["available", "partial"].includes(value.crux.state)) expected.push("crux");
+    if (expected.length === 0) {
+      return value.traffic_sources == null && value.traffic_attributions == null;
+    }
+    return value.traffic_sources?.length === expected.length &&
+      value.traffic_attributions?.length === expected.length &&
+      expected.every((source, index) => value.traffic_sources[index] === source &&
+        value.traffic_attributions[index].source === source) &&
+      value.traffic_attributions.every((item) => item.source !== "crux" ||
+        Boolean(item.license && item.license_url && item.transformation));
+  }, "Traffic sources and attribution must match serialized material");
+
+export function parsePublicTrafficEnrichment(value) {
+  const parsed = publicTrafficEnrichmentSchema.safeParse(value);
+  if (!parsed.success) throw new Error("Public traffic enrichment contract is invalid");
+  return parsed.data;
+}
 
 function requiredDate(value, field) {
+  if (value == null || value === "") throw new Error(`${field} must be a valid timestamp`);
   const date = value instanceof Date ? value : new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error(`${field} must be a valid timestamp`);
   return date;
@@ -168,6 +335,35 @@ function requiredDate(value, field) {
 
 function optionalDate(value, field) {
   return value == null ? null : requiredDate(value, field);
+}
+
+function sameInstant(left, right) {
+  return requiredDate(left, "timestamp").getTime() === requiredDate(right, "timestamp").getTime();
+}
+
+function assertStoredTiming(source, payload, record, { cache = false } = {}) {
+  const fetchedAt = requiredDate(record.fetchedAt, "fetchedAt");
+  const coverageStartedAt = optionalDate(record.coverageStartedAt, "coverageStartedAt");
+  const coverageEndedAt = optionalDate(record.coverageEndedAt, "coverageEndedAt");
+  if (coverageStartedAt && coverageEndedAt && coverageStartedAt > coverageEndedAt) {
+    throw new Error("Traffic enrichment coverage period must be ordered");
+  }
+  if (payload && !sameInstant(fetchedAt, payload.fetchedAt)) {
+    throw new Error("Traffic enrichment fetch time does not match its payload");
+  }
+  if (source === "crux_rest" && payload) {
+    if (!coverageStartedAt || !coverageEndedAt ||
+        coverageStartedAt.toISOString().slice(0, 10) !== payload.collectionPeriod.firstDate ||
+        coverageEndedAt.toISOString().slice(0, 10) !== payload.collectionPeriod.lastDate) {
+      throw new Error("CrUX coverage time does not match its payload");
+    }
+  } else if (coverageStartedAt || coverageEndedAt) {
+    throw new Error("Traffic enrichment source cannot contain coverage dates");
+  }
+  if (!cache && !payload && record.fetchedAt != null) {
+    throw new Error("Non-material published enrichment cannot contain fetch time");
+  }
+  return { fetchedAt, coverageStartedAt, coverageEndedAt };
 }
 
 function normalizedPayload(source, state, payload, schemas = NORMALIZED_PAYLOAD_SCHEMAS) {
@@ -200,26 +396,36 @@ export function trafficCacheRecordToUpsert(id, record) {
     throw new Error("Traffic cache contract version does not match its payload");
   }
   if (record.source === "dataforseo") {
+    const countryScope = /^country:([A-Z]{2}):([1-9]\d*)$/u.exec(record.scopeKey);
+    const supportedScope = record.scopeKey === "worldwide" ||
+      (countryScope && DATAFORSEO_COUNTRY_LOCATION_CODES[countryScope[1]] === Number(countryScope[2]));
     const expectedScope = !payload
       ? record.scopeKey
       : payload.scope === "worldwide"
         ? "worldwide"
         : `country:${payload.scope.countryIsoCode}:${payload.scope.locationCode}`;
-    if (payload && payload.target !== record.identity || record.scopeKey !== expectedScope ||
-        !/^(?:worldwide|country:[A-Z]{2}:[1-9]\d*)$/u.test(record.scopeKey)) {
+    if (!canonicalDataForSeoHostname.safeParse(record.identity).success || !supportedScope ||
+        (payload && payload.target !== record.identity) || record.scopeKey !== expectedScope) {
       throw new Error("Traffic cache DataForSEO identity or scope does not match its payload");
     }
   }
   if (record.source === "crux_rest" &&
-      (record.scopeKey !== "current" || (payload && payload.origin !== record.identity))) {
+      (!canonicalCruxOrigin.safeParse(record.identity).success || record.scopeKey !== "current" ||
+       (payload && payload.origin !== record.identity))) {
     throw new Error("Traffic cache CrUX REST identity or scope does not match its payload");
   }
   if (record.source === "crux_bigquery" &&
-      (!/^month:20\d{4}$/u.test(record.scopeKey) ||
+      (!canonicalCruxOrigin.safeParse(record.identity).success ||
+       !/^month:20\d{2}(?:0[1-9]|1[0-2])$/u.test(record.scopeKey) ||
        (payload && (payload.origin !== record.identity || record.scopeKey !== `month:${payload.datasetMonth}`)))) {
     throw new Error("Traffic cache CrUX BigQuery identity or scope does not match its payload");
   }
-  const fetchedAt = requiredDate(record.fetchedAt, "fetchedAt");
+  const { fetchedAt, coverageStartedAt, coverageEndedAt } = assertStoredTiming(
+    record.source,
+    payload,
+    record,
+    { cache: true }
+  );
   const expiresAt = requiredDate(record.expiresAt, "expiresAt");
   if (expiresAt <= fetchedAt) throw new Error("Traffic cache expiry must follow fetch time");
   return {
@@ -232,14 +438,17 @@ export function trafficCacheRecordToUpsert(id, record) {
     state: record.state,
     normalizedPayload: payload,
     fetchedAt,
-    coverageStartedAt: optionalDate(record.coverageStartedAt, "coverageStartedAt"),
-    coverageEndedAt: optionalDate(record.coverageEndedAt, "coverageEndedAt"),
+    coverageStartedAt,
+    coverageEndedAt,
     expiresAt
   };
 }
 
 export function leadTrafficEnrichmentRecordToCreate(id, runId, leadId, record) {
   if (!PUBLISHED_STATES.has(record.state)) throw new Error("Published traffic state is invalid");
+  if (record.source !== "dataforseo" && record.state === "partial") {
+    throw new Error("Published component state is invalid");
+  }
   const payload = normalizedPayload(
     record.source,
     record.state,
@@ -249,12 +458,39 @@ export function leadTrafficEnrichmentRecordToCreate(id, runId, leadId, record) {
   if (typeof record.contractVersion !== "string" || !record.contractVersion) {
     throw new Error("Published traffic contract version is invalid");
   }
+  const storageContract = SOURCE_STORAGE_CONTRACTS[record.source];
+  if (!storageContract || record.contractVersion !== storageContract.contractVersion) {
+    throw new Error("Published traffic source contract is invalid");
+  }
   if (record.source === "dataforseo" && payload &&
       payload.records.some(({ contractVersion }) => contractVersion !== record.contractVersion)) {
     throw new Error("Published traffic contract version does not match its payload");
   }
+  if (record.source === "dataforseo" && payload &&
+      ((record.state === "available") !== (payload.records.length === 10))) {
+    throw new Error("Published DataForSEO state does not match its scopes");
+  }
   if (record.source !== "dataforseo" && payload?.contractVersion !== record.contractVersion) {
     throw new Error("Published traffic contract version does not match its payload");
+  }
+  let timing;
+  if (record.source === "dataforseo" && payload) {
+    const fetchedAt = requiredDate(record.fetchedAt, "fetchedAt");
+    const newestPayloadTime = Math.max(...payload.records.map(({ fetchedAt: value }) =>
+      requiredDate(value, "payload.fetchedAt").getTime()));
+    if (fetchedAt.getTime() !== newestPayloadTime ||
+        record.coverageStartedAt != null || record.coverageEndedAt != null) {
+      throw new Error("Published DataForSEO timing does not match its payload");
+    }
+    timing = { fetchedAt, coverageStartedAt: null, coverageEndedAt: null };
+  } else if (payload) {
+    timing = assertStoredTiming(record.source, payload, record);
+  } else {
+    if (record.fetchedAt != null || record.coverageStartedAt != null ||
+        record.coverageEndedAt != null) {
+      throw new Error("Non-material published enrichment cannot contain timing");
+    }
+    timing = { fetchedAt: null, coverageStartedAt: null, coverageEndedAt: null };
   }
   return {
     id,
@@ -264,9 +500,7 @@ export function leadTrafficEnrichmentRecordToCreate(id, runId, leadId, record) {
     state: record.state,
     contractVersion: record.contractVersion,
     normalizedPayload: payload,
-    fetchedAt: optionalDate(record.fetchedAt, "fetchedAt"),
-    coverageStartedAt: optionalDate(record.coverageStartedAt, "coverageStartedAt"),
-    coverageEndedAt: optionalDate(record.coverageEndedAt, "coverageEndedAt")
+    ...timing
   };
 }
 
@@ -304,9 +538,39 @@ function dataForSeoMetrics(metrics) {
   };
 }
 
+function validatedPublishedRow(row, source) {
+  if (!row) return null;
+  try {
+    const payload = row.normalizedPayload;
+    const compatibilityTiming = source === "crux_rest" && payload
+      ? {
+          coverageStartedAt: payload.collectionPeriod?.firstDate,
+          coverageEndedAt: payload.collectionPeriod?.lastDate
+        }
+      : {};
+    return leadTrafficEnrichmentRecordToCreate(
+      "traffic_validation",
+      "run_validation",
+      "lead_validation",
+      {
+        ...compatibilityTiming,
+        ...row,
+        source,
+        contractVersion: Object.hasOwn(row, "contractVersion")
+          ? row.contractVersion
+          : SOURCE_STORAGE_CONTRACTS[source]?.contractVersion,
+        fetchedAt: Object.hasOwn(row, "fetchedAt") ? row.fetchedAt : payload?.fetchedAt
+      }
+    );
+  } catch {
+    return null;
+  }
+}
+
 function materializeDataForSeo(row) {
   const state = publicState(row?.state);
-  const parsed = PUBLISHED_PAYLOAD_SCHEMAS.dataforseo.safeParse(row?.normalizedPayload);
+  const validated = validatedPublishedRow(row, "dataforseo");
+  const parsed = PUBLISHED_PAYLOAD_SCHEMAS.dataforseo.safeParse(validated?.normalizedPayload);
   if (!parsed.success && ["available", "partial"].includes(state)) {
     return { value: { state: "unavailable" }, material: false };
   }
@@ -328,7 +592,7 @@ function materializeDataForSeo(row) {
       const record = countryRecords.get(country_code);
       return record ? [{ country_code, ...dataForSeoMetrics(record.metrics) }] : [];
     }),
-    ...(isoValue(row.fetchedAt) && { observed_at: isoValue(row.fetchedAt) })
+    ...(isoValue(validated.fetchedAt) && { observed_at: isoValue(validated.fetchedAt) })
   };
   return { value, material: Boolean(worldwideRecord || countryRecords.size) };
 }
@@ -355,7 +619,8 @@ function cruxRestMetrics(payload) {
 
 function materializeCruxComponent(row, source) {
   const state = publicState(row?.state);
-  const parsed = PUBLISHED_PAYLOAD_SCHEMAS[source].safeParse(row?.normalizedPayload);
+  const validated = validatedPublishedRow(row, source);
+  const parsed = PUBLISHED_PAYLOAD_SCHEMAS[source].safeParse(validated?.normalizedPayload);
   if (!parsed.success && state === "available") {
     return { value: { state: "unavailable" }, material: false };
   }
@@ -429,10 +694,15 @@ export function serializeTrafficEnrichment(rows, runSnapshot) {
     }
   }
   if (cruxEnabled) {
-    const rest = materializeCruxComponent(bySource.get("crux_rest"), "crux_rest");
-    const popularity = materializeCruxComponent(
+    let rest = materializeCruxComponent(bySource.get("crux_rest"), "crux_rest");
+    let popularity = materializeCruxComponent(
       bySource.get("crux_bigquery"), "crux_bigquery"
     );
+    if (rest.material && popularity.material &&
+        rest.value.origin !== popularity.value.origin) {
+      rest = { value: { state: "unavailable" }, material: false };
+      popularity = { value: { state: "unavailable" }, material: false };
+    }
     value.crux = {
       state: combinedCruxState(rest, popularity),
       origin_metrics: rest.value,

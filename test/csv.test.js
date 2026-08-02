@@ -96,6 +96,17 @@ test("backend CSV export rejects contradictory v2 score states", async () => {
 });
 
 function publicTraffic({ dataForSeo = false, crux = false, material = true } = {}) {
+  const metrics = (organic, paid) => ({
+    estimated_google_search_traffic: organic + paid,
+    organic_estimated_traffic: organic,
+    organic_keyword_count: 7,
+    paid_estimated_traffic: paid,
+    paid_keyword_count: paid === 0 ? 0 : 2,
+    featured_snippet_estimated_traffic: 3,
+    featured_snippet_keyword_count: 1,
+    local_pack_estimated_traffic: 4,
+    local_pack_keyword_count: 1
+  });
   return {
     version: "traffic-enrichment-public-v1",
     ...(dataForSeo && {
@@ -103,12 +114,9 @@ function publicTraffic({ dataForSeo = false, crux = false, material = true } = {
         state: material ? "partial" : "no_coverage",
         ...(material && {
           label: "Estimated Google search traffic",
-          worldwide: {
-            estimated_google_search_traffic: 12,
-            organic_estimated_traffic: 10.5,
-            paid_estimated_traffic: 1.5
-          },
-          markets: [{ country_code: "IN", estimated_google_search_traffic: 4 }],
+          target: "fixture.example",
+          worldwide: metrics(10.5, 1.5),
+          markets: [{ country_code: "IN", ...metrics(4, 0) }],
           observed_at: "2026-08-01T00:00:00.000Z"
         })
       }
@@ -129,12 +137,23 @@ function publicTraffic({ dataForSeo = false, crux = false, material = true } = {
     }),
     ...(material && {
       traffic_sources: [dataForSeo ? "dataforseo" : null, crux ? "crux" : null].filter(Boolean),
-      traffic_attributions: [{
-        text: "=provider attribution",
-        source_url: "https://example.com/source",
-        license_url: crux ? "https://creativecommons.org/licenses/by/4.0/" : undefined,
-        transformation: crux ? "Selected and renamed" : undefined
-      }]
+      traffic_attributions: [
+        ...(dataForSeo ? [{
+          source: "dataforseo",
+          name: "DataForSEO Labs",
+          text: "=provider attribution",
+          source_url: "https://example.com/source"
+        }] : []),
+        ...(crux ? [{
+          source: "crux",
+          name: "Chrome UX Report",
+          text: "CrUX attribution",
+          source_url: "https://example.com/crux",
+          license: "CC BY 4.0",
+          license_url: "https://creativecommons.org/licenses/by/4.0/",
+          transformation: "Selected and renamed"
+        }] : [])
+      ]
     })
   };
 }
@@ -174,10 +193,30 @@ test("backend traffic CSV flattens metrics and safely emits attribution", async 
     assert.equal(row.dataforseo_us_estimated_google_search_traffic, "");
     assert.equal(row.crux_largest_contentful_paint_p75_ms, "2400");
     assert.equal(row.traffic_sources, "dataforseo | crux");
-    assert.equal(row.traffic_attribution_text, "'=provider attribution");
+    assert.equal(row.traffic_attribution_text, "'=provider attribution | CrUX attribution");
     assert.match(row.traffic_license_urls, /creativecommons/u);
     assert.equal(values.includes("[object Object]"), false);
     assert.equal(values.some((value) => value.includes("traffic-enrichment-public-v1")), false);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("backend traffic CSV rejects malformed semantic material before attribution", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "traffic-csv-invalid-"));
+  const output = path.join(directory, "leads.csv");
+  try {
+    const invalid = publicTraffic({ crux: true });
+    invalid.crux.origin_metrics.observed_form_factor_fractions = {
+      desktop: 1,
+      phone: 1,
+      tablet: 1
+    };
+    await assert.rejects(writeOutput(output, [{
+      status: "rejected",
+      traffic_enrichment: invalid
+    }]), /Public traffic enrichment contract/u);
+    await assert.rejects(fs.access(output));
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
