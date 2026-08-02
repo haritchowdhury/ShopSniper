@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import {
+  leadTrafficEnrichmentRecordToCreate,
   leadRecordToCreate,
   serializeLead,
-  serializeRun
+  serializeRun,
+  trafficCacheRecordToUpsert
 } from "../src/api-serializer.js";
 import {
   assertPublicLeadScoreState,
@@ -69,6 +71,65 @@ test("run serialization fills the complete progress contract", () => {
   assert.equal(serialized.resultsAvailable, true);
   assert.equal(serialized.error, null);
   assert.equal(serialized.pipelineVersion, null);
+});
+
+test("traffic persistence accepts normalized contracts and rejects raw or secret-shaped envelopes", () => {
+  const value = {
+    contractVersion: "dataforseo-traffic-v1",
+    target: "fixture.example",
+    scope: "worldwide",
+    languageScope: "all_available",
+    metrics: {
+      organic: { etv: 1, count: 1 },
+      paid: { etv: 0, count: 0 },
+      featuredSnippet: { etv: 0, count: 0 },
+      localPack: { etv: 0, count: 0 }
+    },
+    fetchedAt: "2026-08-01T00:00:00.000Z"
+  };
+  const cache = trafficCacheRecordToUpsert("cache_fixture", {
+    source: "dataforseo",
+    identity: "fixture.example",
+    scopeKey: "worldwide",
+    metricSetKey: "featured_snippet,local_pack,organic,paid",
+    contractVersion: "dataforseo-traffic-v1",
+    state: "available",
+    normalizedPayload: value,
+    fetchedAt: value.fetchedAt,
+    expiresAt: "2026-08-31T00:00:00.000Z"
+  });
+  assert.equal(cache.normalizedPayload.metrics.organic.etv, 1);
+  assert.throws(() => trafficCacheRecordToUpsert("cache_raw", {
+    ...cache,
+    fetchedAt: value.fetchedAt,
+    expiresAt: "2026-08-31T00:00:00.000Z",
+    normalizedPayload: { ...value, rawBody: { authorization: "fixture" } }
+  }), /normalized contract/u);
+  assert.throws(() => trafficCacheRecordToUpsert("cache_error", {
+    ...cache,
+    state: "no_coverage",
+    normalizedPayload: value,
+    fetchedAt: value.fetchedAt,
+    expiresAt: "2026-08-02T00:00:00.000Z"
+  }), /cannot contain a payload/u);
+
+  const published = leadTrafficEnrichmentRecordToCreate(
+    "traffic_fixture",
+    "run_fixture",
+    "lead_fixture",
+    {
+      source: "dataforseo",
+      state: "partial",
+      contractVersion: "dataforseo-traffic-v1",
+      normalizedPayload: { records: [value] },
+      fetchedAt: value.fetchedAt
+    }
+  );
+  assert.equal(published.normalizedPayload.records.length, 1);
+  assert.throws(() => leadTrafficEnrichmentRecordToCreate(
+    "traffic_bad", "run_fixture", "lead_fixture",
+    { ...published, contractVersion: "wrong-version" }
+  ), /does not match/u);
 });
 
 test("v2 lead evidence round-trips while unversioned rows remain explicitly legacy", () => {

@@ -95,6 +95,10 @@ function failureClient(prisma, stage) {
           deleteMany: wrap("lead", "deleteMany"),
           createMany: wrap("lead", "createMany")
         },
+        leadTrafficEnrichment: {
+          deleteMany: wrap("leadTrafficEnrichment", "deleteMany"),
+          createMany: wrap("leadTrafficEnrichment", "createMany")
+        },
         queryAudit: {
           deleteMany: wrap("queryAudit", "deleteMany"),
           createMany: wrap("queryAudit", "createMany")

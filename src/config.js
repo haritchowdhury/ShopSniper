@@ -102,6 +102,26 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     ),
     dataForSeoLogin: process.env.DATAFORSEO_LOGIN || "",
     dataForSeoPassword: process.env.DATAFORSEO_PASSWORD || "",
+    dataForSeoCacheFreshnessMs: integer(
+      "DATAFORSEO_CACHE_FRESHNESS_MS",
+      2592000000,
+      { min: 86400000, max: 7776000000 }
+    ),
+    dataForSeoMaxCostPerRunUsd: number(
+      "DATAFORSEO_MAX_COST_PER_RUN_USD",
+      2,
+      { min: 0.01, max: 1000 }
+    ),
+    trafficNoCoverageCacheFreshnessMs: integer(
+      "TRAFFIC_NO_COVERAGE_CACHE_FRESHNESS_MS",
+      86400000,
+      { min: 60000, max: 604800000 }
+    ),
+    trafficPaidRequestStaleMs: integer(
+      "TRAFFIC_PAID_REQUEST_STALE_MS",
+      900000,
+      { min: 60000, max: 86400000 }
+    ),
     cruxEnrichmentEnabled: strictBoolean("ENABLE_CRUX_ENRICHMENT", false),
     cruxApiKey: process.env.CRUX_API_KEY || "",
     cruxBigQueryProjectId: process.env.CRUX_BIGQUERY_PROJECT_ID || "",

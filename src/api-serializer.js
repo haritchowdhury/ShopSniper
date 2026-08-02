@@ -1,4 +1,5 @@
 import { createInitialProgress } from "./status.js";
+import { z } from "zod";
 import {
   assertLeadScoreState,
   LeadStateInvariantError
@@ -48,6 +49,206 @@ const JSON_FIELDS = {
   discovery_occurrences: "discoveryOccurrences",
   matched_categories: "matchedCategories"
 };
+
+const finiteNonNegative = z.number().finite().nonnegative();
+const isoTimestamp = z.string().datetime({ offset: true });
+const isoDate = z.string().date();
+const fraction = z.number().finite().min(0).max(1);
+const dataForSeoMetric = z.object({
+  etv: finiteNonNegative,
+  count: z.number().int().nonnegative()
+}).strict();
+const dataForSeoPayload = z.object({
+  contractVersion: z.literal("dataforseo-traffic-v1"),
+  target: z.string().min(1),
+  scope: z.union([
+    z.literal("worldwide"),
+    z.object({
+      countryIsoCode: z.string().regex(/^[A-Z]{2}$/u),
+      locationCode: z.number().int().positive()
+    }).strict()
+  ]),
+  languageScope: z.literal("all_available"),
+  metrics: z.object({
+    organic: dataForSeoMetric,
+    paid: dataForSeoMetric,
+    featuredSnippet: dataForSeoMetric,
+    localPack: dataForSeoMetric
+  }).strict(),
+  fetchedAt: isoTimestamp
+}).strict();
+const cruxRestPayload = z.object({
+  contractVersion: z.literal("crux-origin-metrics-v1"),
+  origin: z.string().url(),
+  coverage: z.literal("available"),
+  metrics: z.object({
+    largestContentfulPaintP75Ms: finiteNonNegative.optional(),
+    interactionToNextPaintP75Ms: finiteNonNegative.optional(),
+    cumulativeLayoutShiftP75: z.string().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/u).optional(),
+    firstContentfulPaintP75Ms: finiteNonNegative.optional(),
+    timeToFirstByteP75Ms: finiteNonNegative.optional()
+  }).strict(),
+  formFactors: z.object({
+    desktop: fraction,
+    phone: fraction,
+    tablet: fraction
+  }).strict().optional(),
+  collectionPeriod: z.object({ firstDate: isoDate, lastDate: isoDate }).strict(),
+  fetchedAt: isoTimestamp
+}).strict();
+const cruxPopularityPayload = z.object({
+  contractVersion: z.literal("crux-popularity-v1"),
+  origin: z.string().url(),
+  coverage: z.literal("available"),
+  datasetMonth: z.string().regex(/^20\d{4}$/u),
+  popularityRank: z.number().int().positive(),
+  deviceFractions: z.object({
+    phone: fraction,
+    desktop: fraction,
+    tablet: fraction
+  }).strict(),
+  fetchedAt: isoTimestamp
+}).strict();
+const NORMALIZED_PAYLOAD_SCHEMAS = Object.freeze({
+  dataforseo: dataForSeoPayload,
+  crux_rest: cruxRestPayload,
+  crux_bigquery: cruxPopularityPayload
+});
+const PUBLISHED_PAYLOAD_SCHEMAS = Object.freeze({
+  dataforseo: z.object({
+    records: z.array(dataForSeoPayload).min(1).max(10)
+  }).strict(),
+  crux_rest: cruxRestPayload,
+  crux_bigquery: cruxPopularityPayload
+});
+const CACHE_STATES = new Set(["available", "no_coverage"]);
+const PUBLISHED_STATES = new Set([
+  "available", "partial", "no_coverage", "unavailable", "ambiguous", "contract_mismatch"
+]);
+const SOURCE_STORAGE_CONTRACTS = Object.freeze({
+  dataforseo: {
+    contractVersion: "dataforseo-traffic-v1",
+    metricSetKey: "featured_snippet,local_pack,organic,paid"
+  },
+  crux_rest: {
+    contractVersion: "crux-origin-metrics-v1",
+    metricSetKey: "cumulative_layout_shift,experimental_time_to_first_byte,first_contentful_paint,form_factors,interaction_to_next_paint,largest_contentful_paint"
+  },
+  crux_bigquery: {
+    contractVersion: "crux-popularity-v1",
+    metricSetKey: "desktop_density,phone_density,popularity_rank,tablet_density"
+  }
+});
+
+function requiredDate(value, field) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error(`${field} must be a valid timestamp`);
+  return date;
+}
+
+function optionalDate(value, field) {
+  return value == null ? null : requiredDate(value, field);
+}
+
+function normalizedPayload(source, state, payload, schemas = NORMALIZED_PAYLOAD_SCHEMAS) {
+  const schema = schemas[source];
+  if (!schema) throw new Error("Traffic enrichment source is invalid");
+  if (state !== "available" && state !== "partial") {
+    if (payload != null) throw new Error("Non-material enrichment state cannot contain a payload");
+    return undefined;
+  }
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) throw new Error("Traffic enrichment payload is not a normalized contract");
+  return parsed.data;
+}
+
+export function trafficCacheRecordToUpsert(id, record) {
+  if (!CACHE_STATES.has(record.state)) throw new Error("Traffic cache state is invalid");
+  const payload = normalizedPayload(record.source, record.state, record.normalizedPayload);
+  if (typeof record.identity !== "string" || !record.identity ||
+      typeof record.scopeKey !== "string" || !record.scopeKey ||
+      typeof record.metricSetKey !== "string" || !record.metricSetKey ||
+      typeof record.contractVersion !== "string" || !record.contractVersion) {
+    throw new Error("Traffic cache identity is invalid");
+  }
+  const storageContract = SOURCE_STORAGE_CONTRACTS[record.source];
+  if (!storageContract || record.contractVersion !== storageContract.contractVersion ||
+      record.metricSetKey !== storageContract.metricSetKey) {
+    throw new Error("Traffic cache source contract is invalid");
+  }
+  if (payload && payload.contractVersion !== record.contractVersion) {
+    throw new Error("Traffic cache contract version does not match its payload");
+  }
+  if (record.source === "dataforseo") {
+    const expectedScope = !payload
+      ? record.scopeKey
+      : payload.scope === "worldwide"
+        ? "worldwide"
+        : `country:${payload.scope.countryIsoCode}:${payload.scope.locationCode}`;
+    if (payload && payload.target !== record.identity || record.scopeKey !== expectedScope ||
+        !/^(?:worldwide|country:[A-Z]{2}:[1-9]\d*)$/u.test(record.scopeKey)) {
+      throw new Error("Traffic cache DataForSEO identity or scope does not match its payload");
+    }
+  }
+  if (record.source === "crux_rest" &&
+      (record.scopeKey !== "current" || (payload && payload.origin !== record.identity))) {
+    throw new Error("Traffic cache CrUX REST identity or scope does not match its payload");
+  }
+  if (record.source === "crux_bigquery" &&
+      (!/^month:20\d{4}$/u.test(record.scopeKey) ||
+       (payload && (payload.origin !== record.identity || record.scopeKey !== `month:${payload.datasetMonth}`)))) {
+    throw new Error("Traffic cache CrUX BigQuery identity or scope does not match its payload");
+  }
+  const fetchedAt = requiredDate(record.fetchedAt, "fetchedAt");
+  const expiresAt = requiredDate(record.expiresAt, "expiresAt");
+  if (expiresAt <= fetchedAt) throw new Error("Traffic cache expiry must follow fetch time");
+  return {
+    id,
+    source: record.source,
+    identity: record.identity,
+    scopeKey: record.scopeKey,
+    metricSetKey: record.metricSetKey,
+    contractVersion: record.contractVersion,
+    state: record.state,
+    normalizedPayload: payload,
+    fetchedAt,
+    coverageStartedAt: optionalDate(record.coverageStartedAt, "coverageStartedAt"),
+    coverageEndedAt: optionalDate(record.coverageEndedAt, "coverageEndedAt"),
+    expiresAt
+  };
+}
+
+export function leadTrafficEnrichmentRecordToCreate(id, runId, leadId, record) {
+  if (!PUBLISHED_STATES.has(record.state)) throw new Error("Published traffic state is invalid");
+  const payload = normalizedPayload(
+    record.source,
+    record.state,
+    record.normalizedPayload,
+    PUBLISHED_PAYLOAD_SCHEMAS
+  );
+  if (typeof record.contractVersion !== "string" || !record.contractVersion) {
+    throw new Error("Published traffic contract version is invalid");
+  }
+  if (record.source === "dataforseo" && payload &&
+      payload.records.some(({ contractVersion }) => contractVersion !== record.contractVersion)) {
+    throw new Error("Published traffic contract version does not match its payload");
+  }
+  if (record.source !== "dataforseo" && payload?.contractVersion !== record.contractVersion) {
+    throw new Error("Published traffic contract version does not match its payload");
+  }
+  return {
+    id,
+    runId,
+    leadId,
+    source: record.source,
+    state: record.state,
+    contractVersion: record.contractVersion,
+    normalizedPayload: payload,
+    fetchedAt: optionalDate(record.fetchedAt, "fetchedAt"),
+    coverageStartedAt: optionalDate(record.coverageStartedAt, "coverageStartedAt"),
+    coverageEndedAt: optionalDate(record.coverageEndedAt, "coverageEndedAt")
+  };
+}
 
 function nullableText(value) {
   return typeof value === "string" && value.trim() ? value : null;

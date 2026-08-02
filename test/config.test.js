@@ -45,12 +45,20 @@ test("DataForSEO enrichment is disabled by default and does not require credenti
   withEnvironment({
     ENABLE_DATAFORSEO_ENRICHMENT: null,
     DATAFORSEO_LOGIN: null,
-    DATAFORSEO_PASSWORD: null
+    DATAFORSEO_PASSWORD: null,
+    DATAFORSEO_CACHE_FRESHNESS_MS: null,
+    DATAFORSEO_MAX_COST_PER_RUN_USD: null,
+    TRAFFIC_NO_COVERAGE_CACHE_FRESHNESS_MS: null,
+    TRAFFIC_PAID_REQUEST_STALE_MS: null
   }, () => {
     const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
     assert.equal(config.dataForSeoEnrichmentEnabled, false);
     assert.equal(config.dataForSeoLogin, "");
     assert.equal(config.dataForSeoPassword, "");
+    assert.equal(config.dataForSeoCacheFreshnessMs, 2592000000);
+    assert.equal(config.dataForSeoMaxCostPerRunUsd, 2);
+    assert.equal(config.trafficNoCoverageCacheFreshnessMs, 86400000);
+    assert.equal(config.trafficPaidRequestStaleMs, 900000);
     assert.doesNotThrow(() => assertDataForSeoConfig(config));
   });
 });
@@ -87,6 +95,21 @@ test("DataForSEO uses strict booleans and enabled-only credential validation", (
     const config = loadConfig({ cwd: "/tmp/email-scraper-config-fixture" });
     assert.equal(config.dataForSeoEnrichmentEnabled, true);
     assert.doesNotThrow(() => assertDataForSeoConfig(config));
+  });
+});
+
+test("traffic persistence safety settings reject out-of-range values", () => {
+  withEnvironment({ DATAFORSEO_CACHE_FRESHNESS_MS: "1" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
+  });
+  withEnvironment({ DATAFORSEO_MAX_COST_PER_RUN_USD: "0" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
+  });
+  withEnvironment({ TRAFFIC_NO_COVERAGE_CACHE_FRESHNESS_MS: "0" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
+  });
+  withEnvironment({ TRAFFIC_PAID_REQUEST_STALE_MS: "1000" }, () => {
+    assert.throws(() => loadConfig({ cwd: "/tmp/email-scraper-config-fixture" }));
   });
 });
 

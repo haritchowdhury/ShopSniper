@@ -9,9 +9,29 @@ import {
 } from "./api-errors.js";
 import {
   diagnosticRecordToCreate,
+  leadTrafficEnrichmentRecordToCreate,
   leadRecordToCreate,
-  queryAuditRecordToCreate
+  queryAuditRecordToCreate,
+  trafficCacheRecordToUpsert
 } from "./api-serializer.js";
+import { loadConfig } from "./config.js";
+import {
+  DATAFORSEO_COUNTRY_LOCATION_CODES,
+  DATAFORSEO_ITEM_TYPES,
+  DATAFORSEO_RESPONSE_CONTRACT_VERSION,
+  DATAFORSEO_TARGET_LIMIT,
+  DATAFORSEO_TRAFFIC_CONTRACT_VERSION
+} from "./enrichment/dataforseo/request.js";
+import {
+  CRUX_API_RESPONSE_CONTRACT_VERSION,
+  CRUX_METRICS,
+  CRUX_ORIGIN_METRICS_CONTRACT_VERSION
+} from "./enrichment/crux/api-request.js";
+import {
+  CRUX_BIGQUERY_ORIGIN_LIMIT,
+  CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION,
+  CRUX_POPULARITY_CONTRACT_VERSION
+} from "./enrichment/crux/bigquery-request.js";
 import { getPrismaClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
 import {
@@ -65,11 +85,20 @@ function childId(prefix, runIdentifier, identity) {
   return `${prefix}_${opaque}`;
 }
 
+export function stableLeadId(runIdentifier, record, index) {
+  const identity = record.identity_evidence?.stableHostname || record.resolved_domain;
+  if (!identity && !Number.isInteger(index)) {
+    throw new Error("A stable lead identity or deterministic index is required");
+  }
+  return childId("lead", runIdentifier, identity || index);
+}
+
 function isUniqueConstraint(error) {
   return error?.code === "P2002" || error?.cause?.code === "23505";
 }
 
 function canonicalJson(value) {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.keys(value).sort().map((key) =>
@@ -77,6 +106,108 @@ function canonicalJson(value) {
     ).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function metricSetKey(values) {
+  return [...values].sort().join(",");
+}
+
+function dataForSeoScopes() {
+  return [
+    "worldwide",
+    ...Object.entries(DATAFORSEO_COUNTRY_LOCATION_CODES).map(
+      ([countryIsoCode, locationCode]) => ({ countryIsoCode, locationCode })
+    )
+  ];
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object") return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.isFrozen(value) ? value : Object.freeze(value);
+}
+
+export function trafficEnrichmentConfigSnapshot(config = {}) {
+  const noCoverageFreshnessMs = config.trafficNoCoverageCacheFreshnessMs ?? 86400000;
+  return deepFreeze({
+    version: "traffic-enrichment-run-v1",
+    dataForSeo: Object.freeze({
+      enabled: config.dataForSeoEnrichmentEnabled === true,
+      scopes: Object.freeze(dataForSeoScopes()),
+      contractVersion: DATAFORSEO_TRAFFIC_CONTRACT_VERSION,
+      responseContractVersion: DATAFORSEO_RESPONSE_CONTRACT_VERSION,
+      metricSet: Object.freeze([...DATAFORSEO_ITEM_TYPES]),
+      metricSetKey: metricSetKey(DATAFORSEO_ITEM_TYPES),
+      targetLimit: DATAFORSEO_TARGET_LIMIT,
+      cacheFreshnessMs: config.dataForSeoCacheFreshnessMs ?? 2592000000,
+      noCoverageFreshnessMs,
+      maxCostPerRunUsd: config.dataForSeoMaxCostPerRunUsd ?? 2,
+      paidRequestStaleMs: config.trafficPaidRequestStaleMs ?? 900000
+    }),
+    crux: Object.freeze({
+      enabled: config.cruxEnrichmentEnabled === true,
+      rest: Object.freeze({
+        contractVersion: CRUX_ORIGIN_METRICS_CONTRACT_VERSION,
+        responseContractVersion: CRUX_API_RESPONSE_CONTRACT_VERSION,
+        metricSet: Object.freeze([...CRUX_METRICS]),
+        metricSetKey: metricSetKey(CRUX_METRICS),
+        concurrency: config.cruxRestConcurrency ?? 2,
+        cacheFreshnessMs: config.cruxRestCacheFreshnessMs ?? 86400000,
+        noCoverageFreshnessMs
+      }),
+      bigQuery: Object.freeze({
+        contractVersion: CRUX_POPULARITY_CONTRACT_VERSION,
+        responseContractVersion: CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION,
+        metricSet: Object.freeze([
+          "popularity_rank", "phone_density", "desktop_density", "tablet_density"
+        ]),
+        metricSetKey: metricSetKey([
+          "popularity_rank", "phone_density", "desktop_density", "tablet_density"
+        ]),
+        originLimit: CRUX_BIGQUERY_ORIGIN_LIMIT,
+        location: config.cruxBigQueryLocation || "US",
+        maxBytesBilled: config.cruxBigQueryMaxBytesBilled ?? 10000000000
+      })
+    })
+  });
+}
+
+const SAFE_LEDGER_FAILURES = Object.freeze({
+  DATAFORSEO_REQUEST_FAILED: "The paid request failed with a known outcome.",
+  DATAFORSEO_PROVIDER_REJECTED: "The provider rejected the paid request.",
+  DATAFORSEO_CONTRACT_MISMATCH: "The paid response did not match the accepted contract."
+});
+
+function safeLedgerError(code) {
+  const message = SAFE_LEDGER_FAILURES[code];
+  if (!message) throw new Error("A recognized safe ledger error code is required");
+  return { code, message };
+}
+
+function requirePaidDescriptor(descriptor) {
+  if (!descriptor || !/^[a-f0-9]{64}$/u.test(descriptor.requestFingerprint || "")) {
+    throw new Error("DataForSEO request fingerprint is invalid");
+  }
+  if (!Number.isInteger(descriptor.targetCount) || descriptor.targetCount < 1 ||
+      descriptor.targetCount > DATAFORSEO_TARGET_LIMIT) {
+    throw new Error("DataForSEO target count is invalid");
+  }
+  if (typeof descriptor.scopeKey !== "string" || !descriptor.scopeKey || descriptor.scopeKey.length > 128) {
+    throw new Error("DataForSEO scope key is invalid");
+  }
+  if (!/^(?:worldwide|country:[A-Z]{2}:[1-9]\d*)$/u.test(descriptor.scopeKey)) {
+    throw new Error("DataForSEO scope key is invalid");
+  }
+  return descriptor;
+}
+
+function cacheId(record) {
+  return childId("traffic_cache", record.source, canonicalJson({
+    identity: record.identity,
+    scopeKey: record.scopeKey,
+    metricSetKey: record.metricSetKey,
+    contractVersion: record.contractVersion
+  }));
 }
 
 function resultFingerprint(payload) {
@@ -123,8 +254,9 @@ function resultOrder(filters) {
 }
 
 export class PrismaRunRepository {
-  constructor(prisma = getPrismaClient()) {
+  constructor(prisma = getPrismaClient(), runtimeConfig = {}) {
     this.prisma = prisma;
+    this.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot(runtimeConfig);
   }
 
   async health() {
@@ -144,7 +276,8 @@ export class PrismaRunRepository {
         shopTypesTotal: normalizedShopTypes.length
       },
       pipelineVersion: 2,
-      scoringVersion: 2
+      scoringVersion: 2,
+      trafficEnrichmentConfig: this.trafficEnrichmentConfig
     };
   }
 
@@ -659,8 +792,246 @@ export class PrismaRunRepository {
     return { ...lease, expiresAt };
   }
 
+  async readFreshTrafficCache(runIdentifier, lease, keys, now = new Date()) {
+    if (!Array.isArray(keys) || keys.length === 0) return [];
+    const OR = keys.map((key) => {
+      for (const field of ["source", "identity", "scopeKey", "metricSetKey", "contractVersion"]) {
+        if (typeof key?.[field] !== "string" || !key[field]) {
+          throw new Error("Traffic cache lookup key is invalid");
+        }
+      }
+      return {
+        source: key.source,
+        identity: key.identity,
+        scopeKey: key.scopeKey,
+        metricSetKey: key.metricSetKey,
+        contractVersion: key.contractVersion
+      };
+    });
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      return transaction.trafficEnrichmentCache.findMany({
+        where: { expiresAt: { gt: now }, OR }
+      });
+    });
+  }
+
+  async planDataForSeoRequest(
+    runIdentifier,
+    lease,
+    descriptor,
+    now = new Date(),
+    retryAfterConflict = true
+  ) {
+    const request = requirePaidDescriptor(descriptor);
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        requireLeaseMutation(await transaction.run.updateMany({
+          where: activeLeaseWhere(runIdentifier, lease, now),
+          data: { lastHeartbeatAt: now }
+        }));
+        const existing = await transaction.dataForSeoRequestLedger.findUnique({
+          where: { requestFingerprint: request.requestFingerprint }
+        });
+        if (existing &&
+            (existing.targetCount !== request.targetCount || existing.scopeKey !== request.scopeKey)) {
+          throw new Error("DataForSEO request fingerprint metadata does not match");
+        }
+        if (existing && existing.state !== "planned") {
+          return { outcome: existing.state, ledger: existing };
+        }
+        const data = {
+          runId: runIdentifier,
+          targetCount: request.targetCount,
+          scopeKey: request.scopeKey,
+          state: "planned",
+          plannedAt: now,
+          safeErrorCode: null,
+          safeErrorMessage: null,
+          providerCostUsd: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseAttempt: null,
+          claimedAt: null,
+          completedAt: null
+        };
+        const ledger = existing
+          ? await transaction.dataForSeoRequestLedger.update({
+              where: { requestFingerprint: request.requestFingerprint }, data
+            })
+          : await transaction.dataForSeoRequestLedger.create({
+              data: { requestFingerprint: request.requestFingerprint, ...data }
+            });
+        return { outcome: "planned", ledger };
+      });
+    } catch (error) {
+      if (retryAfterConflict && isUniqueConstraint(error)) {
+        return this.planDataForSeoRequest(
+          runIdentifier, lease, descriptor, now, false
+        );
+      }
+      throw error;
+    }
+  }
+
+  async claimDataForSeoRequest(runIdentifier, lease, requestFingerprint, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const claimed = await transaction.dataForSeoRequestLedger.updateMany({
+        where: { requestFingerprint, runId: runIdentifier, state: "planned" },
+        data: {
+          state: "in_flight",
+          attempt: { increment: 1 },
+          leaseOwner: lease.owner,
+          leaseToken: lease.token,
+          leaseAttempt: lease.attempt ?? null,
+          claimedAt: now
+        }
+      });
+      const ledger = await transaction.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint }
+      });
+      if (!ledger) throw new Error("DataForSEO request was not planned");
+      return {
+        outcome: claimed.count === 1 ? "in_flight" : ledger.state,
+        networkAllowed: claimed.count === 1,
+        ledger
+      };
+    });
+  }
+
+  async markDataForSeoRequestSucceeded(
+    runIdentifier,
+    lease,
+    requestFingerprint,
+    { providerCostUsd, cacheRows },
+    now = new Date()
+  ) {
+    if (!Number.isFinite(providerCostUsd) || providerCostUsd < 0) {
+      throw new Error("DataForSEO provider cost is invalid");
+    }
+    if (!Array.isArray(cacheRows)) throw new Error("DataForSEO cache rows are required");
+    if (cacheRows.some(({ source }) => source !== "dataforseo")) {
+      throw new Error("A DataForSEO ledger can commit only DataForSEO cache rows");
+    }
+    const rows = cacheRows.map((record) => trafficCacheRecordToUpsert(cacheId(record), record));
+    const identities = new Set(rows.map((row) => canonicalJson([
+      row.source, row.identity, row.scopeKey, row.metricSetKey, row.contractVersion
+    ])));
+    if (identities.size !== rows.length) throw new Error("Traffic cache rows contain duplicates");
+
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const succeeded = await transaction.dataForSeoRequestLedger.updateMany({
+        where: {
+          requestFingerprint,
+          runId: runIdentifier,
+          state: "in_flight",
+          leaseOwner: lease.owner,
+          leaseToken: lease.token
+        },
+        data: {
+          state: "succeeded",
+          providerCostUsd,
+          completedAt: now,
+          safeErrorCode: null,
+          safeErrorMessage: null
+        }
+      });
+      requireLeaseMutation(succeeded);
+      for (const row of rows) {
+        const unique = {
+          source: row.source,
+          identity: row.identity,
+          scopeKey: row.scopeKey,
+          metricSetKey: row.metricSetKey,
+          contractVersion: row.contractVersion
+        };
+        const update = { ...row };
+        delete update.id;
+        await transaction.trafficEnrichmentCache.upsert({
+          where: { source_identity_scopeKey_metricSetKey_contractVersion: unique },
+          create: row,
+          update
+        });
+      }
+      return transaction.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint }
+      });
+    });
+  }
+
+  async markDataForSeoRequestFailed(
+    runIdentifier,
+    lease,
+    requestFingerprint,
+    { code },
+    now = new Date()
+  ) {
+    const safeError = safeLedgerError(code);
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const failed = await transaction.dataForSeoRequestLedger.updateMany({
+        where: {
+          requestFingerprint,
+          runId: runIdentifier,
+          state: "in_flight",
+          leaseOwner: lease.owner,
+          leaseToken: lease.token
+        },
+        data: {
+          state: "failed",
+          safeErrorCode: safeError.code,
+          safeErrorMessage: safeError.message,
+          completedAt: now
+        }
+      });
+      requireLeaseMutation(failed);
+      return transaction.dataForSeoRequestLedger.findUnique({ where: { requestFingerprint } });
+    });
+  }
+
+  async markStaleDataForSeoRequestsAmbiguous(now = new Date()) {
+    const cutoff = new Date(
+      now.getTime() - this.trafficEnrichmentConfig.dataForSeo.paidRequestStaleMs
+    );
+    return this.prisma.dataForSeoRequestLedger.updateMany({
+      where: {
+        state: "in_flight",
+        claimedAt: { lte: cutoff },
+        run: {
+          OR: [
+            { state: { not: "running" } },
+            { leaseExpiresAt: { lte: now } },
+            { leaseExpiresAt: null }
+          ]
+        }
+      },
+      data: {
+        state: "ambiguous",
+        safeErrorCode: "PAID_REQUEST_OUTCOME_AMBIGUOUS",
+        safeErrorMessage: "The paid request outcome could not be confirmed safely.",
+        completedAt: now
+      }
+    });
+  }
+
   async saveCompletedResults(runIdentifier, lease, {
     leads,
+    trafficEnrichments = [],
+    trafficEnrichmentSummary = null,
     queryAudits = [],
     diagnostics = [],
     summary,
@@ -670,14 +1041,28 @@ export class PrismaRunRepository {
     const leadRows = leads.map((record, index) =>
       leadRecordToCreate(
         runIdentifier,
-        childId(
-          "lead",
-          runIdentifier,
-          record.identity_evidence?.stableHostname || record.resolved_domain || index
-        ),
+        stableLeadId(runIdentifier, record, index),
         record
       )
     );
+    const leadIds = new Set(leadRows.map(({ id }) => id));
+    const enrichmentRows = trafficEnrichments.map((record) => {
+      if (!leadIds.has(record.leadId)) {
+        throw new Error("Traffic enrichment references an unknown lead");
+      }
+      return leadTrafficEnrichmentRecordToCreate(
+        childId("lead_traffic", runIdentifier, `${record.leadId}:${record.source}`),
+        runIdentifier,
+        record.leadId,
+        record
+      );
+    });
+    const enrichmentIdentities = new Set(
+      enrichmentRows.map(({ leadId, source }) => `${leadId}\u0000${source}`)
+    );
+    if (enrichmentIdentities.size !== enrichmentRows.length) {
+      throw new Error("Traffic enrichment contains duplicate lead/source rows");
+    }
     const auditRows = queryAudits.map((record, index) =>
       queryAuditRecordToCreate(runIdentifier, childId("audit", runIdentifier, index), index, record)
     );
@@ -691,6 +1076,8 @@ export class PrismaRunRepository {
       leads: leadRows,
       queryAudits: auditRows,
       diagnostics: diagnosticRows,
+      trafficEnrichments: enrichmentRows,
+      trafficEnrichmentSummary,
       summary,
       pipelineVersion,
       scoringVersion
@@ -706,6 +1093,9 @@ export class PrismaRunRepository {
           completedAt: now,
           resultsAvailable: true,
           leadSummary: summary,
+          ...(trafficEnrichmentSummary != null
+            ? { trafficEnrichmentSummary }
+            : {}),
           pipelineVersion,
           scoringVersion,
           resultFingerprint: fingerprint,
@@ -728,6 +1118,7 @@ export class PrismaRunRepository {
         }
         throw new RunTerminalConflictError();
       }
+      await transaction.leadTrafficEnrichment.deleteMany({ where: { runId: runIdentifier } });
       await transaction.lead.deleteMany({ where: { runId: runIdentifier } });
       if (auditRows.length) {
         await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
@@ -735,6 +1126,9 @@ export class PrismaRunRepository {
       await transaction.runDiagnostic.deleteMany({ where: { runId: runIdentifier } });
       if (leadRows.length) {
         await transaction.lead.createMany({ data: leadRows });
+      }
+      if (enrichmentRows.length) {
+        await transaction.leadTrafficEnrichment.createMany({ data: enrichmentRows });
       }
       if (auditRows.length) await transaction.queryAudit.createMany({ data: auditRows });
       if (diagnosticRows.length) {
@@ -787,6 +1181,13 @@ export class PrismaRunRepository {
     return { totalItems, items };
   }
 
+  async getTrafficEnrichmentsForRun(runIdentifier, ownerId) {
+    return this.prisma.leadTrafficEnrichment.findMany({
+      where: { runId: runIdentifier, lead: { run: { ownerId } } },
+      orderBy: [{ leadId: "asc" }, { source: "asc" }]
+    });
+  }
+
   async getQueryAuditsPage(runIdentifier, ownerId, { page, pageSize }) {
     const where = { runId: runIdentifier, run: { ownerId } };
     const skip = (page - 1) * pageSize;
@@ -830,6 +1231,6 @@ export class PrismaRunRepository {
   }
 }
 
-export function createPrismaRunRepository(prisma) {
-  return new PrismaRunRepository(prisma);
+export function createPrismaRunRepository(prisma, config = loadConfig()) {
+  return new PrismaRunRepository(prisma, config);
 }

@@ -41,6 +41,34 @@ enum LeadStatus {
   failed
 }
 
+enum TrafficEnrichmentSource {
+  dataforseo
+  crux_rest
+  crux_bigquery
+}
+
+enum TrafficEnrichmentCacheState {
+  available
+  no_coverage
+}
+
+enum LeadTrafficEnrichmentState {
+  available
+  partial
+  no_coverage
+  unavailable
+  ambiguous
+  contract_mismatch
+}
+
+enum DataForSeoRequestState {
+  planned
+  in_flight
+  succeeded
+  failed
+  ambiguous
+}
+
 model Run {
   id                     String          @id
   ownerId                String?
@@ -59,6 +87,8 @@ model Run {
   pipelineVersion        Int?
   scoringVersion         Int?
   resultFingerprint      String?
+  trafficEnrichmentConfig Json?
+  trafficEnrichmentSummary Json?
   queryRevision          Int             @default(0)
   confirmedQueryRevision Int?
   queryPlanReadyAt       DateTime?
@@ -73,6 +103,7 @@ model Run {
   queryAudits            QueryAudit[]
   diagnostics            RunDiagnostic[]
   queries                RunQuery[]
+  dataForSeoRequests     DataForSeoRequestLedger[]
 
   @@index([state])
   @@index([state, leaseExpiresAt])
@@ -160,12 +191,77 @@ model Lead {
   status                LeadStatus
   rejectionReason       String?
   error                 String?
+  trafficEnrichments    LeadTrafficEnrichment[]
 
+  @@unique([id, runId])
   @@index([runId, status])
   @@index([runId, leadScore])
   @@index([runId, storeName])
   @@index([runId, shopType])
   @@index([runId, googleRank])
+}
+
+model TrafficEnrichmentCache {
+  id                String                      @id
+  source            TrafficEnrichmentSource
+  identity          String
+  scopeKey          String
+  metricSetKey      String
+  contractVersion   String
+  state             TrafficEnrichmentCacheState
+  normalizedPayload Json?
+  fetchedAt         DateTime
+  coverageStartedAt DateTime?
+  coverageEndedAt   DateTime?
+  expiresAt         DateTime
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  @@unique([source, identity, scopeKey, metricSetKey, contractVersion])
+  @@index([expiresAt])
+  @@index([source, identity, scopeKey])
+}
+
+model LeadTrafficEnrichment {
+  id                String                     @id
+  runId             String
+  leadId            String
+  lead              Lead                       @relation(fields: [leadId, runId], references: [id, runId], onDelete: Cascade)
+  source            TrafficEnrichmentSource
+  state             LeadTrafficEnrichmentState
+  contractVersion   String
+  normalizedPayload Json?
+  fetchedAt         DateTime?
+  coverageStartedAt DateTime?
+  coverageEndedAt   DateTime?
+  createdAt         DateTime                   @default(now())
+
+  @@unique([leadId, source])
+  @@index([runId, source])
+}
+
+model DataForSeoRequestLedger {
+  requestFingerprint String                 @id
+  runId              String
+  run                Run                    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  targetCount        Int
+  scopeKey           String
+  state              DataForSeoRequestState @default(planned)
+  attempt            Int                    @default(0)
+  safeErrorCode      String?
+  safeErrorMessage   String?
+  providerCostUsd    Decimal?               @db.Decimal(18, 8)
+  leaseOwner         String?
+  leaseToken         String?
+  leaseAttempt       Int?
+  plannedAt          DateTime               @default(now())
+  claimedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@index([runId, state])
+  @@index([state, claimedAt])
 }
 
 model QueryAudit {
