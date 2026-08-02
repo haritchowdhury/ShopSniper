@@ -221,3 +221,27 @@ test("backend traffic CSV rejects malformed semantic material before attribution
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("invalid traffic material preserves an existing CSV and creates no temporary output", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "traffic-csv-preserve-"));
+  const output = path.join(directory, "leads.csv");
+  const existing = "legacy,content\r\nkept,unchanged\r\n";
+  try {
+    await fs.writeFile(output, existing, "utf8");
+    const invalid = publicTraffic({ crux: true });
+    invalid.crux.origin_metrics.collection_period = {
+      first_date: "2026-07-28",
+      last_date: "2026-07-01"
+    };
+
+    await assert.rejects(writeOutput(output, [{
+      status: "rejected",
+      traffic_enrichment: invalid
+    }]), /Public traffic enrichment contract/u);
+
+    assert.equal(await fs.readFile(output, "utf8"), existing);
+    assert.deepEqual(await fs.readdir(directory), ["leads.csv"]);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

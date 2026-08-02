@@ -9,7 +9,6 @@ export async function runOnce(
   config,
   { pipeline = runPipeline, outputWriter = writeOutput, logger = log } = {}
 ) {
-  assertRunConfig(config);
   const status = {
     ...createInitialStatus(),
     state: "running",
@@ -18,6 +17,14 @@ export async function runOnce(
   };
 
   try {
+    if (config.dataForSeoEnrichmentEnabled || config.cruxEnrichmentEnabled) {
+      throw new Error(
+        "Traffic enrichment is not supported by npm run run:once. " +
+        "Set ENABLE_DATAFORSEO_ENRICHMENT=false and ENABLE_CRUX_ENRICHMENT=false, " +
+        "then use the durable server workflow for enriched results."
+      );
+    }
+    assertRunConfig(config);
     const result = await pipeline(config, status);
     await outputWriter(config.outputCsv, result.leads);
     status.state = "completed";

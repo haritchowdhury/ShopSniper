@@ -120,6 +120,11 @@ For a single foreground batch without starting the HTTP server:
 npm run run:once
 ```
 
+This legacy foreground command supports only unenriched CSV output. Keep both
+`ENABLE_DATAFORSEO_ENRICHMENT` and `ENABLE_CRUX_ENRICHMENT` set to `false` when
+using it. If either flag is enabled, the command stops before the pipeline or
+output writer runs and directs the operator to the durable server workflow.
+
 In another terminal:
 
 ```bash
@@ -201,9 +206,12 @@ publication flag in one PostgreSQL transaction. It returns backward-compatible
 snake_case lead fields plus versioned evidence and score breakdowns. Historical
 unversioned rows remain readable as legacy score-v1 records.
 
-`npm run run:once` still writes `data/generated-queries.csv` and
-`data/leads.csv`. The frontend is responsible for building downloadable CSV from
-the paginated JSON results.
+With both traffic flags disabled, `npm run run:once` still writes
+`data/generated-queries.csv` and `data/leads.csv`. It does not create traffic
+enrichment and is not permitted to call traffic providers, caches, or the paid
+request ledger. Traffic-enriched runs use the durable HTTP server workflow. The
+frontend builds customer-downloadable CSV from those runs' paginated JSON
+results.
 
 ### Optional traffic enrichment
 
@@ -223,10 +231,13 @@ factors rather than geography.
 
 The versioned `traffic-enrichment-public-v1` object groups current CrUX origin
 metrics and monthly popularity under one `crux` source while keeping their
-states separate. API and backend CSV output contain only normalized metrics;
-cache entries, paid-request ledger details, provider task IDs, raw responses,
-costs, and internal errors are never public lead data. CSV source columns are
-selected dynamically, so a disabled provider contributes no columns.
+states separate. The durable result API contains only normalized metrics. The
+backend CSV formatter can also flatten an already-serialized and validated
+public traffic object for deterministic export, but that formatter capability
+does not make `npm run run:once` an enrichment workflow. Cache entries,
+paid-request ledger details, provider task IDs, raw responses, costs, and
+internal errors are never public lead data. CSV source columns are selected
+dynamically, so a disabled provider contributes no columns.
 
 CrUX-derived API and CSV material includes links to the Chrome UX Report source
 and its CC BY 4.0 license plus a transformation notice. Final attribution
