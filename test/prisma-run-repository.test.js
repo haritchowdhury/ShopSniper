@@ -178,6 +178,87 @@ test("completion writes leads, audits, diagnostics, and publication in one trans
   assert.equal(result.pipelineVersion, 2);
 });
 
+test("query-planning shortfall stores audits and releases the lease atomically", async () => {
+  const calls = [];
+  let updateArguments;
+  const transaction = {
+    run: {
+      updateMany: async (arguments_) => {
+        calls.push("run.updateMany");
+        updateArguments = arguments_;
+        return { count: 1 };
+      },
+      findUnique: async () => ({ state: "failed" })
+    },
+    runQuery: { deleteMany: async () => calls.push("runQuery.deleteMany") },
+    queryAudit: {
+      deleteMany: async () => calls.push("queryAudit.deleteMany"),
+      createMany: async () => calls.push("queryAudit.createMany")
+    }
+  };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback(transaction)
+  });
+  await repository.saveQueryPlanningFailure(
+    "run_abcdefghijklmnop",
+    LEASE,
+    {
+      audits: [{ shop_type: "clothing", status: "rejected", rejection_reason: "low_query_quality" }],
+      shortfalls: [{ shopType: "clothing", selected: 9, target: 10 }]
+    },
+    { stage: "selecting_queries" },
+    NOW
+  );
+  assert.deepEqual(calls, [
+    "run.updateMany",
+    "runQuery.deleteMany",
+    "queryAudit.deleteMany",
+    "queryAudit.createMany"
+  ]);
+  assert.equal(updateArguments.data.state, "failed");
+  assert.equal(updateArguments.data.phase, "finished");
+  assert.equal(updateArguments.data.safeErrorCode, "INSUFFICIENT_HIGH_QUALITY_QUERIES");
+  assert.equal(updateArguments.data.safeErrorMessage, "9 of 10 required queries passed for clothing.");
+  assert.equal(updateArguments.data.leaseToken, null);
+  assert.deepEqual(updateArguments.where, {
+    id: "run_abcdefghijklmnop",
+    state: "running",
+    leaseOwner: LEASE.owner,
+    leaseToken: LEASE.token,
+    leaseExpiresAt: { gt: NOW }
+  });
+});
+
+test("lease loss prevents query-plan failure audits from being written", async () => {
+  const calls = [];
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      run: {
+        updateMany: async () => {
+          calls.push("run.updateMany");
+          return { count: 0 };
+        }
+      },
+      runQuery: { deleteMany: async () => calls.push("runQuery.deleteMany") },
+      queryAudit: {
+        deleteMany: async () => calls.push("queryAudit.deleteMany"),
+        createMany: async () => calls.push("queryAudit.createMany")
+      }
+    })
+  });
+  await assert.rejects(
+    repository.saveQueryPlanningFailure(
+      "run_abcdefghijklmnop",
+      LEASE,
+      { audits: [{ status: "rejected" }], shortfalls: [] },
+      {},
+      NOW
+    ),
+    /no longer owns/u
+  );
+  assert.deepEqual(calls, ["run.updateMany"]);
+});
+
 test("owner scope is applied to audit and diagnostic repository reads", async () => {
   const seen = [];
   const pageable = (name) => ({

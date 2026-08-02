@@ -117,7 +117,11 @@ export async function fetchPage(
     config.browserlessFallbackToken
   ].filter((token, index, values) => token && values.indexOf(token) === index);
 
-  if (!browserlessTokens.length || !config.browserlessUrl) {
+  if (
+    config.browserlessEnabled === false ||
+    !browserlessTokens.length ||
+    !config.browserlessUrl
+  ) {
     if (ordinaryResponse) {
       return {
         ...ordinaryResponse,

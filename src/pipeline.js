@@ -572,6 +572,20 @@ export async function runPipeline(config, status, dependencyOverrides = {}) {
       status,
       dependencyOverrides
     );
+    const target = config.generatedQueryCount ?? 10;
+    const expectedCount = Number.isInteger(planning.categoryCount)
+      ? planning.categoryCount * target
+      : null;
+    if (
+      planning.complete !== true ||
+      (expectedCount != null && planning.selected.length !== expectedCount)
+    ) {
+      const first = planning.shortfalls?.[0];
+      const detail = first
+        ? `${first.selected} of ${first.target} required queries passed for ${first.shopType}`
+        : "query planning did not meet the configured target";
+      throw new Error(`INSUFFICIENT_HIGH_QUALITY_QUERIES: ${detail}`);
+    }
     queryPlans = planning.selected;
     queryAudits = planning.audits || [];
   }

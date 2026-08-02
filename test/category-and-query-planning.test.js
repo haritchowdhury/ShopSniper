@@ -25,10 +25,7 @@ import {
   validateCandidate,
   validateCandidates
 } from "../src/query-validator.js";
-import {
-  deterministicFallbackCandidates,
-  generateRepairs
-} from "../src/query-generator.js";
+import { generateRepairs } from "../src/query-generator.js";
 import {
   probeCandidates,
   summarizeProbe
@@ -238,7 +235,10 @@ test("versioned provider adapters fail safely on refusal, incomplete, malformed,
 });
 
 test("candidate validation rejects abstract, quoted, duplicate and out-of-category queries", () => {
-  assert.equal(validateCandidate(candidate("barrel jeans"), "clothing").valid, true);
+  const categoryVocabulary = ["barrel jeans", "denim jackets", "crop tops"];
+  assert.equal(validateCandidate(candidate("barrel jeans"), "clothing", {
+    categoryVocabulary
+  }).valid, true);
   assert.equal(
     validateCandidate(candidate("fashion brand"), "clothing").rejectionReason,
     "abstract_product_phrase"
@@ -253,12 +253,15 @@ test("candidate validation rejects abstract, quoted, duplicate and out-of-catego
     "quoted_query"
   );
   assert.equal(
-    validateCandidate(candidate("silicone spatula"), "clothing").rejectionReason,
+    validateCandidate(candidate("silicone spatula"), "clothing", {
+      categoryVocabulary
+    }).rejectionReason,
     "out_of_category"
   );
   const validated = validateCandidates(
     [candidate("barrel jeans"), candidate("barrel jeans")],
-    "clothing"
+    "clothing",
+    { categoryVocabulary }
   );
   assert.equal(validated.accepted.length, 1);
   assert.equal(validated.rejected[0].rejectionReason, "duplicate_candidate");
@@ -268,13 +271,16 @@ test("candidate validation rejects abstract, quoted, duplicate and out-of-catego
   );
 });
 
-test("fallback catalogs cover the three planned broad categories", () => {
-  for (const shopType of ["clothing", "baby food", "kitchen utensils"]) {
-    const generated = deterministicFallbackCandidates(shopType, 25);
-    assert.equal(generated.length, 25);
-    assert(generated.every((entry) => validateCandidate(entry, shopType).valid));
-  }
-  assert.deepEqual(deterministicFallbackCandidates("unknown category"), []);
+test("category validation uses researched vocabulary equally for familiar and new categories", () => {
+  assert.equal(validateCandidate(candidate("oversized sweatshirts"), "clothing", {
+    categoryVocabulary: ["Oversized sweatshirts"]
+  }).valid, true);
+  assert.equal(validateCandidate(candidate("ceramic aquarium caves"), "aquarium supplies", {
+    categoryVocabulary: ["ceramic aquarium cave", "sponge filters"]
+  }).valid, true);
+  assert.equal(validateCandidate(candidate("linen midi dresses"), "aquarium supplies", {
+    categoryVocabulary: ["ceramic aquarium cave", "sponge filters"]
+  }).rejectionReason, "out_of_category");
 });
 
 test("deterministic repair simplifies a failed query when AI repair fails", async () => {
@@ -363,6 +369,48 @@ test("probe relevance requires meaningful multi-term coverage and ignores pagina
   assert.equal(withNextPage.baseScore, withoutNextPage.baseScore);
 });
 
+test("probe quality contract enforces relevance ratio and intrinsic score", () => {
+  const mixedResults = Array.from({ length: 10 }, (_, index) => index < 4
+    ? result(`relevant-${index}`, "barrel jeans", index + 1)
+    : {
+        query: "site:myshopify.com/products barrel jeans",
+        rank: index + 1,
+        url: `https://other-${index}.myshopify.com/products/catalog-item-${index}`,
+        title: "General catalogue item",
+        snippet: "Shop the collection",
+        rejectionReason: ""
+      });
+  const ratioRejected = summarizeProbe(candidate("barrel jeans"), {
+    results: mixedResults,
+    estimatedTotalResults: 100,
+    nextPageAvailable: false
+  }, {
+    minQueryResults: 5,
+    minQueryUniqueHosts: 4,
+    minQueryRelevantResults: 3,
+    minQueryRelevanceRatio: 0.5,
+    minQueryBaseScore: 60
+  });
+  assert.equal(ratioRejected.relevantRatio, 0.4);
+  assert.equal(ratioRejected.rejectionReason, "insufficient_relevance_ratio");
+
+  const scoreRejected = summarizeProbe(candidate("barrel jeans"), {
+    results: Array.from({ length: 10 }, (_, index) =>
+      result(`store-${index % 4}`, "barrel jeans", index + 1)
+    ),
+    estimatedTotalResults: 100,
+    nextPageAvailable: false
+  }, {
+    minQueryResults: 5,
+    minQueryUniqueHosts: 4,
+    minQueryRelevantResults: 3,
+    minQueryRelevanceRatio: 0.5,
+    minQueryBaseScore: 90
+  });
+  assert.equal(scoreRejected.baseScore, 76);
+  assert.equal(scoreRejected.rejectionReason, "low_query_quality");
+});
+
 test("query ranker favors new-store diversity after selecting the best query", () => {
   const probe = (phrase, baseScore, hosts) => ({
     candidate: candidate(phrase),
@@ -381,6 +429,23 @@ test("query ranker favors new-store diversity after selecting the best query", (
   assert.deepEqual(
     ranked.selected.map(({ candidate: entry }) => entry.product_phrase),
     ["barrel jeans", "running shorts"]
+  );
+});
+
+test("query ranker caps excessive product-family concentration", () => {
+  const probes = Array.from({ length: 10 }, (_, index) => ({
+    candidate: candidate(`frame style ${index}`, { product_family: "frames" }),
+    baseScore: 90 - index,
+    uniqueHosts: [`store-${index}.myshopify.com`],
+    rejectionReason: ""
+  }));
+  const ranked = selectDiverseQueries(probes, 10);
+  assert.equal(ranked.selected.length, 3);
+  assert.equal(
+    [...ranked.selectionRejections.values()].every((reason) =>
+      reason === "product_family_concentration"
+    ),
+    true
   );
 });
 
@@ -422,7 +487,13 @@ test("planner writes accepted and rejected audit rows and retains selected probe
         blanksSkipped: 0
       }),
       generateInitial: async () => ({
-        research: { source_urls: ["https://example.com/research"] },
+        research: {
+          concrete_products: ["barrel jeans", "running shorts"],
+          growing_products: [],
+          evergreen_products: [],
+          product_title_terms: [],
+          source_urls: ["https://example.com/research"]
+        },
         candidates,
         mode: "ai",
         error: ""
@@ -458,7 +529,13 @@ test("manual-category planner keeps audits in memory and performs no CSV I/O", a
         throw new Error("manual mode must not read CSV");
       },
       generateInitial: async () => ({
-        research: { source_urls: [] },
+        research: {
+          concrete_products: ["barrel jeans"],
+          growing_products: [],
+          evergreen_products: [],
+          product_title_terms: [],
+          source_urls: []
+        },
         candidates: [entry],
         mode: "ai",
         error: ""
@@ -495,6 +572,93 @@ test("manual-category planner keeps audits in memory and performs no CSV I/O", a
   assert.equal(planning.selected.length, 1);
   assert.equal(planning.audits.length, 1);
   assert.equal(status.blankShopTypesSkipped, 0);
+});
+
+test("planner repairs adaptively and returns exactly the hard target", async () => {
+  const status = createInitialStatus();
+  const first = candidate("barrel jeans", { product_family: "jeans" });
+  const repaired = candidate("running shorts", { product_family: "shorts" });
+  let repairRequested = 0;
+  const planning = await planGeneratedQueries({
+    generatedQueryCount: 2,
+    queryRepairRounds: 4,
+    maxQueryProbesPerCategory: 10
+  }, status, {
+    categories: [{ originalShopType: "Clothing", shopType: "clothing" }],
+    generateInitial: async () => ({
+      research: {
+        concrete_products: ["barrel jeans", "running shorts"],
+        growing_products: [], evergreen_products: [], product_title_terms: [], source_urls: []
+      },
+      candidates: [first], mode: "ai", error: ""
+    }),
+    generateRepairs: async (_category, _research, _failures, _seen, requested) => {
+      repairRequested = requested;
+      return [repaired];
+    },
+    probe: async (entries) => entries.map((entry) => ({
+      candidate: entry,
+      results: [result(entry.product_family, entry.product_phrase)],
+      rawResults: 10,
+      relevantResults: 10,
+      relevantRatio: 1,
+      uniqueHosts: [`${entry.product_family}.myshopify.com`],
+      duplicateProducts: 0,
+      nextPageAvailable: false,
+      estimatedTotalResults: 10,
+      baseScore: 90,
+      rejectionReason: "",
+      error: ""
+    }))
+  });
+  assert.equal(repairRequested, 8);
+  assert.equal(planning.complete, true);
+  assert.equal(planning.selected.length, 2);
+  assert.deepEqual(planning.shortfalls, []);
+});
+
+test("planner never publishes a partial plan and respects the unique probe budget", async () => {
+  const entries = [
+    candidate("barrel jeans", { product_family: "jeans" }),
+    candidate("running shorts", { product_family: "shorts" }),
+    candidate("linen dresses", { product_family: "dresses" })
+  ];
+  const planning = await planGeneratedQueries({
+    generatedQueryCount: 2,
+    queryRepairRounds: 4,
+    maxQueryProbesPerCategory: 1
+  }, createInitialStatus(), {
+    categories: [{ originalShopType: "Clothing", shopType: "clothing" }],
+    generateInitial: async () => ({
+      research: {
+        concrete_products: entries.map(({ product_phrase }) => product_phrase),
+        growing_products: [], evergreen_products: [], product_title_terms: [], source_urls: []
+      },
+      candidates: entries, mode: "ai", error: ""
+    }),
+    generateRepairs: async () => {
+      throw new Error("repair must not run after budget exhaustion");
+    },
+    probe: async ([entry]) => [{
+      candidate: entry,
+      results: [result("denim", entry.product_phrase)],
+      rawResults: 10,
+      relevantResults: 10,
+      relevantRatio: 1,
+      uniqueHosts: ["denim.myshopify.com"],
+      duplicateProducts: 0,
+      nextPageAvailable: false,
+      estimatedTotalResults: 10,
+      baseScore: 90,
+      rejectionReason: "",
+      error: ""
+    }]
+  });
+  assert.equal(planning.complete, false);
+  assert.deepEqual(planning.selected, []);
+  assert.equal(planning.shortfalls[0].selected, 1);
+  assert.equal(planning.shortfalls[0].probed, 1);
+  assert.equal(planning.shortfalls[0].budgetExhausted, true);
 });
 
 test("qualifier variants keep separate plans while sharing one Google probe", async () => {
@@ -716,6 +880,8 @@ test("cached provider failures produce separate intent-specific audits", async (
   });
 
   assert.equal(calls, 1);
+  assert.deepEqual(planning.shortfalls.map(({ probed }) => probed), [1, 0]);
+  assert.equal(currentStatus.queryProbeCacheHits, 1);
   assert.deepEqual(planning.audits.map((audit) => ({
     original: audit.original_shop_type,
     qualifier: audit.business_qualifier,

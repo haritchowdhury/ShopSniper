@@ -69,10 +69,10 @@ OPENAI_MODEL=gpt-4.1-mini
 ENABLE_AI_NORMALIZATION=false
 ```
 
-If an AI request fails during a run, the planner can fall back to built-in product
-catalogs for clothing, baby food, and kitchen utensils. The fallback does not claim
-live market evidence. A key is still required when a run starts because arbitrary
-categories depend on AI generation.
+All categories use the same AI-researched product vocabulary and validation path.
+There are no category-specific runtime catalogs. If initial category research fails,
+the planner reports that failure rather than substituting canned queries for selected
+example categories.
 
 Lead normalization is disabled by default so adding the query-planning key does not
 silently add one model call per store. Set `ENABLE_AI_NORMALIZATION=true` only when
@@ -214,10 +214,13 @@ The defaults favor quality while bounding spend:
 
 ```env
 GENERATED_QUERY_COUNT=10
-QUERY_CANDIDATE_COUNT=25
-QUERY_REPAIR_ROUNDS=2
+QUERY_CANDIDATE_COUNT=30
+QUERY_REPAIR_ROUNDS=4
+MAX_QUERY_PROBES_PER_CATEGORY=80
 QUERY_PROBE_CONCURRENCY=3
-MIN_QUERY_RELEVANT_RESULTS=2
+MIN_QUERY_RELEVANT_RESULTS=3
+MIN_QUERY_RELEVANCE_RATIO=0.50
+MIN_QUERY_BASE_SCORE=60
 MIN_QUERY_RESULTS=5
 MIN_QUERY_UNIQUE_HOSTS=4
 ENABLE_WEB_RESEARCH=true
@@ -225,8 +228,12 @@ MAX_RESEARCH_SOURCES=8
 RESEARCH_GEOGRAPHY=global English-language market
 ```
 
-One category normally uses one OpenAI research call and up to 25 Google probe
-requests. A weak set may add up to two OpenAI repair calls and more Google probes.
+Query planning now has a hard completion contract: each category produces exactly
+`GENERATED_QUERY_COUNT` passing queries or the run fails with the auditable
+`INSUFFICIENT_HIGH_QUALITY_QUERIES` code. It never publishes a partial query list.
+One category normally uses one OpenAI research call and probes candidates in
+adaptive batches. A weak set may add up to four targeted repair calls, but never
+more than `MAX_QUERY_PROBES_PER_CATEGORY` unique Google requests.
 Probe concurrency limits planning latency; `STORE_CONCURRENCY` controls parallel
 stores and `PAGE_FETCH_CONCURRENCY` (default `2`) bounds evidence-page work within
 one store. Google result-total estimates and next-page availability are recorded

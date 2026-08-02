@@ -22,6 +22,7 @@ function blankAudit(shopType, overrides = {}) {
     query_score: "",
     raw_results: "",
     relevant_results: "",
+    relevance_ratio: "",
     unique_hosts: "",
     duplicate_products: "",
     estimated_results: "",
@@ -54,7 +55,13 @@ function rejectedCandidateAudit(category, rejected, categoryVocabulary) {
   });
 }
 
-function probeAudit(category, probe, selectedScores, categoryVocabulary) {
+function probeAudit(
+  category,
+  probe,
+  selectedScores,
+  categoryVocabulary,
+  selectionRejections = new Map()
+) {
   const candidate = probe.candidate;
   const selectedScore = selectedScores.get(candidate.query);
   return blankAudit(category.shopType, {
@@ -63,6 +70,7 @@ function probeAudit(category, probe, selectedScores, categoryVocabulary) {
     query_score: selectedScore ?? probe.baseScore,
     raw_results: probe.rawResults,
     relevant_results: probe.relevantResults,
+    relevance_ratio: probe.relevantRatio,
     unique_hosts: probe.uniqueHosts.length,
     duplicate_products: probe.duplicateProducts,
     estimated_results: probe.estimatedTotalResults,
@@ -75,11 +83,30 @@ function probeAudit(category, probe, selectedScores, categoryVocabulary) {
     business_qualifier: category.businessQualifier || "unspecified",
     status: selectedScore == null ? "rejected" : "selected",
     rejection_reason:
-      selectedScore == null ? probe.rejectionReason || "not_selected" : ""
+      selectedScore == null
+        ? probe.rejectionReason ||
+          selectionRejections.get(candidate.query) ||
+          "not_selected"
+        : ""
   });
 }
 
+function repairBatchSize(shortfall) {
+  return Math.min(20, Math.max(8, shortfall * 2));
+}
+
+function rejectionCounts(audits) {
+  const counts = {};
+  for (const audit of audits) {
+    const reason = audit.rejection_reason;
+    if (reason) counts[reason] = (counts[reason] || 0) + 1;
+  }
+  return counts;
+}
+
 async function planCategory(category, config, status, dependencies, cache, seenQueries) {
+  const target = config.generatedQueryCount;
+  const maxProbes = config.maxQueryProbesPerCategory ?? 80;
   status.stage = "researching_category";
   let generated;
   try {
@@ -88,6 +115,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     status.failures += 1;
     log("category_generation_failed", { shopType: category.shopType, error });
     return {
+      complete: false,
       selected: [],
       audits: [
         blankAudit(category.shopType, {
@@ -97,7 +125,20 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
           rejection_reason: "candidate_generation_failed",
           query_generation_reason: messageOf(error)
         })
-      ]
+      ],
+      shortfall: {
+        shopType: category.shopType,
+        originalShopType: category.originalShopType,
+        businessQualifier: category.businessQualifier || "unspecified",
+        target,
+        selected: 0,
+        generated: 0,
+        probed: 0,
+        cacheHits: 0,
+        repairRounds: 0,
+        rejectionCounts: { candidate_generation_failed: 1 },
+        budgetExhausted: false
+      }
     };
   }
 
@@ -111,6 +152,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
 
   status.stage = "generating_candidates";
   status.queryCandidatesGenerated += generated.candidates.length;
+  let candidatesGenerated = generated.candidates.length;
   status.stage = "validating_candidates";
   const categoryVocabulary = [
     ...(generated.research.concrete_products || []),
@@ -126,27 +168,71 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
   const rejectedAudits = validated.rejected.map((rejected) =>
     rejectedCandidateAudit(category, rejected, categoryVocabulary)
   );
-
-  status.stage = "probing_queries";
-  const allProbes = await dependencies.probe(validated.accepted, config, {
-    searchPage: dependencies.searchPage,
-    cache,
-    onProbed: () => {
-      status.queryCandidatesProbed += 1;
-    }
-  });
-
+  const pendingCandidates = [...validated.accepted];
+  const allProbes = [];
+  let providerProbes = 0;
+  let cacheHits = 0;
   let repairRound = 0;
+  let noProgressRounds = 0;
+
+  async function probeBatch(candidates) {
+    if (!candidates.length) return [];
+    let callbackEvents = 0;
+    let uniqueProviderCalls = 0;
+    status.stage = "probing_queries";
+    const probes = await dependencies.probe(candidates, config, {
+      searchPage: dependencies.searchPage,
+      cache,
+      onProbed: (_probe, cacheHit) => {
+        callbackEvents += 1;
+        status.queryCandidatesProbed += 1;
+        if (cacheHit) {
+          cacheHits += 1;
+          status.queryProbeCacheHits += 1;
+        } else {
+          uniqueProviderCalls += 1;
+        }
+      }
+    });
+    // Test doubles and alternate probe adapters may not emit callbacks. Treat
+    // their returned rows conservatively as provider calls for budget accounting.
+    if (callbackEvents === 0) {
+      uniqueProviderCalls = probes.length;
+      status.queryCandidatesProbed += probes.length;
+    }
+    providerProbes += uniqueProviderCalls;
+    allProbes.push(...probes);
+    return probes;
+  }
+
+  function rankedNow() {
+    return dependencies.select(allProbes, target);
+  }
+
+  while (pendingCandidates.length && providerProbes < maxProbes) {
+    const selectedCount = rankedNow().selected.length;
+    if (selectedCount >= target) break;
+    const batchSize = Math.min(
+      pendingCandidates.length,
+      repairBatchSize(target - selectedCount),
+      maxProbes - providerProbes
+    );
+    await probeBatch(pendingCandidates.splice(0, batchSize));
+  }
+
+  let currentSelectedCount = rankedNow().selected.length;
   while (
-    allProbes.filter((probe) => !probe.rejectionReason).length <
-      config.generatedQueryCount &&
-    repairRound < config.queryRepairRounds
+    currentSelectedCount < target &&
+    repairRound < config.queryRepairRounds &&
+    providerProbes < maxProbes &&
+    noProgressRounds < 2
   ) {
     repairRound += 1;
+    status.queryRepairRounds += 1;
     const failed = [
-      ...validated.rejected.map((item) => ({
-        query: item.candidate?.query || "",
-        reason: item.rejectionReason
+      ...rejectedAudits.map((item) => ({
+        query: item.query || "",
+        reason: item.rejection_reason
       })),
       ...allProbes
         .filter((probe) => probe.rejectionReason)
@@ -155,15 +241,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
           reason: probe.rejectionReason
         }))
     ];
-    const requested = Math.min(
-      20,
-      Math.max(
-        5,
-        config.generatedQueryCount -
-          allProbes.filter((probe) => !probe.rejectionReason).length +
-          3
-      )
-    );
+    const requested = repairBatchSize(target - currentSelectedCount);
 
     let repairs;
     try {
@@ -188,6 +266,7 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     }
 
     status.queryCandidatesGenerated += repairs.length;
+    candidatesGenerated += repairs.length;
     status.stage = "validating_candidates";
     validated = validateCandidates(repairs, category.shopType, {
       seenQueries,
@@ -199,20 +278,39 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
         rejectedCandidateAudit(category, rejected, categoryVocabulary)
       )
     );
-    status.stage = "probing_queries";
-    allProbes.push(
-      ...(await dependencies.probe(validated.accepted, config, {
-        searchPage: dependencies.searchPage,
-        cache,
-        onProbed: () => {
-          status.queryCandidatesProbed += 1;
-        }
-      }))
+    const availableBudget = maxProbes - providerProbes;
+    const toProbe = validated.accepted.slice(0, availableBudget);
+    const unprobed = validated.accepted.slice(availableBudget);
+    rejectedAudits.push(
+      ...unprobed.map((candidate) => rejectedCandidateAudit(category, {
+        candidate,
+        query: candidate.query,
+        rejectionReason: "probe_budget_exhausted"
+      }, categoryVocabulary))
+    );
+    await probeBatch(toProbe);
+    const nextSelectedCount = rankedNow().selected.length;
+    noProgressRounds = nextSelectedCount > currentSelectedCount
+      ? 0
+      : noProgressRounds + 1;
+    currentSelectedCount = nextSelectedCount;
+  }
+
+  if (pendingCandidates.length) {
+    const pendingReason = rankedNow().selected.length >= target
+      ? "not_probed_target_satisfied"
+      : "probe_budget_exhausted";
+    rejectedAudits.push(
+      ...pendingCandidates.map((candidate) => rejectedCandidateAudit(category, {
+        candidate,
+        query: candidate.query,
+        rejectionReason: pendingReason
+      }, categoryVocabulary))
     );
   }
 
   status.stage = "selecting_queries";
-  const ranked = dependencies.select(allProbes, config.generatedQueryCount);
+  const ranked = rankedNow();
   const selectedScores = new Map(
     ranked.selected.map((probe) => [probe.candidate.query, probe.queryScore])
   );
@@ -227,16 +325,52 @@ async function planCategory(category, config, status, dependencies, cache, seenQ
     results: probe.results
   }));
   status.queriesSelected += selected.length;
-  if (selected.length < config.generatedQueryCount) status.planningWarnings += 1;
+  const complete = selected.length === target;
+  if (!complete) status.planningWarnings += 1;
+
+  const audits = [
+    ...rejectedAudits,
+    ...allProbes.map((probe) =>
+      probeAudit(
+        category,
+        probe,
+        selectedScores,
+        categoryVocabulary,
+        ranked.selectionRejections
+      )
+    )
+  ];
+  const shortfall = complete ? null : {
+    shopType: category.shopType,
+    originalShopType: category.originalShopType,
+    businessQualifier: category.businessQualifier || "unspecified",
+    target,
+    selected: selected.length,
+    generated: candidatesGenerated,
+    probed: providerProbes,
+    cacheHits,
+    repairRounds: repairRound,
+    rejectionCounts: rejectionCounts(audits),
+    budgetExhausted: providerProbes >= maxProbes
+  };
+
+  log("query_category_planned", {
+    shopType: category.shopType,
+    businessQualifier: category.businessQualifier || "unspecified",
+    candidatesGenerated,
+    candidatesProbed: providerProbes,
+    cacheHits,
+    repairRounds: repairRound,
+    acceptedCount: selected.length,
+    rejectionCounts: rejectionCounts(audits),
+    complete
+  });
 
   return {
+    complete,
     selected,
-    audits: [
-      ...rejectedAudits,
-      ...allProbes.map((probe) =>
-        probeAudit(category, probe, selectedScores, categoryVocabulary)
-      )
-    ]
+    audits,
+    shortfall
   };
 }
 
@@ -272,6 +406,7 @@ export async function planGeneratedQueries(
   );
   status.invalidShopTypes = input.invalid.length;
   const selected = [];
+  const shortfalls = [];
   const cache = new QueryProbeCache();
 
   for (const category of input.categories) {
@@ -289,6 +424,12 @@ export async function planGeneratedQueries(
     );
     selected.push(...result.selected);
     audits.push(...result.audits);
+    if (!result.complete && result.shortfall) {
+      shortfalls.push({
+        categoryIndex: input.categories.indexOf(category),
+        ...result.shortfall
+      });
+    }
     status.shopTypesProcessed += 1;
   }
 
@@ -296,9 +437,14 @@ export async function planGeneratedQueries(
     await dependencies.writeAudit(config.generatedQueriesCsv, audits);
   }
   status.queriesTotal = selected.length;
+  const complete = shortfalls.length === 0 &&
+    selected.length === input.categories.length * config.generatedQueryCount;
   return {
-    selected,
+    complete,
+    selected: complete ? selected : [],
     audits,
+    shortfalls,
+    categoryCount: input.categories.length,
     blanksSkipped: input.blanksSkipped,
     invalidShopTypes: input.invalid.length,
     probeCacheSize: cache.size

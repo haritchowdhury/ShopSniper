@@ -313,6 +313,19 @@ export class PrismaRunRepository {
     status,
     now = new Date()
   ) {
+    const requiredCount = config.generatedQueryCount ?? 10;
+    const counts = new Array(categories.length).fill(0);
+    for (const plan of selected) {
+      const categoryIndex = categories.findIndex((category) =>
+        category.shopType === plan.shopType &&
+        category.businessQualifier === (plan.businessQualifier || "unspecified") &&
+        category.originalShopType === (plan.originalShopType || "")
+      );
+      if (categoryIndex >= 0) counts[categoryIndex] += 1;
+    }
+    if (counts.some((count) => count !== requiredCount)) {
+      throw new Error("Cannot publish an incomplete generated query plan");
+    }
     const rows = selected.map((plan, sequence) => {
       const categoryIndex = categories.findIndex((category) =>
         category.shopType === plan.shopType &&
@@ -374,6 +387,54 @@ export class PrismaRunRepository {
       await transaction.runQuery.deleteMany({ where: { runId: runIdentifier } });
       await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
       if (rows.length) await transaction.runQuery.createMany({ data: rows });
+      if (auditRows.length) await transaction.queryAudit.createMany({ data: auditRows });
+      return transaction.run.findUnique({ where: { id: runIdentifier } });
+    });
+  }
+
+  async saveQueryPlanningFailure(
+    runIdentifier,
+    lease,
+    { audits = [], shortfalls = [] },
+    status,
+    now = new Date()
+  ) {
+    const auditRows = audits.map((record, index) =>
+      queryAuditRecordToCreate(
+        runIdentifier,
+        childId("audit", runIdentifier, index),
+        index,
+        record
+      )
+    );
+    const first = shortfalls[0] || {};
+    const selected = Number.isInteger(first.selected) ? first.selected : 0;
+    const target = Number.isInteger(first.target) ? first.target : 10;
+    const category = first.shopType || "the category";
+    const message = `${selected} of ${target} required queries passed for ${category}.`;
+
+    return this.prisma.$transaction(async (transaction) => {
+      const transitioned = await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          state: "failed",
+          phase: "finished",
+          stage: "failed",
+          completedAt: now,
+          resultsAvailable: false,
+          safeErrorCode: "INSUFFICIENT_HIGH_QUALITY_QUERIES",
+          safeErrorMessage: message,
+          progress: progressFromStatus(status),
+          leaseOwner: null,
+          leaseToken: null,
+          leaseAcquiredAt: null,
+          leaseExpiresAt: null,
+          lastHeartbeatAt: null
+        }
+      });
+      requireLeaseMutation(transitioned);
+      await transaction.runQuery.deleteMany({ where: { runId: runIdentifier } });
+      await transaction.queryAudit.deleteMany({ where: { runId: runIdentifier } });
       if (auditRows.length) await transaction.queryAudit.createMany({ data: auditRows });
       return transaction.run.findUnique({ where: { id: runIdentifier } });
     });

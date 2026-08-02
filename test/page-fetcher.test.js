@@ -49,6 +49,34 @@ test("ordinary usable storefront HTML does not invoke Browserless", async () => 
   assert.equal(response.renderAttempted, false);
 });
 
+test("disabled Browserless returns the ordinary response without rendering", async () => {
+  let calls = 0;
+  const response = await fetchPage("https://8.8.8.8/", {
+    requestTimeoutMs: 1000,
+    browserlessEnabled: false,
+    browserlessUrl: "https://browserless.example/content",
+    browserlessToken: "fixture-token",
+    browserlessFallbackToken: "fixture-fallback-token"
+  }, {
+    purpose: "storefront",
+    request: async () => {
+      calls += 1;
+      return {
+        body: "<html><body>Please enable JavaScript to view this shop</body></html>",
+        finalUrl: "https://8.8.8.8/",
+        status: 200,
+        contentType: "text/html"
+      };
+    }
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(response.rendered, false);
+  assert.equal(response.renderAttempted, false);
+  assert.equal(response.renderUnavailable, true);
+  assert.equal(response.fetchAssessment.usable, false);
+});
+
 test("a JavaScript shell invokes Browserless and returns rendered evidence", async () => {
   let calls = 0;
   const response = await fetchPage("https://8.8.8.8/", {

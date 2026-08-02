@@ -477,6 +477,23 @@ async function executeRun({
       if (leaseLoss) throw leaseLoss;
       await heartbeat.renew();
       await heartbeat.stop();
+      if (planning.complete !== true) {
+        if (typeof repository.saveQueryPlanningFailure !== "function") {
+          throw new Error("Repository does not support query-planning failures");
+        }
+        await repository.saveQueryPlanningFailure(
+          identifier,
+          lease,
+          planning,
+          tracker.status,
+          currentDate(now)
+        );
+        logger("query_plan_insufficient", {
+          runId: identifier,
+          shortfalls: planning.shortfalls
+        });
+        return;
+      }
       await repository.saveGeneratedQueryPlan(
         identifier,
         lease,
@@ -863,6 +880,7 @@ export function createLeadServer(
         ]);
         const checked = validateEditableQueryList(payload.queries, categories, {
           maxQueries: config.maxQueries || 500,
+          generatedQueryCount: config.generatedQueryCount ?? 10,
           categoryVocabularyByIndex
         });
         if (!checked.valid) {
@@ -920,7 +938,11 @@ export function createLeadServer(
               query
             })),
             categories,
-            { maxQueries: config.maxQueries || 500, categoryVocabularyByIndex }
+            {
+              maxQueries: config.maxQueries || 500,
+              generatedQueryCount: config.generatedQueryCount ?? 10,
+              categoryVocabularyByIndex
+            }
           );
           if (!checked.valid) {
             throw new ApiError(

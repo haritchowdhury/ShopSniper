@@ -120,6 +120,7 @@ test("selected probe results enter the lead pipeline without another Google sear
   };
   const result = await runPipeline(
     {
+      generatedQueryCount: 1,
       outputCsv: "/unused/output.csv",
       storeConcurrency: 1,
       maxPagesPerStore: 1
@@ -127,6 +128,8 @@ test("selected probe results enter the lead pipeline without another Google sear
     currentStatus,
     {
       planQueries: async () => ({
+        complete: true,
+        categoryCount: 1,
         selected: [
           {
             ...intent,
@@ -301,6 +304,7 @@ test("manual categories reach the planner without CSV reads or writes", async ()
   let receivedCategories;
   const result = await runPipeline(
     {
+      generatedQueryCount: 1,
       storeConcurrency: 1,
       maxPagesPerStore: 1
     },
@@ -309,7 +313,19 @@ test("manual categories reach the planner without CSV reads or writes", async ()
       categories,
       planQueries: async (_config, _status, dependencies) => {
         receivedCategories = dependencies.categories;
-        return { selected: [], audits: [] };
+        return {
+          complete: true,
+          categoryCount: 1,
+          selected: [{
+            ...categories[0],
+            businessQualifier: "unspecified",
+            categoryIntent: { ...categories[0], businessQualifier: "unspecified" },
+            categoryVocabulary: ["eyewear frames"],
+            query: "site:myshopify.com/products eyewear frames",
+            results: []
+          }],
+          audits: []
+        };
       },
       readCategories: async () => {
         throw new Error("HTTP pipeline must not read CSV");
@@ -323,7 +339,7 @@ test("manual categories reach the planner without CSV reads or writes", async ()
   assert.deepEqual(receivedCategories, categories);
   assert.deepEqual(result.leads, []);
   assert.deepEqual(result.queryAudits, []);
-  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ["no_search_results"]);
   assert.deepEqual(result.summary, { total: 0, qualified: 0, rejected: 0, failed: 0 });
   assert.equal(currentStatus.stage, "writing_results");
 });
@@ -447,8 +463,17 @@ test("singular and plural exact category intents survive aggregation and API map
   ];
 
   async function execute(selected) {
-    return runPipeline({ storeConcurrency: 1, pageFetchConcurrency: 1 }, status(), {
-      planQueries: async () => ({ selected, audits: [] }),
+    return runPipeline({
+      generatedQueryCount: 1,
+      storeConcurrency: 1,
+      pageFetchConcurrency: 1
+    }, status(), {
+      planQueries: async () => ({
+        complete: true,
+        categoryCount: 2,
+        selected,
+        audits: []
+      }),
       resolve: async (entry) => ({
         ...entry,
         html: "<html><body>Shopify eyewear specialist storefront</body></html>",

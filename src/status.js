@@ -7,6 +7,8 @@ export function createInitialProgress() {
     queryCandidatesGenerated: 0,
     queryCandidatesValidated: 0,
     queryCandidatesProbed: 0,
+    queryProbeCacheHits: 0,
+    queryRepairRounds: 0,
     queriesSelected: 0,
     planningWarnings: 0,
     queriesTotal: 0,

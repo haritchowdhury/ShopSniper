@@ -82,6 +82,22 @@ class ReviewRepository {
       leaseToken: null
     });
   }
+  async saveQueryPlanningFailure(_id, lease, planning) {
+    this.assertLease(lease);
+    this.queries = [];
+    this.planningFailure = planning;
+    const first = planning.shortfalls[0];
+    Object.assign(this.run, {
+      state: "failed",
+      phase: "finished",
+      stage: "failed",
+      completedAt: new Date("2026-08-01T00:00:30.000Z"),
+      safeErrorCode: "INSUFFICIENT_HIGH_QUALITY_QUERIES",
+      safeErrorMessage:
+        `${first.selected} of ${first.target} required queries passed for ${first.shopType}.`,
+      leaseToken: null
+    });
+  }
   async getEditableQueries(id, ownerId) {
     return this.run?.id === id && this.run.ownerId === ownerId
       ? { ...this.run, queries: this.queries.map((row) => ({ ...row })) }
@@ -178,12 +194,14 @@ test("HTTP workflow pauses for a durable revision and scrapes exactly the confir
     openaiApiKey: "fixture",
     maxShopTypes: 10,
     maxQueries: 50,
+    generatedQueryCount: 1,
     runRateLimitMax: 5,
     queryConfirmRateLimitMax: 5
   }, {
     repository,
     logger: () => {},
     planningPipeline: async () => ({
+      complete: true,
       selected: [{
         originalShopType: "Eyewear",
         shopType: "eyewear",
@@ -275,4 +293,47 @@ test("HTTP workflow pauses for a durable revision and scrapes exactly the confir
     headers: { "x-user-id": "another_owner" }
   });
   assert.equal(foreign.status, 404);
+});
+
+test("HTTP worker fails an incomplete plan without publishing query review", async (context) => {
+  const repository = new ReviewRepository();
+  const server = createLeadServer({
+    googleApiKey: "fixture",
+    googleSearchEngineId: "fixture",
+    openaiApiKey: "fixture",
+    maxShopTypes: 10,
+    maxQueries: 50,
+    generatedQueryCount: 10,
+    runRateLimitMax: 5,
+    queryConfirmRateLimitMax: 5
+  }, {
+    repository,
+    logger: () => {},
+    planningPipeline: async () => ({
+      complete: false,
+      selected: [],
+      audits: [{ shop_type: "eyewear", status: "rejected" }],
+      shortfalls: [{ shopType: "eyewear", selected: 7, target: 10 }]
+    }),
+    setIntervalFn: () => ({ unref() {} }),
+    clearIntervalFn: () => {}
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const created = await (await fetch(`${base}/api/runs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ shopTypes: ["Eyewear"] })
+  })).json();
+  const failed = await waitFor(base, created.runId, "failed");
+  assert.equal(failed.phase, "finished");
+  assert.equal(failed.queryReview, null);
+  assert.deepEqual(failed.error, {
+    code: "INSUFFICIENT_HIGH_QUALITY_QUERIES",
+    message: "7 of 10 required queries passed for eyewear."
+  });
+  assert.equal(repository.planningFailure.audits.length, 1);
 });

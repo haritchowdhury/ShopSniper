@@ -45,10 +45,11 @@ export function summarizeProbe(candidate, page, config) {
   const duplicatesPerHost = hosts.length - uniqueHosts.length;
   const relevance = usable.map((result) => probeResultRelevance(result, candidate.query));
   const relevantResults = relevance.filter(({ relevant }) => relevant).length;
+  const relevantRatio = usable.length ? relevantResults / usable.length : 0;
   const rawResults = page.results.length;
 
   const distinctStoreScore = Math.min(40, (uniqueHosts.length / 10) * 40);
-  const relevanceScore = usable.length ? (relevantResults / usable.length) * 40 : 0;
+  const relevanceScore = relevantRatio * 40;
   // Candidate confidence and research source URLs remain audit provenance only.
   // They are model-authored and are not calibrated or independently linked to
   // probe coverage, so neither receives a fixed ranking bonus.
@@ -63,6 +64,10 @@ export function summarizeProbe(candidate, page, config) {
     rejectionReason = "insufficient_unique_hosts";
   } else if (relevantResults < (config.minQueryRelevantResults || 2)) {
     rejectionReason = "irrelevant_probe_results";
+  } else if (relevantRatio < (config.minQueryRelevanceRatio ?? 0)) {
+    rejectionReason = "insufficient_relevance_ratio";
+  } else if (baseScore < (config.minQueryBaseScore ?? 0)) {
+    rejectionReason = "low_query_quality";
   }
 
   return {
@@ -72,6 +77,7 @@ export function summarizeProbe(candidate, page, config) {
     uniqueHosts,
     duplicateProducts: duplicatesPerHost,
     relevantResults,
+    relevantRatio,
     relevanceCoverage: relevance.map(({ coverage }) => coverage),
     nextPageAvailable: page.nextPageAvailable,
     estimatedTotalResults: page.estimatedTotalResults,
@@ -135,6 +141,7 @@ export async function probeCandidates(
         uniqueHosts: [],
         duplicateProducts: 0,
         relevantResults: 0,
+        relevantRatio: 0,
         nextPageAvailable: false,
         estimatedTotalResults: 0,
         baseScore: 0,

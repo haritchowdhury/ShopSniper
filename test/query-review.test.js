@@ -16,13 +16,35 @@ const categories = [{
 
 const config = {
   maxQueries: 500,
+  generatedQueryCount: 1,
   queryProbeConcurrency: 1,
   minQueryResults: 1,
   minQueryUniqueHosts: 1,
   minQueryRelevantResults: 1,
+  minQueryRelevanceRatio: 0.5,
+  minQueryBaseScore: 60,
   googleResultsPerQuery: 10,
   queryProbeFreshnessMs: 86_400_000
 };
+
+test("v2 probe fingerprints include every quality threshold", () => {
+  assert.equal(GOOGLE_PROBE_CONTRACT_VERSION, "google-probe-v2");
+  const baseline = queryProbeFingerprint(
+    "site:myshopify.com/products acetate eyeglass frames",
+    categories[0],
+    config
+  );
+  assert.notEqual(baseline, queryProbeFingerprint(
+    "site:myshopify.com/products acetate eyeglass frames",
+    categories[0],
+    { ...config, minQueryRelevanceRatio: 0.6 }
+  ));
+  assert.notEqual(baseline, queryProbeFingerprint(
+    "site:myshopify.com/products acetate eyeglass frames",
+    categories[0],
+    { ...config, minQueryBaseScore: 61 }
+  ));
+});
 
 test("user query validation normalizes the fixed Shopify search form", () => {
   const result = validateQueryText(
@@ -50,7 +72,58 @@ test("editable lists enforce category coverage, per-category duplicates, and lim
 
   const missing = validateEditableQueryList([], categories, config);
   assert.equal(missing.valid, false);
-  assert.equal(missing.errors[0].reason, "category_requires_query");
+  assert.equal(missing.errors[0].reason, "category_requires_exact_query_count");
+});
+
+test("editable and confirmed lists require the exact configured count", async () => {
+  const exactConfig = { ...config, generatedQueryCount: 10 };
+  const rows = Array.from({ length: 11 }, (_, index) => ({
+    categoryIndex: 0,
+    query: `site:myshopify.com/products acetate frame model ${index}`
+  }));
+  const nine = validateEditableQueryList(rows.slice(0, 9), categories, exactConfig);
+  const eleven = validateEditableQueryList(rows, categories, exactConfig);
+  assert.equal(nine.valid, false);
+  assert.equal(nine.errors.some((error) =>
+    error.reason === "category_requires_exact_query_count" && error.actual === 9
+  ), true);
+  assert.equal(eleven.valid, false);
+  assert.equal(eleven.errors.some((error) =>
+    error.reason === "category_requires_exact_query_count" && error.actual === 11
+  ), true);
+
+  const confirmed = await validateConfirmedQueryRows(
+    Array.from({ length: 9 }, (_, sequence) => ({
+      id: `query_${sequence}`,
+      categoryIndex: 0,
+      sequence,
+      query: `site:myshopify.com/products acetate frame model ${sequence}`,
+      categoryVocabulary: ["acetate frame model"],
+      validationState: "pending"
+    })),
+    categories,
+    exactConfig,
+    { stage: "" },
+    {
+      probe: async (candidates) => candidates.map((entry) => ({
+        candidate: entry,
+        results: [],
+        rawResults: 10,
+        relevantResults: 10,
+        relevantRatio: 1,
+        uniqueHosts: ["a.myshopify.com"],
+        duplicateProducts: 0,
+        estimatedTotalResults: 10,
+        nextPageAvailable: false,
+        baseScore: 100,
+        rejectionReason: "",
+        error: ""
+      }))
+    }
+  );
+  assert.equal(confirmed.valid, false);
+  assert.equal(confirmed.errors[0].actual, 9);
+  assert.deepEqual(confirmed.queryPlans, []);
 });
 
 test("confirmation reuses a fresh matching probe and reprobes an edited row", async () => {

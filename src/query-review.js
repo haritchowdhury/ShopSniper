@@ -5,7 +5,7 @@ import {
   validateQueryText
 } from "./query-validator.js";
 
-export const GOOGLE_PROBE_CONTRACT_VERSION = "google-probe-v1";
+export const GOOGLE_PROBE_CONTRACT_VERSION = "google-probe-v2";
 export const DEFAULT_PROBE_FRESHNESS_MS = 24 * 60 * 60 * 1000;
 export const MAX_QUERIES_PER_CATEGORY = 20;
 
@@ -32,6 +32,8 @@ export function queryProbeFingerprint(query, category, config) {
       minQueryResults: config.minQueryResults,
       minQueryUniqueHosts: config.minQueryUniqueHosts,
       minQueryRelevantResults: config.minQueryRelevantResults,
+      minQueryRelevanceRatio: config.minQueryRelevanceRatio,
+      minQueryBaseScore: config.minQueryBaseScore,
       googleResultsPerQuery: config.googleResultsPerQuery
     }
   })).digest("hex");
@@ -91,8 +93,17 @@ export function validateEditableQueryList(queries, categories, config) {
     });
   }
 
+  const requiredCount = config.generatedQueryCount ?? 10;
   for (const [categoryIndex, count] of counts.entries()) {
-    if (count < 1) errors.push({ categoryIndex, field: "queries", reason: "category_requires_query" });
+    if (count !== requiredCount) {
+      errors.push({
+        categoryIndex,
+        field: "queries",
+        reason: "category_requires_exact_query_count",
+        expected: requiredCount,
+        actual: count
+      });
+    }
     if (count > MAX_QUERIES_PER_CATEGORY) {
       errors.push({
         categoryIndex,
@@ -131,9 +142,11 @@ export async function validateConfirmedQueryRows(
   const seenByCategory = categories.map(() => new Set());
   const validation = [];
   const toProbe = [];
+  const counts = new Array(categories.length).fill(0);
 
   for (const row of rows) {
     const category = categories[row.categoryIndex];
+    if (category) counts[row.categoryIndex] += 1;
     const checked = category
       ? validateQueryText(row.query, {
           shopType: category.shopType,
@@ -188,6 +201,7 @@ export async function validateConfirmedQueryRows(
         probeSummary: {
           rawResults: probeResult.rawResults,
           relevantResults: probeResult.relevantResults,
+          relevantRatio: probeResult.relevantRatio,
           uniqueHosts: probeResult.uniqueHosts?.length || 0,
           duplicateProducts: probeResult.duplicateProducts,
           estimatedTotalResults: probeResult.estimatedTotalResults,
@@ -200,9 +214,21 @@ export async function validateConfirmedQueryRows(
   }
 
   validation.sort((left, right) => left.sequence - right.sequence);
-  const valid = validation.every((row) => row.validationState === "valid");
+  const requiredCount = config.generatedQueryCount ?? 10;
+  const errors = counts.flatMap((count, categoryIndex) => count === requiredCount
+    ? []
+    : [{
+        categoryIndex,
+        field: "queries",
+        reason: "category_requires_exact_query_count",
+        expected: requiredCount,
+        actual: count
+      }]);
+  const valid = errors.length === 0 &&
+    validation.every((row) => row.validationState === "valid");
   return {
     valid,
+    errors,
     rows: validation,
     queryPlans: valid ? validation.map((row) => {
       const category = categories[row.categoryIndex];

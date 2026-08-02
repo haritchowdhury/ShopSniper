@@ -123,6 +123,39 @@ Do not use quotation marks, extra operators, abstract brand terms, informational
 Favor product-title vocabulary that is likely to occur on Shopify product pages.
 Do not invent source URLs or market claims.`;
 
+const REPAIR_GUIDANCE = {
+  insufficient_results:
+    "Use a more common catalogue synonym or remove a narrow modifier.",
+  insufficient_unique_hosts:
+    "Broaden the product phrase or choose another researched product family.",
+  irrelevant_probe_results:
+    "Move closer to concrete product-title vocabulary in the supplied research.",
+  insufficient_relevance_ratio:
+    "Replace ambiguous words with a concrete researched catalogue phrase.",
+  duplicate_candidate:
+    "Use a different researched product family or shopper use case.",
+  near_duplicate_candidate:
+    "Use a materially different researched product family or shopper use case.",
+  product_family_concentration:
+    "Use a different researched product family to improve plan diversity.",
+  low_query_quality:
+    "Replace the candidate; do not weaken or work around the quality thresholds."
+};
+
+function summarizeFailures(failures) {
+  const counts = {};
+  for (const failure of failures) {
+    const reason = failure.reason || "unknown";
+    counts[reason] = (counts[reason] || 0) + 1;
+  }
+  return Object.entries(counts).map(([reason, count]) => ({
+    reason,
+    count,
+    guidance: REPAIR_GUIDANCE[reason] ||
+      "Use another concrete product-title phrase from the supplied research."
+  }));
+}
+
 function trustedUrls(values, consultedUrls) {
   const consulted = new Set(consultedUrls);
   return [...new Set(values || [])].filter((url) => consulted.has(url)).slice(0, 8);
@@ -184,15 +217,16 @@ export async function generateRepairCandidates(
     schema: repairSchema,
     system: `${SYSTEM_PROMPT}
 This is a repair pass. Use only the supplied research evidence. Do not perform or claim new research.
-Avoid every existing query. Replace weak wording with common catalog synonyms, simpler modifiers, or useful singular/plural alternatives.`,
+Avoid every existing query. Follow the supplied failure-specific guidance. Replace failed candidates rather than weakening quality requirements.`,
     input: {
       task: "Generate replacement candidates for failed Shopify product queries.",
       shop_type: category.shopType,
       business_qualifier: category.businessQualifier || "unspecified",
       requested_count: count,
       research,
+      failure_summary: summarizeFailures(failures),
       failed_candidates: failures.slice(-20),
-      existing_queries: existingQueries.slice(-50)
+      existing_queries: existingQueries.slice(-100)
     },
     config,
     webSearch: false

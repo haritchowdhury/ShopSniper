@@ -30,6 +30,14 @@ function integer(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}
   return value;
 }
 
+function number(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const value = Number(process.env[name] ?? String(fallback));
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be a number between ${min} and ${max}`);
+  }
+  return value;
+}
+
 function configuredPath(value, cwd) {
   return path.resolve(cwd, value);
 }
@@ -75,6 +83,7 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     ),
     googleApiKey: process.env.GOOGLE_API_KEY || "",
     googleSearchEngineId: process.env.GOOGLE_SEARCH_ENGINE_ID || "",
+    browserlessEnabled: boolean("ENABLE_BROWSERLESS", true),
     browserlessUrl:
       process.env.BROWSERLESS_URL || "https://production-sfo.browserless.io/content",
     browserlessToken: process.env.BROWSERLESS_TOKEN || "",
@@ -97,8 +106,12 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     researchGeography: process.env.RESEARCH_GEOGRAPHY || "global English-language market",
     maxResearchSources: integer("MAX_RESEARCH_SOURCES", 8, { max: 20 }),
     generatedQueryCount: integer("GENERATED_QUERY_COUNT", 10, { max: 20 }),
-    queryCandidateCount: integer("QUERY_CANDIDATE_COUNT", 25, { max: 40 }),
-    queryRepairRounds: integer("QUERY_REPAIR_ROUNDS", 2, { min: 0, max: 5 }),
+    queryCandidateCount: integer("QUERY_CANDIDATE_COUNT", 30, { max: 40 }),
+    queryRepairRounds: integer("QUERY_REPAIR_ROUNDS", 4, { min: 0, max: 5 }),
+    maxQueryProbesPerCategory: integer("MAX_QUERY_PROBES_PER_CATEGORY", 80, {
+      min: 1,
+      max: 200
+    }),
     queryProbeConcurrency: integer("QUERY_PROBE_CONCURRENCY", 3, { max: 10 }),
     queryProbeFreshnessMs: integer("QUERY_PROBE_FRESHNESS_MS", 86400000, {
       min: 60000,
@@ -109,13 +122,21 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
       min: 1,
       max: 10
     }),
-    minQueryRelevantResults: integer("MIN_QUERY_RELEVANT_RESULTS", 2, {
+    minQueryRelevantResults: integer("MIN_QUERY_RELEVANT_RESULTS", 3, {
       min: 1,
       max: 10
     }),
+    minQueryRelevanceRatio: number("MIN_QUERY_RELEVANCE_RATIO", 0.5, {
+      min: 0,
+      max: 1
+    }),
+    minQueryBaseScore: number("MIN_QUERY_BASE_SCORE", 60, {
+      min: 0,
+      max: 100
+    }),
     maxShopTypes: integer("MAX_SHOP_TYPES", 100, { max: 1000 }),
     googleResultsPerQuery: integer("GOOGLE_RESULTS_PER_QUERY", 10, { max: 10 }),
-    maxQueries: integer("MAX_QUERIES", 500, { max: 10000 }),
+    maxQueries: integer("MAX_QUERIES", 1000, { max: 10000 }),
     maxPagesPerStore: integer("MAX_PAGES_PER_STORE", 5, { max: 20 }),
     pageFetchConcurrency: integer("PAGE_FETCH_CONCURRENCY", 2, { max: 10 }),
     storeConcurrency: integer("STORE_CONCURRENCY", 2, { max: 20 }),
