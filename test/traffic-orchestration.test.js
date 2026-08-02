@@ -86,6 +86,16 @@ class MemoryRepository {
       .reduce((total, row) => total + row.providerCostUsd, 0);
   }
 
+  async getDataForSeoRunExposureUsd() {
+    return [...this.ledger.values()].reduce((total, row) => {
+      if (row.state === "succeeded") return total + row.providerCostUsd;
+      if (["in_flight", "ambiguous"].includes(row.state)) {
+        return total + row.reservationCostUsd;
+      }
+      return total;
+    }, 0);
+  }
+
   async readFreshTrafficCache(_runId, _lease, keys) {
     this.calls.push("cache.read");
     return this.cache.filter((row) => keys.some((key) =>
@@ -121,7 +131,18 @@ class MemoryRepository {
     if (ledger.state !== "planned") {
       return { outcome: ledger.state, networkAllowed: false, ledger };
     }
+    const exposure = [...this.ledger.values()].reduce((total, row) => {
+      if (row.state === "succeeded") return total + row.providerCostUsd;
+      if (["in_flight", "ambiguous"].includes(row.state)) {
+        return total + row.reservationCostUsd;
+      }
+      return total;
+    }, 0);
+    if (exposure + this.policy.estimatedCostPerTaskUsd > this.policy.maxCostPerRunUsd) {
+      return { outcome: "budget_exceeded", networkAllowed: false, ledger };
+    }
     ledger.state = "in_flight";
+    ledger.reservationCostUsd = this.policy.estimatedCostPerTaskUsd;
     return { outcome: "in_flight", networkAllowed: true, ledger };
   }
 
@@ -129,7 +150,8 @@ class MemoryRepository {
     this.calls.push("ledger.succeeded");
     Object.assign(this.ledger.get(fingerprint), {
       state: "succeeded",
-      providerCostUsd: result.providerCostUsd
+      providerCostUsd: result.providerCostUsd,
+      reservationCostUsd: 0
     });
     this.cache.push(...result.cacheRows);
   }
@@ -146,10 +168,12 @@ class MemoryRepository {
 }
 
 function options({ dataForSeo = false, crux = false, repository, leads = [lead()], dependencies = {}, maxCost } = {}) {
+  const runSnapshot = snapshot(dataForSeo, crux, { maxCost });
+  if (repository instanceof MemoryRepository) repository.policy = runSnapshot.dataForSeo;
   return {
     runId: RUN_ID,
     lease: LEASE,
-    runSnapshot: snapshot(dataForSeo, crux, { maxCost }),
+    runSnapshot,
     runtimeConfig: {
       dataForSeoLogin: "fixture",
       dataForSeoPassword: "fixture",
@@ -223,6 +247,7 @@ test("paid ambiguity is durable and is never automatically retried", async () =>
   });
   const run = () => enrichTraffic(options({
     dataForSeo: true,
+    maxCost: 0.05,
     repository,
     dependencies: {
       fetchDataForSeoTraffic: async () => { calls += 1; throw ambiguous; }
@@ -230,10 +255,58 @@ test("paid ambiguity is durable and is never automatically retried", async () =>
   }));
   const first = await run();
   const second = await run();
-  assert.equal(calls, 10);
+  assert.equal(calls, 2);
+  assert.equal(await repository.getDataForSeoRunExposureUsd(), 0.048);
   assert.ok(repository.calls.includes("ledger.ambiguous"));
+  assert.equal(first.trafficEnrichmentSummary.dataforseo.budgetStopped, true);
   assert.equal(first.trafficEnrichments[0].state, "ambiguous");
   assert.equal(second.trafficEnrichments[0].state, "ambiguous");
+});
+
+for (const [name, code, expectedState] of [
+  ["contract mismatch", "provider_contract_mismatch", "contract_mismatch"],
+  ["response-size failure", "provider_request_ambiguous", "ambiguous"],
+  ["timeout", "provider_request_ambiguous", "ambiguous"],
+  ["invalid JSON", "provider_contract_mismatch", "contract_mismatch"]
+]) {
+  test(`${name} after claim remains terminal ambiguous paid work`, async () => {
+    const repository = new MemoryRepository();
+    const result = await enrichTraffic(options({
+      dataForSeo: true,
+      maxCost: 0.024,
+      repository,
+      dependencies: {
+        fetchDataForSeoTraffic: async () => {
+          throw new EnrichmentError(name, {
+            code,
+            provider: "dataforseo",
+            contractVersion: "dataforseo-bulk-traffic-v1"
+          });
+        }
+      }
+    }));
+    assert.equal([...repository.ledger.values()][0].state, "ambiguous");
+    assert.equal(result.trafficEnrichments[0].state, expectedState);
+    assert.equal(result.trafficEnrichmentSummary.dataforseo.budgetStopped, true);
+  });
+}
+
+test("proven zero-cost rejection is retryable and consumes no paid exposure", async () => {
+  const repository = new MemoryRepository();
+  const rejection = new EnrichmentError("rejected", {
+    code: "provider_rejected",
+    provider: "dataforseo",
+    contractVersion: "dataforseo-bulk-traffic-v1",
+    paidOutcome: "zero_cost_proven"
+  });
+  await enrichTraffic(options({
+    dataForSeo: true,
+    maxCost: 0.05,
+    repository,
+    dependencies: { fetchDataForSeoTraffic: async () => { throw rejection; } }
+  }));
+  assert.ok([...repository.ledger.values()].every(({ state }) => state === "failed"));
+  assert.equal(await repository.getDataForSeoRunExposureUsd(), 0);
 });
 
 test("actual paid cost is authoritative and stops later scoped requests", async () => {

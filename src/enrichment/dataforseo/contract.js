@@ -59,10 +59,21 @@ function mismatch() {
   );
 }
 
-function rejected() {
+function rejected(root, task) {
+  const capturedZeroCostRejection =
+    root.status_code === 20000 && root.status_message === "Ok." &&
+    root.cost === 0 && root.tasks_count === 1 &&
+    root.tasks_error === 1 && root.tasks.length === 1 &&
+    task.status_code === 40501 && task.status_message === "Invalid Field: 'targets'." &&
+    task.cost === 0 && task.result_count === 0 && task.result === null &&
+    task.data.api === "dataforseo_labs" &&
+    task.data.function === "bulk_traffic_estimation" && task.data.se_type === "google" &&
+    Array.isArray(task.data.targets) && task.data.targets.length === 0;
+  if (!capturedZeroCostRejection) mismatch();
   throw dataForSeoError(
     ENRICHMENT_ERROR_CODES.providerRejected,
-    "DataForSEO rejected the request"
+    "DataForSEO rejected the request",
+    { paidOutcome: "zero_cost_proven" }
   );
 }
 
@@ -84,10 +95,9 @@ export function parseDataForSeoResponse(body, descriptor) {
   const parsed = rootSchema.safeParse(payload);
   if (!parsed.success) mismatch();
   const root = parsed.data;
-  if (root.status_code !== 20000) rejected();
   if (root.tasks_count !== 1 || root.tasks.length !== 1) mismatch();
   const task = root.tasks[0];
-  if (task.status_code !== 20000) rejected();
+  if (root.status_code !== 20000 || task.status_code !== 20000) rejected(root, task);
   if (root.tasks_error !== 0) mismatch();
   if (!task.result || task.result_count !== 1 || task.result.length !== 1) mismatch();
   if (root.cost !== task.cost) mismatch();

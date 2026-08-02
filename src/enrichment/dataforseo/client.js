@@ -5,27 +5,17 @@ import { ENRICHMENT_ERROR_CODES, dataForSeoError } from "../errors.js";
 function configurationError() {
   return dataForSeoError(
     ENRICHMENT_ERROR_CODES.configuration,
-    "DataForSEO credentials are not configured"
+    "DataForSEO credentials are not configured",
+    { paidOutcome: "not_dispatched" }
   );
 }
 
 function mapRequestError(error) {
   const status = error instanceof HttpError ? error.status : 0;
-  const ambiguous =
-    !status || [408, 425, 429, 500, 502, 503, 504].includes(status) ||
-    error?.name === "TimeoutError" || error?.name === "AbortError" ||
-    error instanceof TypeError;
-  if (ambiguous) {
-    return dataForSeoError(
-      ENRICHMENT_ERROR_CODES.ambiguousRequest,
-      "DataForSEO request outcome is ambiguous",
-      { httpStatus: status }
-    );
-  }
   return dataForSeoError(
-    ENRICHMENT_ERROR_CODES.providerHttp,
-    "DataForSEO returned an unsuccessful HTTP response",
-    { httpStatus: status }
+    ENRICHMENT_ERROR_CODES.ambiguousRequest,
+    "DataForSEO request outcome is ambiguous",
+    { httpStatus: status, paidOutcome: "possibly_charged" }
   );
 }
 

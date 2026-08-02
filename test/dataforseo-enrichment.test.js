@@ -157,13 +157,29 @@ test("an omitted target is typed unavailable and is never synthesized as zero", 
 });
 
 test("task rejection, missing result, and null metrics have distinct safe typed errors", () => {
-  assert.throws(
-    () => parseDataForSeoResponse(fixture("bulk-traffic-v1-task-error.json"), descriptor()),
-    assertCode("provider_rejected")
-  );
+  assert.throws(() => parseDataForSeoResponse(
+    fixture("bulk-traffic-v1-task-error.json"), descriptor()
+  ), (error) => {
+    assertCode("provider_rejected")(error);
+    assert.equal(error.paidOutcome, "zero_cost_proven");
+    return true;
+  });
   for (const name of ["bulk-traffic-v1-malformed.json", "bulk-traffic-v1-null-metrics.json"]) {
     assert.throws(
       () => parseDataForSeoResponse(fixture(name), descriptor()),
+      assertCode("provider_contract_mismatch")
+    );
+  }
+
+  for (const mutate of [
+    (value) => { value.cost = 0.01; value.tasks[0].cost = 0.01; },
+    (value) => { value.tasks[0].status_code = 40502; },
+    (value) => { value.tasks[0].result_count = 1; }
+  ]) {
+    const value = fixture("bulk-traffic-v1-task-error.json");
+    mutate(value);
+    assert.throws(
+      () => parseDataForSeoResponse(value, descriptor()),
       assertCode("provider_contract_mismatch")
     );
   }
@@ -281,6 +297,7 @@ test("transport and logging errors do not expose credentials, targets, auth, or 
   }
   assert.ok(thrown instanceof EnrichmentError);
   assert.equal(thrown.code, "provider_request_ambiguous");
+  assert.equal(thrown.paidOutcome, "possibly_charged");
 
   let written = "";
   const originalWrite = process.stdout.write;
@@ -301,7 +318,11 @@ test("missing credentials fail before network I/O", async () => {
       targets: ["shopify.com"],
       config: { dataForSeoLogin: "", dataForSeoPassword: "", requestTimeoutMs: 1000 }
     }, { request: async () => { calls += 1; } }),
-    assertCode("configuration_error")
+    (error) => {
+      assertCode("configuration_error")(error);
+      assert.equal(error.paidOutcome, "not_dispatched");
+      return true;
+    }
   );
   assert.equal(calls, 0);
 });

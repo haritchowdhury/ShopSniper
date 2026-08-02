@@ -174,9 +174,8 @@ export function trafficEnrichmentConfigSnapshot(config = {}) {
 }
 
 const SAFE_LEDGER_FAILURES = Object.freeze({
-  DATAFORSEO_REQUEST_FAILED: "The paid request failed with a known outcome.",
-  DATAFORSEO_PROVIDER_REJECTED: "The provider rejected the paid request.",
-  DATAFORSEO_CONTRACT_MISMATCH: "The paid response did not match the accepted contract."
+  DATAFORSEO_NOT_DISPATCHED: "The request failed before provider dispatch.",
+  DATAFORSEO_ZERO_COST_REJECTION: "The provider rejected the request with proven zero cost."
 });
 
 function safeLedgerError(code) {
@@ -205,6 +204,29 @@ function requirePaidDescriptor(descriptor) {
     throw new Error("DataForSEO refresh freshness is invalid");
   }
   return descriptor;
+}
+
+function requirePaidPolicy(snapshot) {
+  const policy = snapshot?.dataForSeo;
+  if (!policy || !Number.isFinite(policy.maxCostPerRunUsd) || policy.maxCostPerRunUsd <= 0 ||
+      !Number.isFinite(policy.estimatedCostPerTaskUsd) || policy.estimatedCostPerTaskUsd <= 0 ||
+      !Number.isSafeInteger(policy.paidRequestStaleMs) || policy.paidRequestStaleMs < 1) {
+    throw new Error("The immutable DataForSEO paid policy is invalid");
+  }
+  return policy;
+}
+
+function paidExposure(rows, policy) {
+  return rows.reduce((total, row) => {
+    if (row.state === "succeeded") {
+      const cost = Number(row.providerCostUsd);
+      return total + (Number.isFinite(cost) && cost >= 0 ? cost : policy.maxCostPerRunUsd);
+    }
+    const reservation = Number(row.reservationCostUsd);
+    return total + (Number.isFinite(reservation) && reservation > 0
+      ? reservation
+      : policy.estimatedCostPerTaskUsd);
+  }, 0);
 }
 
 function cacheId(record) {
@@ -941,11 +963,13 @@ export class PrismaRunRepository {
           plannedAt: now,
           safeErrorCode: null,
           safeErrorMessage: null,
+          reservationCostUsd: null,
           providerCostUsd: null,
           leaseOwner: null,
           leaseToken: null,
           leaseAttempt: null,
           claimedAt: null,
+          ambiguousAfter: null,
           completedAt: null
         };
         const ledger = existing
@@ -973,6 +997,37 @@ export class PrismaRunRepository {
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }
       }));
+      const run = await transaction.run.findUnique({
+        where: { id: runIdentifier },
+        select: { trafficEnrichmentConfig: true }
+      });
+      const policy = requirePaidPolicy(run?.trafficEnrichmentConfig);
+      const currentLedger = await transaction.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint }
+      });
+      if (!currentLedger) throw new Error("DataForSEO request was not planned");
+      if (currentLedger.runId !== runIdentifier || currentLedger.state !== "planned") {
+        return {
+          outcome: currentLedger.state,
+          networkAllowed: false,
+          ledger: currentLedger
+        };
+      }
+      const exposureRows = await transaction.dataForSeoRequestLedger.findMany({
+        where: {
+          runId: runIdentifier,
+          state: { in: ["in_flight", "ambiguous", "succeeded"] }
+        },
+        select: { state: true, reservationCostUsd: true, providerCostUsd: true }
+      });
+      const exposureUsd = paidExposure(exposureRows, policy);
+      if (exposureUsd + policy.estimatedCostPerTaskUsd > policy.maxCostPerRunUsd) {
+        const ledger = await transaction.dataForSeoRequestLedger.findUnique({
+          where: { requestFingerprint }
+        });
+        if (!ledger) throw new Error("DataForSEO request was not planned");
+        return { outcome: "budget_exceeded", networkAllowed: false, exposureUsd, ledger };
+      }
       const claimed = await transaction.dataForSeoRequestLedger.updateMany({
         where: { requestFingerprint, runId: runIdentifier, state: "planned" },
         data: {
@@ -981,7 +1036,9 @@ export class PrismaRunRepository {
           leaseOwner: lease.owner,
           leaseToken: lease.token,
           leaseAttempt: lease.attempt ?? null,
-          claimedAt: now
+          claimedAt: now,
+          reservationCostUsd: policy.estimatedCostPerTaskUsd,
+          ambiguousAfter: new Date(now.getTime() + policy.paidRequestStaleMs)
         }
       });
       const ledger = await transaction.dataForSeoRequestLedger.findUnique({
@@ -991,6 +1048,9 @@ export class PrismaRunRepository {
       return {
         outcome: claimed.count === 1 ? "in_flight" : ledger.state,
         networkAllowed: claimed.count === 1,
+        exposureUsd: claimed.count === 1
+          ? exposureUsd + policy.estimatedCostPerTaskUsd
+          : exposureUsd,
         ledger
       };
     });
@@ -1032,6 +1092,8 @@ export class PrismaRunRepository {
         data: {
           state: "succeeded",
           providerCostUsd,
+          reservationCostUsd: null,
+          ambiguousAfter: null,
           completedAt: now,
           safeErrorCode: null,
           safeErrorMessage: null
@@ -1083,6 +1145,8 @@ export class PrismaRunRepository {
         },
         data: {
           state: "failed",
+          reservationCostUsd: null,
+          ambiguousAfter: null,
           safeErrorCode: safeError.code,
           safeErrorMessage: safeError.message,
           completedAt: now
@@ -1141,14 +1205,36 @@ export class PrismaRunRepository {
     });
   }
 
+  async getDataForSeoRunExposureUsd(runIdentifier, lease, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const run = await transaction.run.findUnique({
+        where: { id: runIdentifier },
+        select: { trafficEnrichmentConfig: true }
+      });
+      const policy = requirePaidPolicy(run?.trafficEnrichmentConfig);
+      const rows = await transaction.dataForSeoRequestLedger.findMany({
+        where: {
+          runId: runIdentifier,
+          state: { in: ["in_flight", "ambiguous", "succeeded"] }
+        },
+        select: { state: true, reservationCostUsd: true, providerCostUsd: true }
+      });
+      return paidExposure(rows, policy);
+    });
+  }
+
   async markStaleDataForSeoRequestsAmbiguous(now = new Date()) {
-    const cutoff = new Date(
-      now.getTime() - this.trafficEnrichmentConfig.dataForSeo.paidRequestStaleMs
-    );
     return this.prisma.dataForSeoRequestLedger.updateMany({
       where: {
         state: "in_flight",
-        claimedAt: { lte: cutoff },
+        OR: [
+          { ambiguousAfter: { lte: now } },
+          { ambiguousAfter: null }
+        ],
         run: {
           OR: [
             { state: { not: "running" } },

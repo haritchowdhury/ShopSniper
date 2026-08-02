@@ -250,18 +250,20 @@ model DataForSeoRequestLedger {
   attempt            Int                    @default(0)
   safeErrorCode      String?
   safeErrorMessage   String?
+  reservationCostUsd Decimal?               @db.Decimal(18, 8)
   providerCostUsd    Decimal?               @db.Decimal(18, 8)
   leaseOwner         String?
   leaseToken         String?
   leaseAttempt       Int?
   plannedAt          DateTime               @default(now())
   claimedAt          DateTime?
+  ambiguousAfter     DateTime?
   completedAt        DateTime?
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
 
   @@index([runId, state])
-  @@index([state, claimedAt])
+  @@index([state, ambiguousAfter])
 }
 
 model QueryAudit {

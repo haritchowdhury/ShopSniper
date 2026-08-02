@@ -154,9 +154,15 @@ test("paid request claim commits in-flight before granting network permission", 
     }
   };
   const transaction = {
-    run: { updateMany: async () => { calls.push("run.fence"); return { count: 1 }; } },
+    run: {
+      updateMany: async () => { calls.push("run.fence"); return { count: 1 }; },
+      findUnique: async () => ({ trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({
+        dataForSeoEnrichmentEnabled: true
+      }) })
+    },
     dataForSeoRequestLedger: ledgerModel
   };
+  ledgerModel.findMany = async () => [];
   const repository = new PrismaRunRepository({
     $transaction: async (callback) => callback(transaction)
   });
@@ -177,6 +183,8 @@ test("paid request claim commits in-flight before granting network permission", 
   assert.deepEqual(calls, [
     "run.fence", "ledger.create", "run.fence", "ledger.updateMany:in_flight"
   ]);
+  assert.equal(Number(claim.ledger.reservationCostUsd), 0.024);
+  assert.equal(claim.ledger.ambiguousAfter.toISOString(), "2026-08-01T00:15:00.000Z");
   const competing = await repository.claimDataForSeoRequest(
     "run_abcdefghijklmnop", LEASE, descriptor.requestFingerprint, NOW
   );
@@ -293,9 +301,10 @@ test("only stale in-flight paid work on an inactive lease becomes ambiguous", as
   });
   await repository.markStaleDataForSeoRequestsAmbiguous(NOW);
   assert.equal(update.where.state, "in_flight");
-  assert.deepEqual(update.where.claimedAt, {
-    lte: new Date("2026-07-31T23:45:00.000Z")
-  });
+  assert.deepEqual(update.where.OR, [
+    { ambiguousAfter: { lte: NOW } },
+    { ambiguousAfter: null }
+  ]);
   assert.equal(update.data.state, "ambiguous");
   assert.equal(update.data.safeErrorCode, "PAID_REQUEST_OUTCOME_AMBIGUOUS");
 });
@@ -316,12 +325,12 @@ test("known paid failures persist only fixed privacy-safe diagnostics", async ()
     LEASE,
     "c".repeat(64),
     {
-      code: "DATAFORSEO_REQUEST_FAILED",
+      code: "DATAFORSEO_NOT_DISPATCHED",
       message: "Bearer should-never-be-persisted"
     },
     NOW
   );
-  assert.equal(stored.safeErrorMessage, "The paid request failed with a known outcome.");
+  assert.equal(stored.safeErrorMessage, "The request failed before provider dispatch.");
   assert.doesNotMatch(JSON.stringify(stored), /should-never/u);
   await assert.rejects(repository.markDataForSeoRequestFailed(
     "run_abcdefghijklmnop", LEASE, "c".repeat(64),
@@ -689,4 +698,17 @@ test("TE-3 migration is forward-only and adds isolated enrichment storage", asyn
   assert.match(sql, /CREATE TABLE "LeadTrafficEnrichment"/u);
   assert.match(sql, /CREATE TABLE "DataForSeoRequestLedger"/u);
   assert.match(sql, /FOREIGN KEY \("leadId", "runId"\)/u);
+});
+
+test("TE-R2 migration adds only decimal reservation, deadline, and recovery index", async () => {
+  const url = new URL(
+    "../prisma/migrations/20260802120000_dataforseo_paid_safety/migration.sql",
+    import.meta.url
+  );
+  const sql = await fs.readFile(url, "utf8");
+  assert.doesNotMatch(sql, /^\s*(?:UPDATE|DELETE FROM|DROP TABLE)\b/imu);
+  assert.match(sql, /ADD COLUMN "reservationCostUsd" DECIMAL\(18,8\)/u);
+  assert.match(sql, /ADD COLUMN "ambiguousAfter" TIMESTAMP/u);
+  assert.match(sql, /\("state", "ambiguousAfter"\)/u);
+  assert.doesNotMatch(sql, /DOUBLE PRECISION|REAL/u);
 });

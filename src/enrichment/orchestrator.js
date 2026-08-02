@@ -76,15 +76,9 @@ function safeProviderState(error) {
 }
 
 function ledgerFailureCode(error) {
-  if (error instanceof EnrichmentError &&
-      error.code === ENRICHMENT_ERROR_CODES.contractMismatch) {
-    return "DATAFORSEO_CONTRACT_MISMATCH";
-  }
-  if (error instanceof EnrichmentError &&
-      error.code === ENRICHMENT_ERROR_CODES.providerRejected) {
-    return "DATAFORSEO_PROVIDER_REJECTED";
-  }
-  return "DATAFORSEO_REQUEST_FAILED";
+  return error?.paidOutcome === "zero_cost_proven"
+    ? "DATAFORSEO_ZERO_COST_REJECTION"
+    : "DATAFORSEO_NOT_DISPATCHED";
 }
 
 function strongestState(states) {
@@ -232,6 +226,7 @@ async function enrichDataForSeo(context, eligible, dependencies) {
         context.runId, context.lease, descriptor.requestFingerprint, dateFrom(context.now)
       );
       if (!claim.networkAllowed) {
+        if (claim.outcome === "budget_exceeded") budgetStopped = true;
         const state = claim.outcome === "ambiguous" || claim.outcome === "in_flight"
           ? "ambiguous"
           : "unavailable";
@@ -281,7 +276,7 @@ async function enrichDataForSeo(context, eligible, dependencies) {
       } catch (error) {
         if (!(error instanceof EnrichmentError)) throw error;
         const state = safeProviderState(error);
-        if (state === "ambiguous") {
+        if (!["zero_cost_proven", "not_dispatched"].includes(error.paidOutcome)) {
           await context.repository.markDataForSeoRequestAmbiguous(
             context.runId, context.lease, descriptor.requestFingerprint, dateFrom(context.now)
           );

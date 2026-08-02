@@ -44,7 +44,7 @@ function deploy(databaseUrl, configPath) {
   );
 }
 
-async function preTe3MigrationConfig() {
+async function migrationConfigBefore({ includeTe3 = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "email-scraper-te3-"));
   const migrationRoot = path.join(directory, "migrations");
   await fs.mkdir(migrationRoot);
@@ -56,14 +56,16 @@ async function preTe3MigrationConfig() {
     path.join(projectRoot, "prisma", "migrations", "migration_lock.toml"),
     path.join(migrationRoot, "migration_lock.toml")
   );
-  for (const name of [
+  const names = [
     "20260731000000_init",
     "20260731150000_auth_run_ownership",
     "20260731230000_g3_pipeline_quality",
     "20260801000000_gr4_durable_v2",
     "20260801090000_gr6_worker_leases",
     "20260801150000_query_review_workflow"
-  ]) {
+  ];
+  if (includeTe3) names.push("20260802090000_traffic_enrichment_v1");
+  for (const name of names) {
     await fs.cp(
       path.join(projectRoot, "prisma", "migrations", name),
       path.join(migrationRoot, name),
@@ -160,7 +162,7 @@ test(
     const schema = `te3_${Date.now()}_${process.pid}`;
     const base = createPrismaClient(process.env.TEST_DATABASE_URL);
     const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
-    const baseline = await preTe3MigrationConfig();
+      const baseline = await migrationConfigBefore();
     let prismaA;
     let prismaB;
     try {
@@ -372,7 +374,7 @@ test(
         plannedRecoveryRun.id,
         plannedRecoveryClaim.lease,
         plannedFingerprint,
-        { code: "DATAFORSEO_REQUEST_FAILED" },
+        { code: "DATAFORSEO_NOT_DISPATCHED" },
         plannedRecoveryStart
       );
       await repositoryA.markFailed(
@@ -475,6 +477,168 @@ test(
         null,
         te4PrimitiveStart
       );
+
+      const cappedRepositoryA = new PrismaRunRepository(prismaA, {
+        ...config,
+        dataForSeoMaxCostPerRunUsd: 0.05
+      });
+      const cappedRepositoryB = new PrismaRunRepository(prismaB, {
+        ...config,
+        dataForSeoMaxCostPerRunUsd: 999
+      });
+      const cappedRun = await cappedRepositoryA.createRun(
+        "owner_paid_cap", [{ shopType: "paid-cap" }]
+      );
+      const cappedStart = new Date(te4PrimitiveStart.getTime() + 120000);
+      const cappedClaim = await cappedRepositoryA.claimNextQueuedRun(
+        "worker_paid_cap", cappedStart, 60000
+      );
+      const cappedFingerprints = ["6", "7", "8"].map((value) => value.repeat(64));
+      for (const [index, requestFingerprint] of cappedFingerprints.entries()) {
+        await cappedRepositoryA.planDataForSeoRequest(
+          cappedRun.id,
+          cappedClaim.lease,
+          { requestFingerprint, targetCount: 1, scopeKey: index === 0 ? "worldwide" : `country:US:${2840 + index}` },
+          cappedStart
+        );
+      }
+      const cappedClaims = await Promise.all(cappedFingerprints.map(
+        (requestFingerprint, index) => (index % 2 ? cappedRepositoryB : cappedRepositoryA)
+          .claimDataForSeoRequest(
+            cappedRun.id, cappedClaim.lease, requestFingerprint, cappedStart
+          )
+      ));
+      assert.equal(cappedClaims.filter(({ networkAllowed }) => networkAllowed).length, 2);
+      assert.equal(cappedClaims.filter(({ outcome }) => outcome === "budget_exceeded").length, 1);
+      assert.equal(
+        await cappedRepositoryA.getDataForSeoRunExposureUsd(
+          cappedRun.id, cappedClaim.lease, cappedStart
+        ),
+        0.048
+      );
+      for (const result of cappedClaims.filter(({ networkAllowed }) => networkAllowed)) {
+        await cappedRepositoryA.markDataForSeoRequestAmbiguous(
+          cappedRun.id,
+          cappedClaim.lease,
+          result.ledger.requestFingerprint,
+          cappedStart
+        );
+      }
+      assert.equal(
+        await cappedRepositoryB.getDataForSeoRunExposureUsd(
+          cappedRun.id, cappedClaim.lease, cappedStart
+        ),
+        0.048
+      );
+      await cappedRepositoryA.markFailed(
+        cappedRun.id,
+        cappedClaim.lease,
+        { code: "PAID_CAP_PROVEN", message: "Atomic paid exposure cap was proven." },
+        null,
+        cappedStart
+      );
+
+      const actualCostRun = await cappedRepositoryA.createRun(
+        "owner_actual_cost", [{ shopType: "actual-cost" }]
+      );
+      const actualCostStart = new Date(cappedStart.getTime() + 120000);
+      const actualCostClaim = await cappedRepositoryA.claimNextQueuedRun(
+        "worker_actual_cost", actualCostStart, 60000
+      );
+      const actualCostFingerprint = "0".repeat(64);
+      await cappedRepositoryA.planDataForSeoRequest(
+        actualCostRun.id,
+        actualCostClaim.lease,
+        { requestFingerprint: actualCostFingerprint, targetCount: 1, scopeKey: "worldwide" },
+        actualCostStart
+      );
+      assert.equal((await cappedRepositoryA.claimDataForSeoRequest(
+        actualCostRun.id, actualCostClaim.lease, actualCostFingerprint, actualCostStart
+      )).networkAllowed, true);
+      const actualCostDomain = "actual-cost.example";
+      const actualCostValue = dataForSeoValue(actualCostDomain);
+      await cappedRepositoryA.markDataForSeoRequestSucceeded(
+        actualCostRun.id,
+        actualCostClaim.lease,
+        actualCostFingerprint,
+        {
+          providerCostUsd: 0.04,
+          cacheRows: [{
+            source: "dataforseo",
+            identity: actualCostDomain,
+            scopeKey: "worldwide",
+            metricSetKey: "featured_snippet,local_pack,organic,paid",
+            contractVersion: "dataforseo-traffic-v1",
+            state: "available",
+            normalizedPayload: actualCostValue,
+            fetchedAt: actualCostValue.fetchedAt,
+            expiresAt: "2026-09-01T00:00:00.000Z"
+          }]
+        },
+        actualCostStart
+      );
+      const afterActualFingerprint = "1".repeat(64);
+      await cappedRepositoryA.planDataForSeoRequest(
+        actualCostRun.id,
+        actualCostClaim.lease,
+        { requestFingerprint: afterActualFingerprint, targetCount: 1, scopeKey: "country:US:2840" },
+        actualCostStart
+      );
+      const afterActualClaim = await cappedRepositoryA.claimDataForSeoRequest(
+        actualCostRun.id, actualCostClaim.lease, afterActualFingerprint, actualCostStart
+      );
+      assert.equal(afterActualClaim.networkAllowed, false);
+      assert.equal(afterActualClaim.outcome, "budget_exceeded");
+      assert.equal(await cappedRepositoryA.getDataForSeoRunExposureUsd(
+        actualCostRun.id, actualCostClaim.lease, actualCostStart
+      ), 0.04);
+      const succeededActual = await prismaA.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint: actualCostFingerprint }
+      });
+      assert.equal(Number(succeededActual.providerCostUsd), 0.04);
+      assert.equal(succeededActual.reservationCostUsd, null);
+      await cappedRepositoryA.markFailed(
+        actualCostRun.id,
+        actualCostClaim.lease,
+        { code: "ACTUAL_COST_PROVEN", message: "Actual paid cost replaced reservation." },
+        null,
+        actualCostStart
+      );
+
+      const legacyRun = await repositoryA.createRun(
+        "owner_legacy_paid", [{ shopType: "legacy-paid" }]
+      );
+      const legacyStart = new Date(cappedStart.getTime() + 120000);
+      const legacyClaim = await repositoryA.claimNextQueuedRun(
+        "worker_legacy_paid", legacyStart, 60000
+      );
+      const legacyFingerprint = "9".repeat(64);
+      await prismaA.dataForSeoRequestLedger.create({
+        data: {
+          requestFingerprint: legacyFingerprint,
+          runId: legacyRun.id,
+          targetCount: 1,
+          scopeKey: "worldwide",
+          state: "in_flight",
+          attempt: 1,
+          leaseOwner: legacyClaim.lease.owner,
+          leaseToken: legacyClaim.lease.token,
+          claimedAt: legacyStart,
+          reservationCostUsd: null,
+          ambiguousAfter: null
+        }
+      });
+      const legacyRecovery = new Date(legacyStart.getTime() + 60001);
+      await repositoryA.recoverExpiredRuns(legacyRecovery);
+      assert.equal(
+        (await repositoryA.markStaleDataForSeoRequestsAmbiguous(legacyRecovery)).count,
+        1
+      );
+      const recoveredLegacy = await prismaA.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint: legacyFingerprint }
+      });
+      assert.equal(recoveredLegacy.state, "ambiguous");
+      assert.equal(recoveredLegacy.reservationCostUsd, null);
 
       const rollbackRun = await repositoryA.createRun("rollback_owner", [{ shopType: "shoes" }]);
       const rollbackStart = new Date(plannedRecoveryStart.getTime() + 120000);
@@ -588,6 +752,10 @@ test(
         immediateAmbiguousTransition: true,
         cruxCacheFence: true,
         durableCostRecovery: true,
+        atomicPaidExposureCap: true,
+        actualCostReplacesReservation: true,
+        durableAmbiguityDeadline: true,
+        legacyNullDeadlineRecovered: true,
         tenantIsolation: true,
         terminalReplay: true,
         rollbackStages: rollbackStages.length,
@@ -596,6 +764,54 @@ test(
     } finally {
       if (prismaA) await prismaA.$disconnect().catch(() => {});
       if (prismaB) await prismaB.$disconnect().catch(() => {});
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {});
+      await base.$disconnect().catch(() => {});
+      await fs.rm(baseline.directory, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "TE-R2 migration preserves an existing paid ledger row and adds nullable safety fields",
+  { skip: !enabled, timeout: 120_000 },
+  async () => {
+    const schema = `ter2_migration_${Date.now()}_${process.pid}`;
+    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
+    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const baseline = await migrationConfigBefore({ includeTe3: true });
+    let prisma;
+    try {
+      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+      deploy(scopedUrl, baseline.configPath);
+      const before = createPrismaClient(scopedUrl);
+      await before.$executeRawUnsafe(`
+        INSERT INTO "Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "trafficEnrichmentConfig")
+        VALUES ('ter2_historical_run', 'historical_owner', 'failed', 'finished', 'failed', '[]'::jsonb, '{}'::jsonb, false,
+          '{"version":"traffic-enrichment-run-v1","dataForSeo":{"maxCostPerRunUsd":2,"estimatedCostPerTaskUsd":0.024,"paidRequestStaleMs":900000}}'::jsonb)
+      `);
+      await before.$executeRawUnsafe(`
+        INSERT INTO "DataForSeoRequestLedger" (
+          "requestFingerprint", "runId", "targetCount", "scopeKey", "state", "attempt",
+          "plannedAt", "claimedAt", "createdAt", "updatedAt"
+        ) VALUES (
+          '${"a".repeat(64)}', 'ter2_historical_run', 1, 'worldwide', 'in_flight', 1,
+          '2026-08-02T00:00:00Z', '2026-08-02T00:00:01Z', '2026-08-02T00:00:00Z', '2026-08-02T00:00:01Z'
+        )
+      `);
+      await before.$disconnect();
+
+      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      prisma = createPrismaClient(scopedUrl);
+      const row = await prisma.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint: "a".repeat(64) }
+      });
+      assert.equal(row.runId, "ter2_historical_run");
+      assert.equal(row.state, "in_flight");
+      assert.equal(row.attempt, 1);
+      assert.equal(row.reservationCostUsd, null);
+      assert.equal(row.ambiguousAfter, null);
+    } finally {
+      if (prisma) await prisma.$disconnect().catch(() => {});
       await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => {});
       await base.$disconnect().catch(() => {});
       await fs.rm(baseline.directory, { recursive: true, force: true });

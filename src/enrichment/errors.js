@@ -13,7 +13,8 @@ export class EnrichmentError extends Error {
     provider,
     contractVersion,
     retryable = false,
-    httpStatus = 0
+    httpStatus = 0,
+    paidOutcome = "possibly_charged"
   }) {
     super(message);
     this.name = "EnrichmentError";
@@ -22,6 +23,7 @@ export class EnrichmentError extends Error {
     this.contractVersion = contractVersion;
     this.retryable = retryable;
     this.httpStatus = httpStatus;
+    this.paidOutcome = paidOutcome;
   }
 }
 
