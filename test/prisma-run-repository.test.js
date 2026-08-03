@@ -6,6 +6,12 @@ import {
   stableLeadId,
   trafficEnrichmentConfigSnapshot
 } from "../src/prisma-run-repository.js";
+import {
+  runStoreId,
+  runStoreCandidateFromDiscovery,
+  shopIdForStableKey,
+  stableShopIdentity
+} from "../src/shop-persistence-contract.js";
 
 const LEASE = { owner: "worker_fixture", token: "lease_fixture" };
 const NOW = new Date("2026-08-01T00:00:00.000Z");
@@ -44,6 +50,92 @@ function dataForSeoValue(target = "fixture.example") {
       localPack: { etv: 0, count: 0 }
     },
     fetchedAt: "2026-08-01T00:00:00.000Z"
+  };
+}
+
+function discoveredStore(index) {
+  const label = String(index).padStart(3, "0");
+  const hostname = `bulk-${label}.example`;
+  const myshopify = `bulk-${label}.myshopify.com`;
+  const intent = {
+    originalShopType: "Eyewear brands",
+    shopType: "eyewear",
+    businessQualifier: "brand",
+    categoryVocabulary: ["eyewear"]
+  };
+  const identityEvidence = {
+    stableHostname: myshopify,
+    displayHostname: hostname,
+    observedHostnames: [hostname, myshopify],
+    canonical: {
+      url: `https://${hostname}/`,
+      hostname,
+      trusted: true,
+      reason: "canonical_matches_observed_host"
+    },
+    method: "observed_myshopify_host",
+    confidence: 100,
+    mergedOccurrenceCount: 1
+  };
+  const candidate = {
+    ...intent,
+    categoryIntent: intent,
+    categoryIntents: [intent],
+    query: "site:myshopify.com eyewear",
+    rank: index + 1,
+    url: `https://${hostname}/`,
+    queryScore: 90,
+    queryGenerationReason: "bulk fixture",
+    querySourceUrls: [],
+    finalUrl: `https://${hostname}/`,
+    canonicalUrl: `https://${hostname}/`,
+    myshopifyDomain: myshopify,
+    resolvedDomain: hostname,
+    stableIdentity: myshopify,
+    allowedHostnames: [hostname, myshopify],
+    identityConfidence: 100,
+    identityEvidence,
+    occurrences: [{
+      categoryIntent: intent,
+      originalShopType: intent.originalShopType,
+      shopType: intent.shopType,
+      businessQualifier: intent.businessQualifier,
+      query: "site:myshopify.com eyewear",
+      queryScore: 90,
+      queryGenerationReason: "bulk fixture",
+      querySourceUrls: [],
+      categoryVocabulary: intent.categoryVocabulary,
+      rank: index + 1,
+      resultUrl: `https://${hostname}/`,
+      finalUrl: `https://${hostname}/`,
+      resolvedDomain: hostname,
+      myshopifyDomain: myshopify
+    }],
+    duplicateCount: 0
+  };
+  return {
+    identity: stableShopIdentity(candidate),
+    candidatePayload: runStoreCandidateFromDiscovery(candidate, [])
+  };
+}
+
+function reusableProfile(store, index) {
+  const hostname = store.candidatePayload.resolvedDomain;
+  return {
+    contractVersion: "shop-lead-profile-v1",
+    storeName: `Bulk ${index}`,
+    email: `hello@${hostname}`,
+    emailSourceUrl: `https://${hostname}/contact`,
+    phone: "",
+    phoneSourceUrl: "",
+    contactUrl: `https://${hostname}/contact`,
+    socialProfiles: [],
+    contactabilityTier: "direct",
+    contactEvidence: { emails: [{ value: `hello@${hostname}` }] },
+    identityConfidence: 100,
+    identityEvidence: store.candidatePayload.identityEvidence,
+    categoryAssessments: [],
+    pageDiagnostics: { pagesExamined: 1, pageErrorTypes: [], aiErrorType: "" }
   };
 }
 
@@ -100,6 +192,301 @@ test("stable lead IDs are shared across equivalent lead identities", () => {
   assert.equal(first, second);
   assert.notEqual(first, stableLeadId("run_other", { resolved_domain: "fixture.example" }, 0));
 });
+
+for (const size of [1, 40, 100]) {
+  test(`store checkpoint uses a bounded database operation count for ${size} rows`, async () => {
+    const calls = [];
+    let storedRunStores = [];
+    const transaction = {
+      run: {
+        updateMany: async ({ data }) => {
+          calls.push("run.updateMany");
+          assert.equal(data.stage, "stores_persisted");
+          return { count: 1 };
+        }
+      },
+      shop: {
+        findMany: async () => {
+          calls.push("shop.findMany");
+          return [];
+        }
+      },
+      runStore: {
+        findMany: async () => {
+          calls.push("runStore.findMany");
+          return storedRunStores;
+        },
+        createMany: async ({ data }) => {
+          calls.push("runStore.createMany");
+          storedRunStores = data.map((row) => ({ ...row }));
+          return { count: data.length };
+        }
+      },
+      $queryRaw: async (_strings, ...values) => {
+        const encoded = values.find((value) => typeof value === "string" && value.startsWith("["));
+        if (!encoded) {
+          calls.push("$queryRaw:schema");
+          return [];
+        }
+        calls.push("$queryRaw:shops");
+        return JSON.parse(encoded).map((row) => ({ ...row, createdAt: NOW, updatedAt: NOW }));
+      }
+    };
+    const repository = new PrismaRunRepository({
+      $transaction: async (callback) => callback(transaction)
+    });
+    const rows = await repository.saveDiscoveredStores(
+      "run_abcdefghijklmnop",
+      LEASE,
+      Array.from({ length: size }, (_, index) => discoveredStore(index)),
+      [],
+      null,
+      NOW
+    );
+    assert.equal(rows.length, size);
+    assert.deepEqual(calls, [
+      "$queryRaw:schema",
+      "run.updateMany",
+      "shop.findMany",
+      "$queryRaw:shops",
+      "runStore.findMany",
+      "runStore.createMany",
+      "runStore.findMany"
+    ]);
+  });
+}
+
+test("store checkpoint rejects oversized and duplicate batches before opening a transaction", async () => {
+  let transactions = 0;
+  const repository = new PrismaRunRepository({
+    $transaction: async () => { transactions += 1; }
+  });
+  await assert.rejects(
+    repository.saveDiscoveredStores(
+      "run_abcdefghijklmnop",
+      LEASE,
+      Array.from({ length: 501 }, (_, index) => discoveredStore(index)),
+      [],
+      null,
+      NOW
+    ),
+    /500-row limit/u
+  );
+  const repeated = discoveredStore(0);
+  await assert.rejects(
+    repository.saveDiscoveredStores(
+      "run_abcdefghijklmnop", LEASE, [repeated, repeated], [], null, NOW
+    ),
+    /contain duplicates/u
+  );
+  assert.equal(transactions, 0);
+});
+
+test("zero-row lifecycle barriers advance truthfully without row-level writes", async () => {
+  const storeCalls = [];
+  const storeRepository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => { storeCalls.push("schema"); return []; },
+      run: {
+        updateMany: async ({ data }) => {
+          storeCalls.push("run");
+          assert.equal(data.stage, "stores_persisted");
+          return { count: 1 };
+        }
+      }
+    })
+  });
+  assert.deepEqual(await storeRepository.saveDiscoveredStores(
+    "run_abcdefghijklmnop", LEASE, [], [], null, NOW
+  ), []);
+  assert.deepEqual(storeCalls, ["schema", "run"]);
+
+  const leadCalls = [];
+  const leadRepository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => { leadCalls.push("schema"); return []; },
+      run: {
+        updateMany: async ({ data }) => {
+          leadCalls.push(data.stage === "leads_persisted" ? "run.publish" : "run.fence");
+          return { count: 1 };
+        }
+      },
+      runStore: { count: async () => { leadCalls.push("runStore.count"); return 0; } },
+      lead: {
+        findMany: async () => { leadCalls.push("lead.summary"); return []; }
+      }
+    })
+  });
+  assert.deepEqual(await leadRepository.saveLeadBatch(
+    "run_abcdefghijklmnop", LEASE, [], null, NOW
+  ), { total: 0, qualified: 0, rejected: 0, failed: 0 });
+  assert.deepEqual(leadCalls, [
+    "schema", "run.fence", "runStore.count", "lead.summary", "run.publish"
+  ]);
+
+  let claimTransactionStarted = false;
+  const claimRepository = new PrismaRunRepository({
+    $transaction: async () => { claimTransactionStarted = true; }
+  });
+  assert.deepEqual(await claimRepository.claimShopWorkBatch(
+    "run_abcdefghijklmnop", LEASE, [], NOW
+  ), []);
+  assert.equal(claimTransactionStarted, false);
+});
+
+for (const size of [1, 40, 100]) {
+  test(`lead barrier uses a bounded database operation count for ${size} rows`, async () => {
+    const calls = [];
+    const runIdentifier = "run_abcdefghijklmnop";
+    const stores = Array.from({ length: size }, (_, index) => discoveredStore(index));
+    const runStores = stores.map((store) => {
+      const shopId = shopIdForStableKey(store.identity.stableKey);
+      return {
+        id: runStoreId(runIdentifier, shopId),
+        runId: runIdentifier,
+        shopId,
+        state: "processing",
+        candidatePayload: store.candidatePayload,
+        shop: { id: shopId, stableKey: store.identity.stableKey }
+      };
+    });
+    let createdLeads = [];
+    const transaction = {
+      $queryRaw: async () => { calls.push("$queryRaw:schema"); return []; },
+      run: {
+        updateMany: async () => { calls.push("run.updateMany"); return { count: 1 }; }
+      },
+      runStore: {
+        findMany: async () => { calls.push("runStore.findMany"); return runStores; },
+        updateMany: async ({ where }) => {
+          calls.push("runStore.updateMany");
+          return { count: where.id.in.length };
+        },
+        count: async () => { calls.push("runStore.count"); return 0; }
+      },
+      shopLeadProfile: {
+        findMany: async () => {
+          calls.push("shopLeadProfile.findMany");
+          return stores.map((store, index) => ({
+            shopId: runStores[index].shopId,
+            state: "completed",
+            profilePayload: reusableProfile(store, index)
+          }));
+        }
+      },
+      lead: {
+        findMany: async ({ select }) => {
+          calls.push(select ? "lead.findMany:summary" : "lead.findMany:existing");
+          return select ? createdLeads.map(({ status }) => ({ status })) : [];
+        },
+        createMany: async ({ data }) => {
+          calls.push("lead.createMany");
+          createdLeads = data;
+          return { count: data.length };
+        }
+      }
+    };
+    const repository = new PrismaRunRepository({
+      $transaction: async (callback) => callback(transaction)
+    });
+    const summary = await repository.saveLeadBatch(
+      runIdentifier,
+      LEASE,
+      stores.map((store, index) => ({
+        runStoreId: runStores[index].id,
+        state: "completed",
+        lead: qualifiedLead(store.identity.stableKey),
+        profileReusable: true
+      })),
+      null,
+      NOW
+    );
+    assert.deepEqual(summary, { total: size, qualified: size, rejected: 0, failed: 0 });
+    assert.equal(createdLeads.length, size);
+    assert.deepEqual(calls, [
+      "$queryRaw:schema",
+      "run.updateMany",
+      "runStore.findMany",
+      "shopLeadProfile.findMany",
+      "lead.findMany:existing",
+      "lead.createMany",
+      "runStore.updateMany",
+      "runStore.count",
+      "lead.findMany:summary",
+      "run.updateMany"
+    ]);
+  });
+}
+
+for (const size of [1, 40, 100]) {
+  test(`shop work claim uses a bounded database operation count for ${size} rows`, async () => {
+    const calls = [];
+    let workRows = [];
+    const transaction = {
+      $queryRaw: async (_strings, ...values) => {
+        const encoded = values.find((value) => typeof value === "string" && value.startsWith("["));
+        if (!encoded) {
+          calls.push("schema.select");
+          return [];
+        }
+        calls.push("work.bulkClaim");
+        const claimed = JSON.parse(encoded);
+        const won = new Set(claimed.map(({ id }) => id));
+        workRows = workRows.map((row) => won.has(row.id)
+          ? {
+              ...row,
+              state: "processing",
+              processingRunId: "run_abcdefghijklmnop",
+              processingLeaseToken: LEASE.token
+            }
+          : row);
+        return claimed.map(({ id, shopId, workType, scopeKey }) => ({
+          id, shopId, workType, scopeKey
+        }));
+      },
+      run: { updateMany: async () => { calls.push("run.updateMany"); return { count: 1 }; } },
+      shopWork: {
+        createMany: async ({ data }) => {
+          calls.push("shopWork.createMany");
+          workRows = data.map((row) => ({
+            ...row,
+            processingRunId: null,
+            processingLeaseToken: null,
+            processingRun: null
+          }));
+          return { count: data.length };
+        },
+        findMany: async ({ include }) => {
+          calls.push(include ? "shopWork.findMany:current" : "shopWork.findMany:durable");
+          return workRows;
+        }
+      }
+    };
+    const repository = new PrismaRunRepository({
+      $transaction: async (callback) => callback(transaction)
+    });
+    const claims = Array.from({ length: size }, (_, index) => ({
+      shopId: `shop_${String(index).padStart(24, "0")}`,
+      workType: "dataforseo",
+      scopeKey: "worldwide"
+    }));
+    const result = await repository.claimShopWorkBatch(
+      "run_abcdefghijklmnop", LEASE, claims, NOW
+    );
+    assert.equal(result.length, size);
+    assert.ok(result.every(({ outcome, networkAllowed }) =>
+      outcome === "won" && networkAllowed
+    ));
+    assert.deepEqual(calls, [
+      "schema.select",
+      "run.updateMany",
+      "shopWork.createMany",
+      "shopWork.findMany:current",
+      "work.bulkClaim",
+      "shopWork.findMany:durable"
+    ]);
+  });
+}
 
 test("fresh cache reads are exact and tenant-neutral", async () => {
   let query;
@@ -233,11 +620,28 @@ test("paid success fences the lease and commits ledger plus normalized cache ato
   let ledger = {
     requestFingerprint: "b".repeat(64),
     runId: "run_abcdefghijklmnop",
+    targetCount: 1,
+    scopeKey: "worldwide",
     state: "in_flight",
     leaseOwner: LEASE.owner,
     leaseToken: LEASE.token
   };
   const transaction = {
+    $queryRaw: async (_strings, ...values) => {
+      const encoded = values.find((value) => typeof value === "string" && value.startsWith("["));
+      if (!encoded) {
+        calls.push("schema.select");
+        return [];
+      }
+      calls.push("cache.bulkUpsert");
+      return JSON.parse(encoded).map((row) => ({
+        source: row.source,
+        identity: row.identity,
+        scopeKey: row.scopeKey,
+        metricSetKey: row.metricSetKey,
+        contractVersion: row.contractVersion
+      }));
+    },
     run: { updateMany: async () => { calls.push("run.fence"); return { count: 1 }; } },
     dataForSeoRequestLedger: {
       updateMany: async ({ data }) => {
@@ -246,9 +650,6 @@ test("paid success fences the lease and commits ledger plus normalized cache ato
         return { count: 1 };
       },
       findUnique: async () => ledger
-    },
-    trafficEnrichmentCache: {
-      upsert: async () => calls.push("cache.upsert")
     }
   };
   const repository = new PrismaRunRepository({
@@ -275,11 +676,14 @@ test("paid success fences the lease and commits ledger plus normalized cache ato
     NOW
   );
   assert.equal(result.state, "succeeded");
-  assert.deepEqual(calls, ["run.fence", "ledger.succeeded", "cache.upsert"]);
+  assert.deepEqual(calls, [
+    "schema.select", "run.fence", "ledger.succeeded", "cache.bulkUpsert"
+  ]);
 
   let cacheTouched = false;
   const stale = new PrismaRunRepository({
     $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
       run: { updateMany: async () => ({ count: 0 }) },
       dataForSeoRequestLedger: transaction.dataForSeoRequestLedger,
       trafficEnrichmentCache: { upsert: async () => { cacheTouched = true; } }
@@ -292,21 +696,159 @@ test("paid success fences the lease and commits ledger plus normalized cache ato
   assert.equal(cacheTouched, false);
 });
 
+test("paid success rejects ledger scope and count mismatches before mutation", async () => {
+  const ledger = {
+    requestFingerprint: "d".repeat(64),
+    runId: "run_abcdefghijklmnop",
+    targetCount: 2,
+    scopeKey: "worldwide",
+    state: "in_flight",
+    leaseOwner: LEASE.owner,
+    leaseToken: LEASE.token
+  };
+  let mutated = false;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
+      run: { updateMany: async () => ({ count: 1 }) },
+      dataForSeoRequestLedger: {
+        findUnique: async () => ledger,
+        updateMany: async () => { mutated = true; return { count: 1 }; }
+      }
+    })
+  });
+  const cacheRow = {
+    source: "dataforseo",
+    identity: "fixture.example",
+    scopeKey: "worldwide",
+    metricSetKey: "featured_snippet,local_pack,organic,paid",
+    contractVersion: "dataforseo-traffic-v1",
+    state: "available",
+    normalizedPayload: dataForSeoValue(),
+    fetchedAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 86_400_000)
+  };
+  await assert.rejects(repository.markDataForSeoRequestSucceeded(
+    ledger.runId,
+    LEASE,
+    ledger.requestFingerprint,
+    {
+      providerCostUsd: 0.012,
+      cacheRows: [cacheRow],
+      workClaims: [{
+        shopId: "shop_000000000000000000000001",
+        workType: "dataforseo",
+        scopeKey: "worldwide"
+      }]
+    },
+    NOW
+  ), /count does not match/iu);
+  await assert.rejects(repository.markDataForSeoRequestSucceeded(
+    ledger.runId,
+    LEASE,
+    ledger.requestFingerprint,
+    {
+      providerCostUsd: 0.012,
+      cacheRows: [{ ...cacheRow, scopeKey: "country:NZ:2554" }],
+      workClaims: []
+    },
+    NOW
+  ), /scope does not match/iu);
+  assert.equal(mutated, false);
+});
+
+test("CrUX success rejects mismatched progressive cache and work batches", async () => {
+  let transactionStarted = false;
+  const repository = new PrismaRunRepository({
+    $transaction: async () => { transactionStarted = true; }
+  });
+  const cacheRow = {
+    source: "crux_rest",
+    identity: "https://fixture.example",
+    scopeKey: "current",
+    metricSetKey: "cumulative_layout_shift,experimental_time_to_first_byte,first_contentful_paint,form_factors,interaction_to_next_paint,largest_contentful_paint",
+    contractVersion: "crux-origin-metrics-v1",
+    state: "no_coverage",
+    fetchedAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 86_400_000)
+  };
+  await assert.rejects(repository.saveCruxTrafficCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    [cacheRow],
+    [{
+      shopId: "shop_000000000000000000000001",
+      workType: "crux_bigquery",
+      scopeKey: "month:202607"
+    }],
+    NOW
+  ), /mismatched source or scope/iu);
+  await assert.rejects(repository.saveCruxTrafficCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    [cacheRow],
+    [{
+      shopId: "shop_000000000000000000000001",
+      workType: "crux_rest",
+      scopeKey: "current"
+    }, {
+      shopId: "shop_000000000000000000000002",
+      workType: "crux_rest",
+      scopeKey: "current"
+    }],
+    NOW
+  ), /do not reconcile/iu);
+  assert.equal(transactionStarted, false);
+});
+
 test("only stale in-flight paid work on an inactive lease becomes ambiguous", async () => {
   let update;
   const repository = new PrismaRunRepository({
-    dataForSeoRequestLedger: {
-      updateMany: async (arguments_) => { update = arguments_; return { count: 1 }; }
-    }
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
+      $executeRaw: async () => 1,
+      dataForSeoRequestLedger: {
+        findMany: async () => [{
+          requestFingerprint: "e".repeat(64),
+          runId: "run_abcdefghijklmnop",
+          scopeKey: "worldwide"
+        }],
+        updateMany: async (arguments_) => { update = arguments_; return { count: 1 }; }
+      }
+    })
   });
-  await repository.markStaleDataForSeoRequestsAmbiguous(NOW);
+  const recovered = await repository.markStaleDataForSeoRequestsAmbiguous(NOW);
+  assert.deepEqual(recovered, { count: 1, workCount: 1 });
   assert.equal(update.where.state, "in_flight");
-  assert.deepEqual(update.where.OR, [
-    { ambiguousAfter: { lte: NOW } },
-    { ambiguousAfter: null }
+  assert.deepEqual(update.where.requestFingerprint.in, ["e".repeat(64)]);
+  assert.deepEqual(update.where.run.OR, [
+    { state: { not: "running" } },
+    { leaseExpiresAt: { lte: NOW } },
+    { leaseExpiresAt: null }
   ]);
   assert.equal(update.data.state, "ambiguous");
   assert.equal(update.data.safeErrorCode, "PAID_REQUEST_OUTCOME_AMBIGUOUS");
+});
+
+test("paid recovery reconciles processing work for an already ambiguous ledger", async () => {
+  let workUpdates = 0;
+  let ledgerUpdated = false;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
+      $executeRaw: async () => { workUpdates += 1; return 2; },
+      dataForSeoRequestLedger: {
+        findMany: async () => [],
+        updateMany: async () => { ledgerUpdated = true; return { count: 0 }; }
+      }
+    })
+  });
+  assert.deepEqual(
+    await repository.markStaleDataForSeoRequestsAmbiguous(NOW),
+    { count: 0, workCount: 2 }
+  );
+  assert.equal(ledgerUpdated, false);
+  assert.equal(workUpdates, 1);
 });
 
 test("known paid failures persist only fixed privacy-safe diagnostics", async () => {
@@ -388,25 +930,32 @@ test("repository default ordering is deterministic with null scores last", async
   ]);
 });
 
-test("restart recovery fails only expired or legacy-unleased running work", async () => {
-  let updateArguments;
+test("restart recovery requeues progressive checkpoints and fails only legacy work", async () => {
+  const updates = [];
   const repository = new PrismaRunRepository({
-    run: {
-      updateMany: async (arguments_) => {
-        updateArguments = arguments_;
-        return { count: 1 };
+    $transaction: async (callback) => callback({
+      run: {
+        updateMany: async (arguments_) => {
+          updates.push(arguments_);
+          return { count: 1 };
+        }
       }
-    }
+    })
   });
 
-  await repository.recoverExpiredRuns(NOW);
-  assert.equal(updateArguments.where.state, "running");
-  assert.deepEqual(updateArguments.where.OR, [
+  const recovered = await repository.recoverExpiredRuns(NOW);
+  assert.equal(recovered.count, 2);
+  assert.equal(updates[0].where.state, "running");
+  assert.deepEqual(updates[0].where.OR, [
     { leaseExpiresAt: { lte: NOW } },
     { leaseExpiresAt: null }
   ]);
-  assert.equal(updateArguments.data.state, "failed");
-  assert.equal(updateArguments.data.safeErrorCode, "RUN_LEASE_EXPIRED");
+  assert.deepEqual(updates[0].where.stage.in, [
+    "stores_persisted", "discovering_leads", "leads_persisted", "enriching_traffic"
+  ]);
+  assert.equal(updates[0].data.state, "queued");
+  assert.equal(updates[1].data.state, "failed");
+  assert.equal(updates[1].data.safeErrorCode, "RUN_LEASE_EXPIRED");
 });
 
 test("progress, heartbeat, and failure writes require the active lease fence", async () => {
@@ -734,4 +1283,17 @@ test("TE-R2 migration adds only decimal reservation, deadline, and recovery inde
   assert.match(sql, /ADD COLUMN "ambiguousAfter" TIMESTAMP/u);
   assert.match(sql, /\("state", "ambiguousAfter"\)/u);
   assert.doesNotMatch(sql, /DOUBLE PRECISION|REAL/u);
+});
+
+test("DP migration preserves rows and replaces only the obsolete global worker slot", async () => {
+  const sql = await fs.readFile(new URL(
+    "../prisma/migrations/20260803120000_progressive_shop_persistence/migration.sql",
+    import.meta.url
+  ), "utf8");
+  assert.match(sql, /DROP INDEX "Run_one_running_idx"/u);
+  assert.match(sql, /CREATE TABLE "Shop"/u);
+  assert.match(sql, /CREATE TABLE "RunStore"/u);
+  assert.match(sql, /CREATE TABLE "ShopLeadProfile"/u);
+  assert.match(sql, /CREATE TABLE "ShopWork"/u);
+  assert.doesNotMatch(sql, /\b(?:DELETE FROM|TRUNCATE|UPDATE "(?:Run|Lead)")\b/iu);
 });

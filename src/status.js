@@ -14,12 +14,16 @@ export function createInitialProgress() {
     queriesTotal: 0,
     queriesProcessed: 0,
     storesDiscovered: 0,
+    storesPersisted: 0,
+    storesProcessed: 0,
     storesQualified: 0,
     storesRejected: 0,
     failures: 0,
     queryFailures: 0,
     occurrenceFailures: 0,
     storeProcessingFailures: 0,
+    trafficTargetsTotal: 0,
+    trafficTargetsProcessed: 0,
     outputRows: 0
   };
 }

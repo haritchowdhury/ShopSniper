@@ -153,7 +153,18 @@ export async function fetchCruxPopularityForMonth(
   });
   const parsed = parseCruxBigQueryResponse(await execute(liveDescriptor), liveDescriptor);
   const fetchedAt = fetchedAtFrom(now, CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION);
+  const contractMismatchOrigins = new Set(parsed.contractMismatchOrigins);
   const records = liveDescriptor.origins.map((origin) => {
+    if (contractMismatchOrigins.has(origin)) {
+      return Object.freeze({
+        contractVersion: CRUX_POPULARITY_CONTRACT_VERSION,
+        origin,
+        coverage: "unavailable",
+        reason: "contract_mismatch",
+        datasetMonth,
+        fetchedAt
+      });
+    }
     const row = parsed.rowsByOrigin.get(origin);
     if (!row) {
       return Object.freeze({

@@ -17,9 +17,15 @@ import { scoreLeadV2 } from "./lead-scorer.js";
 import { mergeDiscoveryCandidates } from "./discovery-aggregation.js";
 import { sameAllowedHostname } from "./url-security.js";
 import { log } from "./logger.js";
-import { compareCategoryIntents } from "./category-input.js";
+import { categoryIntentKey, compareCategoryIntents } from "./category-input.js";
 import { assertPublicLeadScoreState } from "./lead-state.js";
 import { validateConfirmedQueryRows } from "./query-review.js";
+import {
+  parseRunStoreCandidate,
+  parseShopLeadProfile,
+  runStoreCandidateFromDiscovery,
+  stableShopIdentity
+} from "./shop-persistence-contract.js";
 
 function safeErrorType(error) {
   return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*Error$/u.test(error.name)
@@ -387,6 +393,95 @@ export async function runDiscoveryFromQueryPlans(
   status,
   { queryPlans, queryAudits = [], ...dependencyOverrides }
 ) {
+  const discovery = await resolveStoresFromQueryPlans(config, status, {
+    queryPlans,
+    queryAudits,
+    ...dependencyOverrides
+  });
+  const { dependencies, diagnostics, mergedStores } = discovery;
+  status.stage = "extracting_leads";
+  const storeRecords = await mapWithConcurrency(
+    mergedStores,
+    config.storeConcurrency,
+    async (candidate) => {
+      try {
+        const record = await processStore(candidate, config, dependencies);
+        if (record.status === "qualified") status.storesQualified += 1;
+        else status.storesRejected += 1;
+        return record;
+      } catch (error) {
+        status.failures += 1;
+        status.storeProcessingFailures = (status.storeProcessingFailures || 0) + 1;
+        return recordFromCandidate(candidate, {
+          lead_score: "",
+          identity_confidence: candidate.identityConfidence,
+          identity_evidence: candidate.identityEvidence || null,
+          discovery_occurrences: candidate.occurrences || [],
+          matched_categories: [],
+          status: "failed",
+          rejection_reason: "processing_failed",
+          error: `Store processing failed (${safeErrorType(error)})`
+        });
+      }
+    }
+  );
+
+  status.stage = "writing_results";
+  status.outputRows = storeRecords.length;
+  const summary = summarizeLeads(storeRecords);
+  return {
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    leads: storeRecords,
+    queryAudits,
+    diagnostics,
+    summary
+  };
+}
+
+function persistedAssessments(candidate, config, dependencies) {
+  const intents = candidate.categoryIntents?.length
+    ? candidate.categoryIntents
+    : [candidate.categoryIntent || candidate];
+  return intents.flatMap((intent) => {
+    try {
+      const validation = dependencies.validate({
+        ...candidate,
+        ...intent,
+        categoryIntent: {
+          originalShopType: intent.originalShopType || "",
+          shopType: intent.shopType || "",
+          businessQualifier: intent.businessQualifier || "unspecified"
+        }
+      }, config, { final: false });
+      return [{
+        intent: {
+          originalShopType: intent.originalShopType || "",
+          shopType: intent.shopType || "",
+          businessQualifier: intent.businessQualifier || "unspecified",
+          categoryVocabulary: intent.categoryVocabulary || []
+        },
+        valid: Boolean(validation.valid),
+        accepted: storeFitAcceptsIntent(
+          intent.businessQualifier || "unspecified",
+          validation.storeFit?.state
+        ),
+        shopifyConfidence: Number(validation.shopifyConfidence || 0),
+        relevanceScore: Number(validation.relevanceScore || 0),
+        rejectionReason: validation.rejectionReason || "",
+        storeFit: validation.storeFit || {}
+      }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+async function resolveStoresFromQueryPlans(
+  config,
+  status,
+  { queryPlans, queryAudits = [], ...dependencyOverrides }
+) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
   if (!Array.isArray(queryPlans)) throw new Error("queryPlans must be an array");
   status.queriesTotal = queryPlans.length;
@@ -488,37 +583,37 @@ export async function runDiscoveryFromQueryPlans(
     status.queriesProcessed += 1;
   }
 
-  status.stage = "extracting_leads";
   const mergedStores = mergeDiscoveryCandidates(resolvedCandidates);
-  const storeRecords = await mapWithConcurrency(
-    mergedStores,
-    config.storeConcurrency,
-    async (candidate) => {
-      try {
-        const record = await processStore(candidate, config, dependencies);
-        if (record.status === "qualified") status.storesQualified += 1;
-        else status.storesRejected += 1;
-        return record;
-      } catch (error) {
-        status.failures += 1;
-        status.storeProcessingFailures = (status.storeProcessingFailures || 0) + 1;
-        return recordFromCandidate(candidate, {
-          lead_score: "",
-          identity_confidence: candidate.identityConfidence,
-          identity_evidence: candidate.identityEvidence || null,
-          discovery_occurrences: candidate.occurrences || [],
-          matched_categories: [],
-          status: "failed",
-          rejection_reason: "processing_failed",
-          error: `Store processing failed (${safeErrorType(error)})`
-        });
-      }
-    }
-  );
+  return { dependencies, diagnostics, mergedStores, queryAudits };
+}
 
-  status.stage = "writing_results";
-  status.outputRows = storeRecords.length;
-  const summary = storeRecords.reduce(
+export async function discoverStoresFromQueryPlans(
+  config,
+  status,
+  { queryPlans, queryAudits = [], ...dependencyOverrides }
+) {
+  const result = await resolveStoresFromQueryPlans(config, status, {
+    queryPlans,
+    queryAudits,
+    ...dependencyOverrides
+  });
+  return {
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    queryAudits,
+    diagnostics: result.diagnostics,
+    stores: result.mergedStores.map((candidate) => ({
+      identity: stableShopIdentity(candidate),
+      candidatePayload: runStoreCandidateFromDiscovery(
+        candidate,
+        persistedAssessments(candidate, config, result.dependencies)
+      )
+    }))
+  };
+}
+
+function summarizeLeads(storeRecords) {
+  return storeRecords.reduce(
     (counts, record) => {
       counts.total += 1;
       if (record.status === "qualified") counts.qualified += 1;
@@ -528,14 +623,240 @@ export async function runDiscoveryFromQueryPlans(
     },
     { total: 0, qualified: 0, rejected: 0, failed: 0 }
   );
+}
+
+function candidateFromRunStorePayload(value) {
+  const payload = parseRunStoreCandidate(value);
   return {
-    pipelineVersion: 2,
-    scoringVersion: 2,
-    leads: storeRecords,
-    queryAudits,
-    diagnostics,
-    summary
+    originalShopType: payload.originalShopType,
+    shopType: payload.shopType,
+    businessQualifier: payload.businessQualifier,
+    categoryVocabulary: payload.categoryVocabulary,
+    categoryIntents: payload.categoryIntents,
+    query: payload.representative.query,
+    rank: payload.representative.rank,
+    url: payload.representative.resultUrl,
+    queryScore: payload.representative.queryScore,
+    queryGenerationReason: payload.representative.queryGenerationReason,
+    querySourceUrls: payload.representative.querySourceUrls,
+    finalUrl: payload.finalUrl,
+    canonicalUrl: payload.canonicalUrl,
+    myshopifyDomain: payload.myshopifyDomain,
+    resolvedDomain: payload.resolvedDomain,
+    stableIdentity: payload.stableIdentity,
+    allowedHostnames: payload.allowedHostnames,
+    identityConfidence: payload.identityConfidence,
+    identityEvidence: payload.identityEvidence,
+    occurrences: payload.occurrences,
+    duplicateCount: payload.duplicateCount
   };
+}
+
+async function refetchCandidate(candidate, config, dependencies) {
+  const target = candidate.finalUrl || candidate.url;
+  if (!target) throw new Error("Persisted store has no verified fetch URL");
+  const response = await dependencies.fetchPage(target, config, {
+    purpose: "storefront",
+    allowedHostnames: candidate.allowedHostnames
+  });
+  if (!sameAllowedHostname(response.finalUrl, candidate.allowedHostnames)) {
+    throw new Error("Storefront redirected outside the verified store hostnames");
+  }
+  return {
+    ...candidate,
+    html: response.body,
+    finalUrl: response.finalUrl,
+    initialFetch: {
+      rendered: Boolean(response.rendered),
+      renderAttempted: Boolean(response.renderAttempted),
+      renderContractVersion: response.renderContractVersion || "",
+      assessment: response.fetchAssessment || null
+    }
+  };
+}
+
+function normalizedProfileIntent(value) {
+  return {
+    originalShopType: value?.originalShopType || "",
+    shopType: value?.shopType || "",
+    businessQualifier: value?.businessQualifier || "unspecified",
+    categoryVocabulary: [...new Set(value?.categoryVocabulary || [])].sort()
+  };
+}
+
+function profileFromLead(candidate, lead) {
+  if (!lead.contact_evidence && !/pages_examined=/u.test(lead.additional_information || "")) {
+    return null;
+  }
+  const intentsByKey = new Map((candidate.categoryIntents || []).map((intent) => [
+    categoryIntentKey(intent), normalizedProfileIntent(intent)
+  ]));
+  const categoryAssessments = (lead.store_fit_evidence || []).flatMap((item) => {
+    const intent = normalizedProfileIntent(item.intent || {});
+    if (!intent.shopType) return [];
+    const known = intentsByKey.get(categoryIntentKey(intent));
+    return [{
+      intent: known || intent,
+      shopifyConfidence: Number(lead.shopify_confidence || 0),
+      relevanceScore: Number(lead.relevance_score || 0),
+      storeFitState: item.state || lead.store_fit_state || "",
+      storeFitEvidence: item,
+      accepted: Boolean(item.accepted)
+    }];
+  });
+  const pages = /pages_examined=(\d+)/u.exec(lead.additional_information || "");
+  const pageErrors = /page_errors=([^;]+)/u.exec(lead.additional_information || "");
+  return parseShopLeadProfile({
+    contractVersion: "shop-lead-profile-v1",
+    storeName: lead.store_name || "",
+    email: lead.email || "",
+    emailSourceUrl: lead.email_source_url || "",
+    phone: lead.phone || "",
+    phoneSourceUrl: lead.phone_source_url || "",
+    contactUrl: lead.contact_url || "",
+    socialProfiles: lead.social_profiles || [],
+    contactabilityTier: lead.contactability_tier || "none",
+    contactEvidence: lead.contact_evidence || null,
+    identityConfidence: Number(lead.identity_confidence || candidate.identityConfidence || 0),
+    identityEvidence: lead.identity_evidence || candidate.identityEvidence,
+    categoryAssessments,
+    pageDiagnostics: {
+      pagesExamined: pages ? Number(pages[1]) : 0,
+      pageErrorTypes: pageErrors ? pageErrors[1].split(" | ").map((value) => {
+        const match = /([A-Za-z][A-Za-z0-9]*Error)$/u.exec(value.trim());
+        return match?.[1] || "Error";
+      }) : [],
+      aiErrorType: /\(([A-Za-z][A-Za-z0-9]*Error)\)$/u.exec(lead.error || "")?.[1] || ""
+    }
+  });
+}
+
+function assessmentCandidates(payload, profile) {
+  const intentKeys = new Set(payload.categoryIntents.map(categoryIntentKey));
+  const completed = profile.categoryAssessments
+    .filter(({ intent }) => intentKeys.has(categoryIntentKey(intent)))
+    .map((item) => ({ ...item, final: true }));
+  if (completed.length) return completed;
+  return payload.assessments
+    .filter(({ intent }) => intentKeys.has(categoryIntentKey(intent)))
+    .map((item) => ({
+      intent: item.intent,
+      shopifyConfidence: item.shopifyConfidence,
+      relevanceScore: item.relevanceScore,
+      storeFitState: item.storeFit?.state || "",
+      storeFitEvidence: item.storeFit,
+      accepted: item.accepted,
+      rejectionReason: item.rejectionReason,
+      final: false
+    }));
+}
+
+export function materializeLeadFromProfile(candidatePayload, profileValue) {
+  const payload = parseRunStoreCandidate(candidatePayload);
+  const profile = parseShopLeadProfile(profileValue);
+  const candidate = candidateFromRunStorePayload(payload);
+  const assessments = assessmentCandidates(payload, profile).sort((left, right) =>
+    Number(right.accepted) - Number(left.accepted) ||
+    Number(right.final) - Number(left.final) ||
+    Number(right.relevanceScore) - Number(left.relevanceScore) ||
+    compareCategoryIntents(left.intent, right.intent)
+  );
+  const selected = assessments[0] || {
+    intent: payload.categoryIntents[0],
+    shopifyConfidence: 0,
+    relevanceScore: 0,
+    storeFitState: "unknown",
+    storeFitEvidence: null,
+    accepted: false,
+    rejectionReason: "insufficient_category_evidence"
+  };
+  const contactable = ["direct", "indirect"].includes(profile.contactabilityTier);
+  const qualified = selected.accepted && contactable;
+  const scoreBreakdown = scoreLeadV2({
+    relevanceScore: selected.relevanceScore,
+    shopifyConfidence: selected.shopifyConfidence,
+    identityConfidence: profile.identityConfidence,
+    contactEvidence: {
+      email: Boolean(profile.email),
+      phone: Boolean(profile.phone),
+      contactPage: Boolean(profile.contactUrl)
+    }
+  });
+  const safeNotes = [
+    `pages_examined=${profile.pageDiagnostics.pagesExamined}`,
+    payload.duplicateCount ? `duplicate_results=${payload.duplicateCount}` : "",
+    profile.pageDiagnostics.pageErrorTypes.length
+      ? `page_error_types=${profile.pageDiagnostics.pageErrorTypes.join(" | ")}`
+      : "",
+    profile.pageDiagnostics.aiErrorType
+      ? `ai_error_type=${profile.pageDiagnostics.aiErrorType}`
+      : ""
+  ].filter(Boolean).join("; ");
+  return recordFromCandidate(candidate, {
+    original_shop_type: selected.intent.originalShopType,
+    shop_type: selected.intent.shopType,
+    business_qualifier: selected.intent.businessQualifier,
+    store_name: profile.storeName,
+    email: profile.email,
+    email_source_url: profile.emailSourceUrl,
+    phone: profile.phone,
+    phone_source_url: profile.phoneSourceUrl,
+    contact_url: profile.contactUrl,
+    social_profiles: profile.socialProfiles,
+    additional_information: safeNotes,
+    shopify_confidence: selected.shopifyConfidence,
+    relevance_score: selected.relevanceScore,
+    lead_score: qualified ? scoreBreakdown.total : "",
+    store_fit_state: selected.storeFitState,
+    store_fit_evidence: assessments.map((item) => ({
+      intent: item.intent,
+      accepted: item.accepted,
+      ...(item.storeFitEvidence || {})
+    })),
+    contactability_tier: profile.contactabilityTier,
+    contact_evidence: profile.contactEvidence,
+    identity_confidence: profile.identityConfidence,
+    identity_evidence: profile.identityEvidence,
+    score_breakdown: qualified ? scoreBreakdown : null,
+    discovery_occurrences: payload.occurrences,
+    matched_categories: assessments.filter(({ accepted }) => accepted).map(({ intent }) => intent),
+    status: qualified ? "qualified" : "rejected",
+    rejection_reason: qualified
+      ? ""
+      : selected.accepted
+        ? "insufficient_contact_evidence"
+        : selected.rejectionReason || "wrong_store_type",
+    error: ""
+  });
+}
+
+export async function discoverLeadForRunStore(
+  config,
+  runStore,
+  dependencyOverrides = {}
+) {
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
+  const candidate = await refetchCandidate(
+    candidateFromRunStorePayload(runStore.candidatePayload),
+    config,
+    dependencies
+  );
+  const lead = await processStore(candidate, config, dependencies);
+  return { lead, profile: profileFromLead(candidate, lead) };
+}
+
+export function failedLeadForRunStore(candidatePayload, error) {
+  const candidate = candidateFromRunStorePayload(candidatePayload);
+  return recordFromCandidate(candidate, {
+    lead_score: "",
+    identity_confidence: candidate.identityConfidence,
+    identity_evidence: candidate.identityEvidence,
+    discovery_occurrences: candidate.occurrences,
+    matched_categories: [],
+    status: "failed",
+    rejection_reason: "processing_failed",
+    error: `Store processing failed (${safeErrorType(error)})`
+  });
 }
 
 export async function runPipeline(config, status, dependencyOverrides = {}) {

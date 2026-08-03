@@ -149,20 +149,20 @@ test(
       prisma = createPrismaClient(scopedUrl);
 
       await prisma.$executeRawUnsafe(`
-        INSERT INTO "Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "pipelineVersion", "scoringVersion")
+        INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "pipelineVersion", "scoringVersion")
         VALUES
           ('legacy_gr4_fixture', 'legacy_owner', 'completed', 'completed', '[]'::jsonb, '{}'::jsonb, true, NULL, NULL),
           ('pre_gr4_fixture', 'v2_owner', 'completed', 'completed', '[{"shopType":"eyewear"}]'::jsonb, '{}'::jsonb, true, 2, 2)
       `);
       await prisma.$executeRawUnsafe(`
-        INSERT INTO "Lead" ("id", "runId", "shopType", "queryScore", "status", "pipelineVersion", "scoringVersion")
+        INSERT INTO "${schema}"."Lead" ("id", "runId", "shopType", "queryScore", "status", "pipelineVersion", "scoringVersion")
         VALUES
           ('legacy_gr4_lead', 'legacy_gr4_fixture', 'clothing', 82, 'qualified', NULL, NULL),
           ('pre_gr4_lead', 'pre_gr4_fixture', 'eyewear', NULL, 'rejected', 2, NULL)
       `);
       const before = await prisma.$queryRawUnsafe(`
-        SELECT (SELECT COUNT(*)::int FROM "Run") AS runs,
-               (SELECT COUNT(*)::int FROM "Lead") AS leads
+        SELECT (SELECT COUNT(*)::int FROM "${schema}"."Run") AS runs,
+               (SELECT COUNT(*)::int FROM "${schema}"."Lead") AS leads
       `);
       await prisma.$disconnect();
       prisma = undefined;
@@ -186,8 +186,8 @@ test(
       ]);
 
       const after = await prisma.$queryRawUnsafe(`
-        SELECT (SELECT COUNT(*)::int FROM "Run") AS runs,
-               (SELECT COUNT(*)::int FROM "Lead") AS leads
+        SELECT (SELECT COUNT(*)::int FROM "${schema}"."Run") AS runs,
+               (SELECT COUNT(*)::int FROM "${schema}"."Lead") AS leads
       `);
       assert.deepEqual(after, before);
       const preserved = await prisma.lead.findUnique({

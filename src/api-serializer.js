@@ -470,7 +470,8 @@ export function leadTrafficEnrichmentRecordToCreate(id, runId, leadId, record) {
       ((record.state === "available") !== (payload.records.length === 10))) {
     throw new Error("Published DataForSEO state does not match its scopes");
   }
-  if (record.source !== "dataforseo" && payload?.contractVersion !== record.contractVersion) {
+  if (record.source !== "dataforseo" && payload &&
+      payload.contractVersion !== record.contractVersion) {
     throw new Error("Published traffic contract version does not match its payload");
   }
   let timing;

@@ -118,6 +118,8 @@ export function parseCruxBigQueryResponse(body, descriptor) {
 
   const expected = new Set(descriptor.origins);
   const rowsByOrigin = new Map();
+  const contractMismatchOrigins = [];
+  const seenOrigins = new Set();
   for (const row of rows) {
     if (row.f.length !== 1 || row.f[0].v == null) mismatch();
     let decoded;
@@ -137,9 +139,15 @@ export function parseCruxBigQueryResponse(body, descriptor) {
     if (
       value.dataset_month !== descriptor.month ||
       !expected.has(value.origin) ||
-      rowsByOrigin.has(value.origin) ||
-      Math.abs(value.phone_density + value.desktop_density + value.tablet_density - 1) > 0.01
+      seenOrigins.has(value.origin)
     ) mismatch();
+    seenOrigins.add(value.origin);
+    if (Math.abs(
+      value.phone_density + value.desktop_density + value.tablet_density - 1
+    ) > 0.01) {
+      contractMismatchOrigins.push(value.origin);
+      continue;
+    }
     rowsByOrigin.set(value.origin, value);
   }
 
@@ -149,6 +157,7 @@ export function parseCruxBigQueryResponse(body, descriptor) {
       bytesBilled > BigInt(Number.MAX_SAFE_INTEGER)) mismatch();
   return Object.freeze({
     rowsByOrigin,
+    contractMismatchOrigins: Object.freeze(contractMismatchOrigins.sort()),
     bytesProcessed: Number(bytesProcessed),
     bytesBilled: Number(bytesBilled),
     cacheHit: response.cacheHit === true

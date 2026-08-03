@@ -171,11 +171,11 @@ test(
       deploy(scopedUrl, baseline.configPath);
       const preMigration = createPrismaClient(scopedUrl);
       await preMigration.$executeRawUnsafe(`
-        INSERT INTO "Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
+        INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
         VALUES ('te3_historical_run', 'historical_owner', 'completed', 'finished', 'completed', '[]'::jsonb, '{}'::jsonb, true)
       `);
       await preMigration.$executeRawUnsafe(`
-        INSERT INTO "Lead" ("id", "runId", "resolvedDomain", "status")
+        INSERT INTO "${schema}"."Lead" ("id", "runId", "resolvedDomain", "status")
         VALUES ('te3_historical_lead', 'te3_historical_run', 'historical.example', 'qualified')
       `);
       await preMigration.$disconnect();
@@ -823,12 +823,12 @@ test(
       deploy(scopedUrl, baseline.configPath);
       const before = createPrismaClient(scopedUrl);
       await before.$executeRawUnsafe(`
-        INSERT INTO "Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "trafficEnrichmentConfig")
+        INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "trafficEnrichmentConfig")
         VALUES ('ter2_historical_run', 'historical_owner', 'failed', 'finished', 'failed', '[]'::jsonb, '{}'::jsonb, false,
           '{"version":"traffic-enrichment-run-v1","dataForSeo":{"maxCostPerRunUsd":2,"estimatedCostPerTaskUsd":0.024,"paidRequestStaleMs":900000}}'::jsonb)
       `);
       await before.$executeRawUnsafe(`
-        INSERT INTO "DataForSeoRequestLedger" (
+        INSERT INTO "${schema}"."DataForSeoRequestLedger" (
           "requestFingerprint", "runId", "targetCount", "scopeKey", "state", "attempt",
           "plannedAt", "claimedAt", "createdAt", "updatedAt"
         ) VALUES (

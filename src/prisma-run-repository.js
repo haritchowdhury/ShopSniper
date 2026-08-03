@@ -12,6 +12,7 @@ import {
   leadTrafficEnrichmentRecordToCreate,
   leadRecordToCreate,
   queryAuditRecordToCreate,
+  serializeLead,
   trafficCacheRecordToUpsert
 } from "./api-serializer.js";
 import { loadConfig } from "./config.js";
@@ -32,15 +33,27 @@ import {
   CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION,
   CRUX_POPULARITY_CONTRACT_VERSION
 } from "./enrichment/crux/bigquery-request.js";
-import { getPrismaClient } from "./prisma-client.js";
+import { getPrismaClient, prismaSchemaForClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
 import {
   GOOGLE_PROBE_CONTRACT_VERSION,
   normalizeProbeResults,
   queryProbeFingerprint
 } from "./query-review.js";
+import {
+  assertLeadMatchesShop,
+  assertProfileMatchesShop,
+  assertRunStoreIdentityPair,
+  parseRunStoreCandidate,
+  parseShopLeadProfile,
+  parseStableShopIdentity,
+  runStoreId,
+  shopIdForStableKey,
+  shopWorkId
+} from "./shop-persistence-contract.js";
 
 const ACTIVE_STATES = ["queued", "running"];
+const BULK_CHECKPOINT_LIMIT = 500;
 
 function runId() {
   return `run_${randomBytes(18).toString("base64url")}`;
@@ -94,7 +107,28 @@ export function stableLeadId(runIdentifier, record, index) {
 }
 
 function isUniqueConstraint(error) {
-  return error?.code === "P2002" || error?.cause?.code === "23505";
+  return error?.code === "P2002" || error?.cause?.code === "23505" ||
+    error?.meta?.code === "23505";
+}
+
+const SHOP_WORK_TYPES = new Set([
+  "lead_discovery", "dataforseo", "crux_rest", "crux_bigquery"
+]);
+
+function requireShopWorkKey(workType, scopeKey) {
+  if (!SHOP_WORK_TYPES.has(workType)) throw new Error("Shop work type is invalid");
+  if (typeof scopeKey !== "string" || !scopeKey || scopeKey.length > 128) {
+    throw new Error("Shop work scope is invalid");
+  }
+  const valid = workType === "lead_discovery"
+    ? scopeKey === "current"
+    : workType === "dataforseo"
+      ? /^(?:worldwide|country:[A-Z]{2}:[1-9]\d*)$/u.test(scopeKey)
+      : workType === "crux_rest"
+        ? scopeKey === "current"
+        : /^month:20\d{2}(?:0[1-9]|1[0-2])$/u.test(scopeKey);
+  if (!valid) throw new Error("Shop work scope is invalid for its type");
+  return { workType, scopeKey };
 }
 
 function canonicalJson(value) {
@@ -106,6 +140,310 @@ function canonicalJson(value) {
     ).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function requireBoundedBatch(name, rows, limit = BULK_CHECKPOINT_LIMIT) {
+  if (!Array.isArray(rows)) throw new Error(`${name} are required`);
+  if (rows.length > limit) throw new Error(`${name} exceed the ${limit}-row limit`);
+  return rows;
+}
+
+function requireUniqueBatchKeys(name, rows, keyFor) {
+  const keys = new Set(rows.map(keyFor));
+  if (keys.size !== rows.length) throw new Error(`${name} contain duplicates`);
+  return rows;
+}
+
+async function bulkUpsertShops(transaction, rows, now) {
+  if (!rows.length) return [];
+  return transaction.$queryRaw`
+    INSERT INTO "Shop" (
+      "id", "stableKey", "myshopifyDomain", "resolvedDomain", "canonicalUrl",
+      "identityConfidence", "identityEvidence", "createdAt", "updatedAt"
+    )
+    SELECT
+      input."id", input."stableKey", input."myshopifyDomain",
+      input."resolvedDomain", input."canonicalUrl", input."identityConfidence",
+      input."identityEvidence", ${now}, ${now}
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS input(
+      "id" text,
+      "stableKey" text,
+      "myshopifyDomain" text,
+      "resolvedDomain" text,
+      "canonicalUrl" text,
+      "identityConfidence" integer,
+      "identityEvidence" jsonb
+    )
+    ON CONFLICT ("stableKey") DO UPDATE SET
+      "myshopifyDomain" = COALESCE("Shop"."myshopifyDomain", EXCLUDED."myshopifyDomain"),
+      "resolvedDomain" = CASE
+        WHEN EXCLUDED."identityConfidence" > COALESCE("Shop"."identityConfidence", -1)
+          THEN COALESCE(EXCLUDED."resolvedDomain", "Shop"."resolvedDomain")
+        ELSE COALESCE("Shop"."resolvedDomain", EXCLUDED."resolvedDomain")
+      END,
+      "canonicalUrl" = CASE
+        WHEN EXCLUDED."identityConfidence" > COALESCE("Shop"."identityConfidence", -1)
+          THEN COALESCE(EXCLUDED."canonicalUrl", "Shop"."canonicalUrl")
+        ELSE COALESCE("Shop"."canonicalUrl", EXCLUDED."canonicalUrl")
+      END,
+      "identityConfidence" = CASE
+        WHEN EXCLUDED."identityConfidence" > COALESCE("Shop"."identityConfidence", -1)
+          THEN EXCLUDED."identityConfidence"
+        ELSE COALESCE("Shop"."identityConfidence", EXCLUDED."identityConfidence")
+      END,
+      "identityEvidence" = CASE
+        WHEN EXCLUDED."identityConfidence" > COALESCE("Shop"."identityConfidence", -1)
+          OR "Shop"."identityEvidence" IS NULL
+          THEN EXCLUDED."identityEvidence"
+        ELSE "Shop"."identityEvidence"
+      END,
+      "updatedAt" = EXCLUDED."updatedAt"
+    WHERE "Shop"."myshopifyDomain" IS NULL
+      OR EXCLUDED."myshopifyDomain" IS NULL
+      OR "Shop"."myshopifyDomain" = EXCLUDED."myshopifyDomain"
+    RETURNING *
+  `;
+}
+
+async function selectBulkSchema(transaction, schema) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/u.test(schema)) {
+    throw new Error("Database schema is invalid for bulk persistence");
+  }
+  await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
+}
+
+async function bulkUpsertDiagnostics(transaction, rows) {
+  if (!rows.length) return [];
+  return transaction.$queryRaw`
+    INSERT INTO "RunDiagnostic" (
+      "id", "runId", "sequence", "scope", "code", "shopType",
+      "businessQualifier", "query", "resultUrl", "details"
+    )
+    SELECT
+      input."id", input."runId", input."sequence", input."scope", input."code",
+      input."shopType", input."businessQualifier", input."query", input."resultUrl",
+      input."details"
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS input(
+      "id" text,
+      "runId" text,
+      "sequence" integer,
+      "scope" text,
+      "code" text,
+      "shopType" text,
+      "businessQualifier" text,
+      "query" text,
+      "resultUrl" text,
+      "details" jsonb
+    )
+    ON CONFLICT ("runId", "sequence") DO UPDATE SET
+      "id" = EXCLUDED."id",
+      "scope" = EXCLUDED."scope",
+      "code" = EXCLUDED."code",
+      "shopType" = EXCLUDED."shopType",
+      "businessQualifier" = EXCLUDED."businessQualifier",
+      "query" = EXCLUDED."query",
+      "resultUrl" = EXCLUDED."resultUrl",
+      "details" = EXCLUDED."details"
+    RETURNING "id"
+  `;
+}
+
+function shopWorkBatchKey({ shopId, workType, scopeKey }) {
+  return `${shopId}\u0000${workType}\u0000${scopeKey}`;
+}
+
+async function bulkClaimShopWorkRows(
+  transaction,
+  rows,
+  runIdentifier,
+  lease,
+  now
+) {
+  if (!rows.length) return [];
+  return transaction.$queryRaw`
+    WITH input AS (
+      SELECT *
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS value(
+        "id" text,
+        "shopId" text,
+        "workType" text,
+        "scopeKey" text,
+        "expectedState" text,
+        "expectedRunId" text,
+        "expectedLeaseToken" text
+      )
+    )
+    UPDATE "ShopWork" AS work SET
+      "state" = 'processing'::"ShopWorkState",
+      "processingRunId" = ${runIdentifier},
+      "processingLeaseToken" = ${lease.token},
+      "safeErrorCode" = NULL,
+      "safeErrorMessage" = NULL,
+      "startedAt" = ${now},
+      "completedAt" = NULL,
+      "updatedAt" = ${now}
+    FROM input
+    WHERE work."id" = input."id"
+      AND work."shopId" = input."shopId"
+      AND work."workType" = input."workType"::"ShopWorkType"
+      AND work."scopeKey" = input."scopeKey"
+      AND work."state" = input."expectedState"::"ShopWorkState"
+      AND work."processingRunId" IS NOT DISTINCT FROM input."expectedRunId"
+      AND work."processingLeaseToken" IS NOT DISTINCT FROM input."expectedLeaseToken"
+      AND NOT (
+        work."workType" = 'dataforseo'::"ShopWorkType"
+        AND EXISTS (
+          SELECT 1
+          FROM "DataForSeoRequestLedger" AS ledger
+          WHERE ledger."runId" = work."processingRunId"
+            AND ledger."scopeKey" = work."scopeKey"
+            AND ledger."state" IN (
+              'in_flight'::"DataForSeoRequestState",
+              'ambiguous'::"DataForSeoRequestState"
+            )
+        )
+      )
+    RETURNING work."id", work."shopId", work."workType", work."scopeKey"
+  `;
+}
+
+async function bulkFinishOwnedShopWork(
+  transaction,
+  rows,
+  runIdentifier,
+  lease,
+  state,
+  now
+) {
+  if (!rows.length) return [];
+  const safeErrorCode = state === "completed"
+    ? null
+    : state === "ambiguous"
+      ? "WORK_OUTCOME_AMBIGUOUS"
+      : "WORK_FAILED";
+  const safeErrorMessage = state === "completed"
+    ? null
+    : state === "ambiguous"
+      ? "The provider work outcome could not be confirmed safely."
+      : "The provider work failed safely.";
+  return transaction.$queryRaw`
+    WITH input AS (
+      SELECT *
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS value(
+        "shopId" text,
+        "workType" text,
+        "scopeKey" text
+      )
+    )
+    UPDATE "ShopWork" AS work SET
+      "state" = ${state}::"ShopWorkState",
+      "completedAt" = ${now},
+      "safeErrorCode" = ${safeErrorCode},
+      "safeErrorMessage" = ${safeErrorMessage},
+      "updatedAt" = ${now}
+    FROM input
+    WHERE work."shopId" = input."shopId"
+      AND work."workType" = input."workType"::"ShopWorkType"
+      AND work."scopeKey" = input."scopeKey"
+      AND work."state" = 'processing'::"ShopWorkState"
+      AND work."processingRunId" = ${runIdentifier}
+      AND work."processingLeaseToken" = ${lease.token}
+    RETURNING work."id", work."shopId", work."workType", work."scopeKey"
+  `;
+}
+
+async function markPaidWorkForAmbiguousLedgers(transaction, now) {
+  return transaction.$executeRaw`
+    UPDATE "ShopWork" AS work SET
+      "state" = 'ambiguous'::"ShopWorkState",
+      "safeErrorCode" = 'WORK_OUTCOME_AMBIGUOUS',
+      "safeErrorMessage" = 'The provider work outcome could not be confirmed safely.',
+      "completedAt" = ${now},
+      "updatedAt" = ${now}
+    FROM "DataForSeoRequestLedger" AS ledger
+    WHERE work."workType" = 'dataforseo'::"ShopWorkType"
+      AND work."state" = 'processing'::"ShopWorkState"
+      AND work."processingRunId" = ledger."runId"
+      AND work."scopeKey" = ledger."scopeKey"
+      AND ledger."state" = 'ambiguous'::"DataForSeoRequestState"
+  `;
+}
+
+async function bulkUpsertTrafficCache(transaction, rows, now) {
+  if (!rows.length) return [];
+  return transaction.$queryRaw`
+    INSERT INTO "TrafficEnrichmentCache" (
+      "id", "source", "identity", "scopeKey", "metricSetKey",
+      "contractVersion", "state", "normalizedPayload", "fetchedAt",
+      "coverageStartedAt", "coverageEndedAt", "expiresAt", "createdAt", "updatedAt"
+    )
+    SELECT
+      input."id", input."source"::"TrafficEnrichmentSource", input."identity",
+      input."scopeKey", input."metricSetKey", input."contractVersion",
+      input."state"::"TrafficEnrichmentCacheState", input."normalizedPayload",
+      input."fetchedAt", input."coverageStartedAt", input."coverageEndedAt",
+      input."expiresAt", ${now}, ${now}
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS input(
+      "id" text,
+      "source" text,
+      "identity" text,
+      "scopeKey" text,
+      "metricSetKey" text,
+      "contractVersion" text,
+      "state" text,
+      "normalizedPayload" jsonb,
+      "fetchedAt" timestamp,
+      "coverageStartedAt" timestamp,
+      "coverageEndedAt" timestamp,
+      "expiresAt" timestamp
+    )
+    ON CONFLICT ("source", "identity", "scopeKey", "metricSetKey", "contractVersion")
+    DO UPDATE SET
+      "state" = EXCLUDED."state",
+      "normalizedPayload" = EXCLUDED."normalizedPayload",
+      "fetchedAt" = EXCLUDED."fetchedAt",
+      "coverageStartedAt" = EXCLUDED."coverageStartedAt",
+      "coverageEndedAt" = EXCLUDED."coverageEndedAt",
+      "expiresAt" = EXCLUDED."expiresAt",
+      "updatedAt" = EXCLUDED."updatedAt"
+    RETURNING "source", "identity", "scopeKey", "metricSetKey", "contractVersion"
+  `;
+}
+
+async function bulkUpsertLeadTraffic(transaction, rows) {
+  if (!rows.length) return [];
+  return transaction.$queryRaw`
+    INSERT INTO "LeadTrafficEnrichment" (
+      "id", "runId", "leadId", "source", "state", "contractVersion",
+      "normalizedPayload", "fetchedAt", "coverageStartedAt", "coverageEndedAt"
+    )
+    SELECT
+      input."id", input."runId", input."leadId",
+      input."source"::"TrafficEnrichmentSource",
+      input."state"::"LeadTrafficEnrichmentState", input."contractVersion",
+      input."normalizedPayload", input."fetchedAt", input."coverageStartedAt",
+      input."coverageEndedAt"
+    FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS input(
+      "id" text,
+      "runId" text,
+      "leadId" text,
+      "source" text,
+      "state" text,
+      "contractVersion" text,
+      "normalizedPayload" jsonb,
+      "fetchedAt" timestamp,
+      "coverageStartedAt" timestamp,
+      "coverageEndedAt" timestamp
+    )
+    ON CONFLICT ("leadId", "source") DO UPDATE SET
+      "state" = EXCLUDED."state",
+      "contractVersion" = EXCLUDED."contractVersion",
+      "normalizedPayload" = EXCLUDED."normalizedPayload",
+      "fetchedAt" = EXCLUDED."fetchedAt",
+      "coverageStartedAt" = EXCLUDED."coverageStartedAt",
+      "coverageEndedAt" = EXCLUDED."coverageEndedAt"
+    RETURNING "leadId", "source"
+  `;
 }
 
 function metricSetKey(values) {
@@ -284,6 +622,7 @@ function resultOrder(filters) {
 export class PrismaRunRepository {
   constructor(prisma = getPrismaClient(), runtimeConfig = {}) {
     this.prisma = prisma;
+    this.databaseSchema = prismaSchemaForClient(prisma);
     this.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot(runtimeConfig);
   }
 
@@ -409,9 +748,16 @@ export class PrismaRunRepository {
           where: { id: next.id, state: "queued" },
           data: {
             state: "running",
-            stage: next.phase === "scraping"
-              ? "validating_confirmed_queries"
-              : "reading_categories",
+            stage: next.phase === "scraping" && [
+              "stores_persisted",
+              "discovering_leads",
+              "leads_persisted",
+              "enriching_traffic"
+            ].includes(next.stage)
+              ? next.stage
+              : next.phase === "scraping"
+                ? "validating_confirmed_queries"
+                : "reading_categories",
             startedAt: next.startedAt || now,
             leaseOwner: owner,
             leaseToken: token,
@@ -820,6 +1166,1362 @@ export class PrismaRunRepository {
     return { ...lease, expiresAt };
   }
 
+  async upsertVerifiedShop(
+    runIdentifier,
+    lease,
+    identity,
+    now = new Date(),
+    retryAfterConflict = true
+  ) {
+    const input = parseStableShopIdentity(identity);
+    const identifier = shopIdForStableKey(input.stableKey);
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        requireLeaseMutation(await transaction.run.updateMany({
+          where: activeLeaseWhere(runIdentifier, lease, now),
+          data: { lastHeartbeatAt: now }
+        }));
+        const existing = await transaction.shop.findUnique({
+          where: { stableKey: input.stableKey }
+        });
+        if (existing?.myshopifyDomain && input.myshopifyDomain &&
+            existing.myshopifyDomain !== input.myshopifyDomain) {
+          throw new Error("Conflicting verified MyShopify identities cannot be merged");
+        }
+        if (!existing) {
+          return transaction.shop.create({
+            data: { id: identifier, ...input }
+          });
+        }
+        const stronger = Number(input.identityConfidence) >
+          Number(existing.identityConfidence ?? -1);
+        return transaction.shop.update({
+          where: { id: existing.id },
+          data: {
+            myshopifyDomain: existing.myshopifyDomain || input.myshopifyDomain,
+            resolvedDomain: stronger
+              ? input.resolvedDomain || existing.resolvedDomain
+              : existing.resolvedDomain || input.resolvedDomain,
+            canonicalUrl: stronger
+              ? input.canonicalUrl || existing.canonicalUrl
+              : existing.canonicalUrl || input.canonicalUrl,
+            identityConfidence: stronger
+              ? input.identityConfidence
+              : existing.identityConfidence ?? input.identityConfidence,
+            identityEvidence: stronger || existing.identityEvidence == null
+              ? input.identityEvidence
+              : existing.identityEvidence
+          }
+        });
+      });
+    } catch (error) {
+      if (retryAfterConflict && isUniqueConstraint(error)) {
+        return this.upsertVerifiedShop(runIdentifier, lease, input, now, false);
+      }
+      throw error;
+    }
+  }
+
+  async saveDiscoveredStores(
+    runIdentifier,
+    lease,
+    stores,
+    diagnostics = [],
+    status = null,
+    now = new Date(),
+    retryAfterConflict = true
+  ) {
+    const normalized = requireBoundedBatch("Discovered stores", stores).map(
+      ({ identity, candidatePayload }) => assertRunStoreIdentityPair(identity, candidatePayload)
+    );
+    requireUniqueBatchKeys(
+      "Discovered stores",
+      normalized,
+      ({ identity }) => identity.stableKey
+    );
+    const diagnosticRows = requireBoundedBatch("Store diagnostics", diagnostics).map((record, index) =>
+      diagnosticRecordToCreate(
+        runIdentifier,
+        childId("diag", runIdentifier, `stores:${index}`),
+        index,
+        record
+      )
+    );
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        await selectBulkSchema(transaction, this.databaseSchema);
+        requireLeaseMutation(await transaction.run.updateMany({
+          where: activeLeaseWhere(runIdentifier, lease, now),
+          data: {
+            stage: "stores_persisted",
+            ...(status ? { progress: {
+              ...progressFromStatus(status),
+              storesPersisted: normalized.length
+            } } : {}),
+            lastHeartbeatAt: now
+          }
+        }));
+        const stableKeys = normalized.map(({ identity }) => identity.stableKey);
+        const existingShops = normalized.length
+          ? await transaction.shop.findMany({ where: { stableKey: { in: stableKeys } } })
+          : [];
+        const existingShopByKey = new Map(existingShops.map((shop) => [shop.stableKey, shop]));
+        for (const { identity } of normalized) {
+          const existing = existingShopByKey.get(identity.stableKey);
+          if (existing?.myshopifyDomain && identity.myshopifyDomain &&
+              existing.myshopifyDomain !== identity.myshopifyDomain) {
+            throw new Error("Conflicting verified MyShopify identities cannot be merged");
+          }
+        }
+        const shopInputs = normalized.map(({ identity }) => ({
+          id: shopIdForStableKey(identity.stableKey),
+          ...identity
+        }));
+        const shops = await bulkUpsertShops(transaction, shopInputs, now);
+        if (shops.length !== normalized.length) {
+          throw new Error("Conflicting verified MyShopify identities cannot be merged");
+        }
+        const shopByKey = new Map(shops.map((shop) => [shop.stableKey, shop]));
+        const runStoreInputs = normalized.map(({ identity, candidatePayload }) => {
+          const shop = shopByKey.get(identity.stableKey);
+          if (!shop) throw new Error("Bulk shop checkpoint did not return every stable identity");
+          return {
+            id: runStoreId(runIdentifier, shop.id),
+            runId: runIdentifier,
+            shopId: shop.id,
+            state: "discovered",
+            candidatePayload
+          };
+        });
+        const shopIds = runStoreInputs.map(({ shopId }) => shopId);
+        const existingRunStores = normalized.length
+          ? await transaction.runStore.findMany({
+              where: { runId: runIdentifier, shopId: { in: shopIds } }
+            })
+          : [];
+        const expectedByShopId = new Map(
+          runStoreInputs.map((row) => [row.shopId, row.candidatePayload])
+        );
+        for (const existing of existingRunStores) {
+          if (canonicalJson(existing.candidatePayload) !==
+              canonicalJson(expectedByShopId.get(existing.shopId))) {
+            throw new Error("Conflicting run-store replay cannot overwrite durable provenance");
+          }
+        }
+        if (runStoreInputs.length) {
+          await transaction.runStore.createMany({
+            data: runStoreInputs,
+            skipDuplicates: true
+          });
+        }
+        const durableRunStores = runStoreInputs.length
+          ? await transaction.runStore.findMany({
+              where: { runId: runIdentifier, shopId: { in: shopIds } }
+            })
+          : [];
+        if (durableRunStores.length !== runStoreInputs.length) {
+          throw new Error("Bulk run-store checkpoint did not persist every store");
+        }
+        for (const durable of durableRunStores) {
+          if (canonicalJson(durable.candidatePayload) !==
+              canonicalJson(expectedByShopId.get(durable.shopId))) {
+            throw new Error("Conflicting run-store replay cannot overwrite durable provenance");
+          }
+        }
+        const writtenDiagnostics = await bulkUpsertDiagnostics(transaction, diagnosticRows);
+        if (writtenDiagnostics.length !== diagnosticRows.length) {
+          throw new Error("Bulk store diagnostics were not reconciled");
+        }
+        return durableRunStores
+          .map((runStore) => ({
+            ...runStore,
+            shop: shops.find(({ id }) => id === runStore.shopId)
+          }))
+          .sort((left, right) => left.id.localeCompare(right.id));
+      });
+    } catch (error) {
+      if (retryAfterConflict && isUniqueConstraint(error)) {
+        return this.saveDiscoveredStores(
+          runIdentifier, lease, normalized, diagnostics, status, now, false
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listRunStoresForProcessing(runIdentifier, lease, limit = 100, now = new Date()) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Run-store processing limit is invalid");
+    }
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const rows = await transaction.runStore.findMany({
+        where: { runId: runIdentifier, state: { in: ["discovered", "processing"] } },
+        include: { shop: true },
+        orderBy: { id: "asc" },
+        take: limit
+      });
+      return rows.map((row) => ({
+        ...row,
+        candidatePayload: parseRunStoreCandidate(row.candidatePayload)
+      }));
+    });
+  }
+
+  async claimRunStore(runIdentifier, lease, runStoreIdentifier, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const claimed = await transaction.runStore.updateMany({
+        where: {
+          id: runStoreIdentifier,
+          runId: runIdentifier,
+          state: { in: ["discovered", "processing"] }
+        },
+        data: { state: "processing", safeErrorCode: null, safeErrorMessage: null }
+      });
+      const row = await transaction.runStore.findFirst({
+        where: { id: runStoreIdentifier, runId: runIdentifier },
+        include: { shop: true }
+      });
+      if (!row) throw new Error("Run store does not exist for this run");
+      return {
+        outcome: claimed.count === 1 ? "won" : row.state,
+        owned: claimed.count === 1,
+        runStore: {
+          ...row,
+          candidatePayload: parseRunStoreCandidate(row.candidatePayload)
+        }
+      };
+    });
+  }
+
+  async claimShopWork(
+    runIdentifier,
+    lease,
+    shopId,
+    workType,
+    scopeKey,
+    now = new Date(),
+    retryAfterConflict = true
+  ) {
+    requireShopWorkKey(workType, scopeKey);
+    if (typeof shopId !== "string" || !/^shop_[A-Za-z0-9_-]{16,80}$/u.test(shopId)) {
+      throw new Error("Shop work shop ID is invalid");
+    }
+    const identifier = shopWorkId(shopId, workType, scopeKey);
+    try {
+      return await this.prisma.$transaction(async (transaction) => {
+        requireLeaseMutation(await transaction.run.updateMany({
+          where: activeLeaseWhere(runIdentifier, lease, now),
+          data: { lastHeartbeatAt: now }
+        }));
+        let current = await transaction.shopWork.findUnique({
+          where: { shopId_workType_scopeKey: { shopId, workType, scopeKey } }
+        });
+        if (!current) {
+          current = await transaction.shopWork.create({
+            data: {
+              id: identifier,
+              shopId,
+              workType,
+              scopeKey,
+              state: "processing",
+              processingRunId: runIdentifier,
+              processingLeaseToken: lease.token,
+              startedAt: now
+            }
+          });
+          if (workType === "lead_discovery") {
+            await transaction.shopLeadProfile.upsert({
+              where: { shopId },
+              create: { shopId, state: "processing", processingRunId: runIdentifier },
+              update: {
+                state: "processing",
+                processingRunId: runIdentifier,
+                safeErrorCode: null,
+                safeErrorMessage: null
+              }
+            });
+          }
+          return { outcome: "won", networkAllowed: true, work: current };
+        }
+        if (current.state === "completed") {
+          return { outcome: "completed", networkAllowed: false, work: current };
+        }
+        if (current.state === "ambiguous") {
+          return { outcome: "ambiguous", networkAllowed: false, work: current };
+        }
+        if (current.state === "processing") {
+          const owner = current.processingRunId
+            ? await transaction.run.findUnique({
+                where: { id: current.processingRunId },
+                select: { state: true, leaseToken: true, leaseExpiresAt: true }
+              })
+            : null;
+          const activeOwner = owner?.state === "running" &&
+            owner.leaseToken === current.processingLeaseToken &&
+            owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
+          if (activeOwner) {
+            return { outcome: "processing", networkAllowed: false, work: current };
+          }
+        }
+        if (current.state === "failed" && current.processingRunId === runIdentifier) {
+          return { outcome: "failed", networkAllowed: false, retryable: true, work: current };
+        }
+        const reclaimed = await transaction.shopWork.updateMany({
+          where: {
+            id: current.id,
+            state: current.state,
+            processingRunId: current.processingRunId,
+            processingLeaseToken: current.processingLeaseToken
+          },
+          data: {
+            state: "processing",
+            processingRunId: runIdentifier,
+            processingLeaseToken: lease.token,
+            safeErrorCode: null,
+            safeErrorMessage: null,
+            startedAt: now,
+            completedAt: null
+          }
+        });
+        if (reclaimed.count !== 1) {
+          const latest = await transaction.shopWork.findUnique({ where: { id: current.id } });
+          return { outcome: latest?.state || "processing", networkAllowed: false, work: latest };
+        }
+        current = await transaction.shopWork.findUnique({ where: { id: current.id } });
+        if (workType === "lead_discovery") {
+          await transaction.shopLeadProfile.upsert({
+            where: { shopId },
+            create: { shopId, state: "processing", processingRunId: runIdentifier },
+            update: {
+              state: "processing",
+              processingRunId: runIdentifier,
+              safeErrorCode: null,
+              safeErrorMessage: null
+            }
+          });
+        }
+        return { outcome: "won", networkAllowed: true, work: current };
+      });
+    } catch (error) {
+      if (retryAfterConflict && isUniqueConstraint(error)) {
+        return this.claimShopWork(
+          runIdentifier, lease, shopId, workType, scopeKey, now, false
+        );
+      }
+      throw error;
+    }
+  }
+
+  async claimShopWorkBatch(
+    runIdentifier,
+    lease,
+    claims,
+    now = new Date()
+  ) {
+    const normalized = requireBoundedBatch(
+      "Shop work claims",
+      claims,
+      DATAFORSEO_TARGET_LIMIT
+    ).map((claim) => {
+      requireShopWorkKey(claim?.workType, claim?.scopeKey);
+      if (typeof claim?.shopId !== "string" ||
+          !/^shop_[A-Za-z0-9_-]{16,80}$/u.test(claim.shopId)) {
+        throw new Error("Shop work shop ID is invalid");
+      }
+      return {
+        id: shopWorkId(claim.shopId, claim.workType, claim.scopeKey),
+        shopId: claim.shopId,
+        workType: claim.workType,
+        scopeKey: claim.scopeKey
+      };
+    });
+    requireUniqueBatchKeys("Shop work claims", normalized, shopWorkBatchKey);
+    if (!normalized.length) return [];
+
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      await transaction.shopWork.createMany({
+        data: normalized.map((claim) => ({ ...claim, state: "pending" })),
+        skipDuplicates: true
+      });
+      const ids = normalized.map(({ id }) => id);
+      const currentRows = await transaction.shopWork.findMany({
+        where: { id: { in: ids } },
+        include: {
+          processingRun: {
+            select: { state: true, leaseToken: true, leaseExpiresAt: true }
+          }
+        }
+      });
+      if (currentRows.length !== normalized.length) {
+        throw new Error("Shop work batch did not materialize every requested key");
+      }
+      const eligible = currentRows.flatMap((work) => {
+        if (work.state === "pending") return [work];
+        if (work.state === "failed" && work.processingRunId !== runIdentifier) return [work];
+        if (work.state !== "processing") return [];
+        const owner = work.processingRun;
+        const activeOwner = owner?.state === "running" &&
+          owner.leaseToken === work.processingLeaseToken &&
+          owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
+        return activeOwner ? [] : [work];
+      }).map((work) => ({
+        id: work.id,
+        shopId: work.shopId,
+        workType: work.workType,
+        scopeKey: work.scopeKey,
+        expectedState: work.state,
+        expectedRunId: work.processingRunId,
+        expectedLeaseToken: work.processingLeaseToken
+      }));
+      const wonRows = await bulkClaimShopWorkRows(
+        transaction, eligible, runIdentifier, lease, now
+      );
+      const won = new Set(wonRows.map(({ id }) => id));
+      const durableRows = await transaction.shopWork.findMany({
+        where: { id: { in: ids } }
+      });
+      if (durableRows.length !== normalized.length) {
+        throw new Error("Shop work batch result did not reconcile every requested key");
+      }
+      const durableById = new Map(durableRows.map((row) => [row.id, row]));
+      return normalized.map((claim) => {
+        const work = durableById.get(claim.id);
+        if (won.has(claim.id)) {
+          return { outcome: "won", networkAllowed: true, work };
+        }
+        const outcome = ["completed", "failed", "ambiguous"].includes(work.state)
+          ? work.state
+          : "processing";
+        return {
+          outcome,
+          networkAllowed: false,
+          ...(outcome === "failed" ? { retryable: true } : {}),
+          work
+        };
+      });
+    });
+  }
+
+  async readReusableShopLeadProfile(runIdentifier, lease, shopId, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const row = await transaction.shopLeadProfile.findUnique({ where: { shopId } });
+      if (!row || row.state !== "completed" || row.profilePayload == null) return null;
+      return {
+        shopId: row.shopId,
+        state: row.state,
+        profilePayload: parseShopLeadProfile(row.profilePayload),
+        updatedAt: row.updatedAt
+      };
+    });
+  }
+
+  async saveDiscoveredShopLeadProfile(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    profile,
+    now = new Date()
+  ) {
+    const profilePayload = profile == null ? null : parseShopLeadProfile(profile);
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const runStore = await transaction.runStore.findFirst({
+        where: { id: runStoreIdentifier, runId: runIdentifier },
+        include: { shop: true }
+      });
+      if (!runStore || runStore.state !== "processing") {
+        throw new Error("Run store is not owned for profile publication");
+      }
+      if (profilePayload) assertProfileMatchesShop(profilePayload, runStore.shop.stableKey);
+      const work = await transaction.shopWork.findUnique({
+        where: {
+          shopId_workType_scopeKey: {
+            shopId: runStore.shopId,
+            workType: "lead_discovery",
+            scopeKey: "current"
+          }
+        }
+      });
+      const terminalState = profilePayload ? "completed" : "failed";
+      if (work?.state === terminalState && work.processingRunId === runIdentifier &&
+          work.processingLeaseToken === lease.token) {
+        const durableProfile = await transaction.shopLeadProfile.findUnique({
+          where: { shopId: runStore.shopId }
+        });
+        if (profilePayload && (durableProfile?.state !== "completed" ||
+            canonicalJson(durableProfile.profilePayload) !== canonicalJson(profilePayload))) {
+          throw new Error("Conflicting completed shop profile cannot be overwritten");
+        }
+        if (!profilePayload && durableProfile?.state === "completed") {
+          throw new Error("Completed shop profile cannot be replaced by a failed outcome");
+        }
+        return { state: terminalState, shopId: runStore.shopId };
+      }
+      if (work?.state !== "processing" || work.processingRunId !== runIdentifier ||
+          work.processingLeaseToken !== lease.token) {
+        throw new Error("Lead discovery work is not owned by this lease");
+      }
+      const existingProfile = await transaction.shopLeadProfile.findUnique({
+        where: { shopId: runStore.shopId }
+      });
+      if (existingProfile?.state === "completed" &&
+          (!profilePayload || canonicalJson(existingProfile.profilePayload) !==
+            canonicalJson(profilePayload))) {
+        throw new Error("Conflicting completed shop profile cannot be overwritten");
+      }
+      if (profilePayload) {
+        await transaction.shopLeadProfile.upsert({
+          where: { shopId: runStore.shopId },
+          create: {
+            shopId: runStore.shopId,
+            state: "completed",
+            profilePayload,
+            processingRunId: null
+          },
+          update: {
+            state: "completed",
+            profilePayload,
+            processingRunId: null,
+            safeErrorCode: null,
+            safeErrorMessage: null
+          }
+        });
+      } else if (existingProfile?.state !== "completed") {
+        await transaction.shopLeadProfile.upsert({
+          where: { shopId: runStore.shopId },
+          create: {
+            shopId: runStore.shopId,
+            state: "failed",
+            processingRunId: null,
+            safeErrorCode: "PROFILE_NOT_REUSABLE",
+            safeErrorMessage: "No reusable contact profile was produced for this store."
+          },
+          update: {
+            state: "failed",
+            profilePayload: null,
+            processingRunId: null,
+            safeErrorCode: "PROFILE_NOT_REUSABLE",
+            safeErrorMessage: "No reusable contact profile was produced for this store."
+          }
+        });
+      }
+      requireLeaseMutation(await transaction.shopWork.updateMany({
+        where: {
+          id: work.id,
+          state: "processing",
+          processingRunId: runIdentifier,
+          processingLeaseToken: lease.token
+        },
+        data: {
+          state: terminalState,
+          completedAt: now,
+          ...(profilePayload
+            ? { safeErrorCode: null, safeErrorMessage: null }
+            : {
+                safeErrorCode: "PROFILE_NOT_REUSABLE",
+                safeErrorMessage: "No reusable contact profile was produced for this store."
+              })
+        }
+      }));
+      return { state: terminalState, shopId: runStore.shopId };
+    });
+  }
+
+  async failShopLeadDiscovery(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    now = new Date()
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const runStore = await transaction.runStore.findFirst({
+        where: { id: runStoreIdentifier, runId: runIdentifier }
+      });
+      if (!runStore || runStore.state !== "processing") {
+        throw new Error("Run store is not owned for failed profile publication");
+      }
+      const work = await transaction.shopWork.findUnique({
+        where: {
+          shopId_workType_scopeKey: {
+            shopId: runStore.shopId,
+            workType: "lead_discovery",
+            scopeKey: "current"
+          }
+        }
+      });
+      if (work?.state === "failed" && work.processingRunId === runIdentifier &&
+          work.processingLeaseToken === lease.token) {
+        return { state: "failed", shopId: runStore.shopId };
+      }
+      if (work?.state !== "processing" || work.processingRunId !== runIdentifier ||
+          work.processingLeaseToken !== lease.token) {
+        throw new Error("Lead discovery work is not owned by this lease");
+      }
+      const profile = await transaction.shopLeadProfile.findUnique({
+        where: { shopId: runStore.shopId }
+      });
+      if (profile?.state !== "completed") {
+        await transaction.shopLeadProfile.upsert({
+          where: { shopId: runStore.shopId },
+          create: {
+            shopId: runStore.shopId,
+            state: "failed",
+            processingRunId: null,
+            safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "Lead discovery failed safely for this store."
+          },
+          update: {
+            state: "failed",
+            profilePayload: null,
+            processingRunId: null,
+            safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "Lead discovery failed safely for this store."
+          }
+        });
+      }
+      requireLeaseMutation(await transaction.shopWork.updateMany({
+        where: {
+          id: work.id,
+          state: "processing",
+          processingRunId: runIdentifier,
+          processingLeaseToken: lease.token
+        },
+        data: {
+          state: "failed",
+          safeErrorCode: "LEAD_DISCOVERY_FAILED",
+          safeErrorMessage: "Lead discovery failed safely for this store.",
+          completedAt: now
+        }
+      }));
+      return { state: "failed", shopId: runStore.shopId };
+    });
+  }
+
+  async saveLeadBatch(
+    runIdentifier,
+    lease,
+    outcomes,
+    status = null,
+    now = new Date()
+  ) {
+    const normalized = requireBoundedBatch("Lead outcomes", outcomes)
+      .map((outcome) => {
+        if (!outcome || typeof outcome.runStoreId !== "string" ||
+            !["completed", "failed"].includes(outcome.state)) {
+          throw new Error("Lead batch outcome is invalid");
+        }
+        const leadRow = leadRecordToCreate(
+          runIdentifier,
+          stableLeadId(runIdentifier, outcome.lead, 0),
+          outcome.lead
+        );
+        const profileReusable = outcome.profileReusable === true;
+        if (outcome.state === "failed" && profileReusable) {
+          throw new Error("A failed lead outcome cannot reference a reusable profile");
+        }
+        const diagnostic = outcome.diagnostic == null
+          ? null
+          : diagnosticRecordToCreate(
+              runIdentifier,
+              childId("diag", runIdentifier, `lead:${outcome.runStoreId}`),
+              0,
+              outcome.diagnostic
+            );
+        return {
+          runStoreId: outcome.runStoreId,
+          state: outcome.state,
+          leadValue: outcome.lead,
+          leadRow,
+          profileReusable,
+          diagnostic
+        };
+      })
+      .sort((left, right) => left.runStoreId.localeCompare(right.runStoreId));
+    requireUniqueBatchKeys("Lead outcomes", normalized, ({ runStoreId }) => runStoreId);
+    const progress = status ? progressFromStatus(status) : null;
+
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const runStoreIds = normalized.map(({ runStoreId }) => runStoreId);
+      const runStores = runStoreIds.length
+        ? await transaction.runStore.findMany({
+            where: { runId: runIdentifier, id: { in: runStoreIds } },
+            include: { shop: true }
+          })
+        : [];
+      if (runStores.length !== runStoreIds.length) {
+        throw new Error("Lead batch references a run store outside this run");
+      }
+      const runStoreById = new Map(runStores.map((row) => [row.id, row]));
+      const expectedLeadRows = normalized.map((outcome) => {
+        const runStore = runStoreById.get(outcome.runStoreId);
+        if (runStore.state !== "processing" && runStore.state !== outcome.state) {
+          throw new Error("Run-store terminal state conflicts with lead batch replay");
+        }
+        assertLeadMatchesShop(outcome.leadValue, runStore.shop.stableKey);
+        return {
+          ...outcome.leadRow,
+          shopId: runStore.shopId,
+          shopLeadProfileId: outcome.profileReusable ? runStore.shopId : null
+        };
+      });
+      const profileShopIds = expectedLeadRows
+        .filter(({ shopLeadProfileId }) => shopLeadProfileId)
+        .map(({ shopLeadProfileId }) => shopLeadProfileId);
+      const profiles = profileShopIds.length
+        ? await transaction.shopLeadProfile.findMany({
+            where: { shopId: { in: profileShopIds }, state: "completed" }
+          })
+        : [];
+      if (profiles.length !== profileShopIds.length) {
+        throw new Error("Lead batch references a missing reusable shop profile");
+      }
+      const stableKeyByShopId = new Map(runStores.map(({ shopId, shop }) => [shopId, shop.stableKey]));
+      for (const profile of profiles) {
+        assertProfileMatchesShop(profile.profilePayload, stableKeyByShopId.get(profile.shopId));
+      }
+      const shopIds = expectedLeadRows.map(({ shopId }) => shopId);
+      const existingLeads = shopIds.length
+        ? await transaction.lead.findMany({
+            where: { runId: runIdentifier, shopId: { in: shopIds } }
+          })
+        : [];
+      const expectedByShopId = new Map(expectedLeadRows.map((row) => [row.shopId, row]));
+      for (const existing of existingLeads) {
+        const expected = expectedByShopId.get(existing.shopId);
+        for (const [key, value] of Object.entries(expected)) {
+          if (value !== undefined && canonicalJson(existing[key]) !== canonicalJson(value)) {
+            throw new Error("Conflicting lead batch replay cannot overwrite durable data");
+          }
+        }
+      }
+      const existingShopIds = new Set(existingLeads.map(({ shopId }) => shopId));
+      const missingLeads = expectedLeadRows.filter(({ shopId }) => !existingShopIds.has(shopId));
+      if (missingLeads.length) {
+        await transaction.lead.createMany({ data: missingLeads });
+      }
+      const completedIds = normalized
+        .filter(({ state, runStoreId }) =>
+          state === "completed" && runStoreById.get(runStoreId).state === "processing")
+        .map(({ runStoreId }) => runStoreId);
+      const failedIds = normalized
+        .filter(({ state, runStoreId }) =>
+          state === "failed" && runStoreById.get(runStoreId).state === "processing")
+        .map(({ runStoreId }) => runStoreId);
+      if (completedIds.length) {
+        const completed = await transaction.runStore.updateMany({
+          where: { runId: runIdentifier, id: { in: completedIds }, state: "processing" },
+          data: { state: "completed", safeErrorCode: null, safeErrorMessage: null }
+        });
+        if (completed.count !== completedIds.length) {
+          throw new Error("Bulk completed run-store transition was not fully reconciled");
+        }
+      }
+      if (failedIds.length) {
+        const failed = await transaction.runStore.updateMany({
+          where: { runId: runIdentifier, id: { in: failedIds }, state: "processing" },
+          data: {
+            state: "failed",
+            safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "Lead discovery failed safely for this store."
+          }
+        });
+        if (failed.count !== failedIds.length) {
+          throw new Error("Bulk failed run-store transition was not fully reconciled");
+        }
+      }
+      const diagnostics = normalized
+        .filter(({ diagnostic }) => diagnostic)
+        .map(({ diagnostic }, index) => ({
+          ...diagnostic,
+          sequence: 1_000_000 + index
+        }));
+      const writtenDiagnostics = await bulkUpsertDiagnostics(transaction, diagnostics);
+      if (writtenDiagnostics.length !== diagnostics.length) {
+        throw new Error("Bulk lead diagnostics were not reconciled");
+      }
+      const nonterminal = await transaction.runStore.count({
+        where: { runId: runIdentifier, state: { in: ["discovered", "processing"] } }
+      });
+      if (nonterminal) throw new Error("Lead batch cannot complete with unfinished stores");
+      const durableLeads = await transaction.lead.findMany({
+        where: { runId: runIdentifier },
+        select: { status: true }
+      });
+      const summary = durableLeads.reduce((counts, row) => {
+        counts.total += 1;
+        counts[row.status] += 1;
+        return counts;
+      }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          stage: "leads_persisted",
+          resultsAvailable: true,
+          leadSummary: summary,
+          pipelineVersion: 2,
+          scoringVersion: 2,
+          ...(progress ? { progress: {
+            ...progress,
+            outputRows: summary.total,
+            storesProcessed: summary.total
+          } } : {})
+        }
+      }));
+      return summary;
+    });
+  }
+
+  async saveDiscoveredLead(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    { profile, lead },
+    now = new Date()
+  ) {
+    const profilePayload = profile == null ? null : parseShopLeadProfile(profile);
+    return this.#saveProgressiveLead(
+      runIdentifier,
+      lease,
+      runStoreIdentifier,
+      { profilePayload, lead, reuse: false },
+      now
+    );
+  }
+
+  async saveReusedLead(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    lead,
+    now = new Date()
+  ) {
+    return this.#saveProgressiveLead(
+      runIdentifier,
+      lease,
+      runStoreIdentifier,
+      { profilePayload: null, lead, reuse: true },
+      now
+    );
+  }
+
+  async #saveProgressiveLead(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    { profilePayload, lead, reuse },
+    now
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const runStore = await transaction.runStore.findFirst({
+        where: { id: runStoreIdentifier, runId: runIdentifier },
+        include: { shop: true }
+      });
+      if (!runStore) {
+        throw new Error("Run store is not owned for lead publication");
+      }
+      if (runStore.state === "completed") {
+        const durableLead = await transaction.lead.findUnique({
+          where: { runId_shopId: { runId: runIdentifier, shopId: runStore.shopId } }
+        });
+        if (!durableLead) throw new Error("Completed run store has no durable lead");
+        assertLeadMatchesShop(lead, runStore.shop.stableKey);
+        const expectedLead = leadRecordToCreate(
+          runIdentifier,
+          stableLeadId(runIdentifier, lead, 0),
+          lead
+        );
+        for (const [key, value] of Object.entries(expectedLead)) {
+          if (value !== undefined && canonicalJson(durableLead[key]) !== canonicalJson(value)) {
+            throw new Error("Conflicting progressive lead replay cannot overwrite durable data");
+          }
+        }
+        if (profilePayload) {
+          assertProfileMatchesShop(profilePayload, runStore.shop.stableKey);
+          const durableProfile = await transaction.shopLeadProfile.findUnique({
+            where: { shopId: runStore.shopId }
+          });
+          if (durableProfile?.state !== "completed" ||
+              canonicalJson(durableProfile.profilePayload) !== canonicalJson(profilePayload)) {
+            throw new Error("Conflicting completed shop profile cannot be overwritten");
+          }
+        }
+        return durableLead;
+      }
+      if (runStore.state !== "processing") {
+        throw new Error("Run store is not owned for lead publication");
+      }
+      assertLeadMatchesShop(lead, runStore.shop.stableKey);
+      if (profilePayload) assertProfileMatchesShop(profilePayload, runStore.shop.stableKey);
+      if (reuse) {
+        const reusable = await transaction.shopLeadProfile.findUnique({
+          where: { shopId: runStore.shopId }
+        });
+        if (reusable?.state !== "completed" || reusable.profilePayload == null) {
+          throw new Error("Reusable shop profile disappeared before lead publication");
+        }
+        parseShopLeadProfile(reusable.profilePayload);
+      } else {
+        const work = await transaction.shopWork.findUnique({
+          where: {
+            shopId_workType_scopeKey: {
+              shopId: runStore.shopId,
+              workType: "lead_discovery",
+              scopeKey: "current"
+            }
+          }
+        });
+        if (work?.state !== "processing" || work.processingRunId !== runIdentifier ||
+            work.processingLeaseToken !== lease.token) {
+          throw new Error("Lead discovery work is not owned by this lease");
+        }
+        if (profilePayload) {
+          const existingProfile = await transaction.shopLeadProfile.findUnique({
+            where: { shopId: runStore.shopId }
+          });
+          if (existingProfile?.state === "completed" &&
+              canonicalJson(existingProfile.profilePayload) !== canonicalJson(profilePayload)) {
+            throw new Error("Conflicting completed shop profile cannot be overwritten");
+          }
+          await transaction.shopLeadProfile.upsert({
+            where: { shopId: runStore.shopId },
+            create: {
+              shopId: runStore.shopId,
+              state: "completed",
+              profilePayload,
+              processingRunId: null
+            },
+            update: {
+              state: "completed",
+              profilePayload,
+              processingRunId: null,
+              safeErrorCode: null,
+              safeErrorMessage: null
+            }
+          });
+        }
+        const terminalWorkState = profilePayload ? "completed" : "failed";
+        requireLeaseMutation(await transaction.shopWork.updateMany({
+          where: {
+            id: work.id,
+            state: "processing",
+            processingRunId: runIdentifier,
+            processingLeaseToken: lease.token
+          },
+          data: {
+            state: terminalWorkState,
+            completedAt: now,
+            ...(profilePayload
+              ? { safeErrorCode: null, safeErrorMessage: null }
+              : {
+                  safeErrorCode: "PROFILE_NOT_REUSABLE",
+                  safeErrorMessage: "No reusable contact profile was produced for this store."
+                })
+          }
+        }));
+      }
+      const leadIdentifier = stableLeadId(runIdentifier, lead, 0);
+      const leadRow = {
+        ...leadRecordToCreate(runIdentifier, leadIdentifier, lead),
+        shopId: runStore.shopId,
+        shopLeadProfileId: profilePayload || reuse ? runStore.shopId : null
+      };
+      const existingLead = await transaction.lead.findUnique({
+        where: { runId_shopId: { runId: runIdentifier, shopId: runStore.shopId } }
+      });
+      if (existingLead) {
+        for (const [key, value] of Object.entries(leadRow)) {
+          if (value !== undefined && canonicalJson(existingLead[key]) !== canonicalJson(value)) {
+            throw new Error("Conflicting progressive lead replay cannot overwrite durable data");
+          }
+        }
+      } else {
+        await transaction.lead.create({ data: leadRow });
+      }
+      requireLeaseMutation(await transaction.runStore.updateMany({
+        where: { id: runStore.id, runId: runIdentifier, state: "processing" },
+        data: { state: "completed", safeErrorCode: null, safeErrorMessage: null }
+      }));
+      return transaction.lead.findUnique({ where: { id: leadIdentifier } });
+    });
+  }
+
+  async saveFailedLead(
+    runIdentifier,
+    lease,
+    runStoreIdentifier,
+    lead,
+    diagnostic,
+    now = new Date()
+  ) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const runStore = await transaction.runStore.findFirst({
+        where: { id: runStoreIdentifier, runId: runIdentifier },
+        include: { shop: true }
+      });
+      if (!runStore) {
+        throw new Error("Run store is not owned for failed lead publication");
+      }
+      if (runStore.state === "completed") {
+        return transaction.lead.findUnique({
+          where: { runId_shopId: { runId: runIdentifier, shopId: runStore.shopId } }
+        });
+      }
+      if (runStore.state !== "processing") {
+        throw new Error("Run store is not owned for failed lead publication");
+      }
+      assertLeadMatchesShop(lead, runStore.shop.stableKey);
+      const leadIdentifier = stableLeadId(runIdentifier, lead, 0);
+      const leadRow = {
+        ...leadRecordToCreate(runIdentifier, leadIdentifier, lead),
+        shopId: runStore.shopId,
+        shopLeadProfileId: null
+      };
+      await transaction.lead.upsert({
+        where: { runId_shopId: { runId: runIdentifier, shopId: runStore.shopId } },
+        create: leadRow,
+        update: leadRow
+      });
+      await transaction.runStore.update({
+        where: { id: runStore.id },
+        data: {
+          state: "failed",
+          safeErrorCode: "LEAD_DISCOVERY_FAILED",
+          safeErrorMessage: "Lead discovery failed safely for this store."
+        }
+      });
+      await transaction.shopWork.updateMany({
+        where: {
+          shopId: runStore.shopId,
+          workType: "lead_discovery",
+          scopeKey: "current",
+          state: "processing",
+          processingRunId: runIdentifier,
+          processingLeaseToken: lease.token
+        },
+        data: {
+          state: "failed",
+          safeErrorCode: "LEAD_DISCOVERY_FAILED",
+          safeErrorMessage: "Lead discovery failed safely for this store.",
+          completedAt: now
+        }
+      });
+      const existingProfile = await transaction.shopLeadProfile.findUnique({
+        where: { shopId: runStore.shopId }
+      });
+      if (existingProfile?.state !== "completed") {
+        await transaction.shopLeadProfile.upsert({
+          where: { shopId: runStore.shopId },
+          create: {
+            shopId: runStore.shopId,
+            state: "failed",
+            processingRunId: null,
+            safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "Lead discovery failed safely for this store."
+          },
+          update: {
+            state: "failed",
+            processingRunId: null,
+            safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "Lead discovery failed safely for this store."
+          }
+        });
+      }
+      const sequence = await transaction.runDiagnostic.count({ where: { runId: runIdentifier } });
+      const row = diagnosticRecordToCreate(
+        runIdentifier,
+        childId("diag", runIdentifier, `lead:${runStore.id}`),
+        sequence,
+        diagnostic
+      );
+      await transaction.runDiagnostic.create({ data: row });
+      return leadRow;
+    });
+  }
+
+  async completeLeadDiscovery(runIdentifier, lease, status = null, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const nonterminal = await transaction.runStore.count({
+        where: { runId: runIdentifier, state: { in: ["discovered", "processing"] } }
+      });
+      if (nonterminal) throw new Error("Lead discovery cannot complete with unfinished stores");
+      const rows = await transaction.lead.findMany({
+        where: { runId: runIdentifier },
+        select: { status: true }
+      });
+      const summary = rows.reduce((counts, row) => {
+        counts.total += 1;
+        counts[row.status] += 1;
+        return counts;
+      }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          stage: "leads_persisted",
+          resultsAvailable: true,
+          leadSummary: summary,
+          pipelineVersion: 2,
+          scoringVersion: 2,
+          ...(status ? { progress: {
+            ...progressFromStatus(status),
+            outputRows: summary.total,
+            storesProcessed: summary.total
+          } } : {})
+        }
+      }));
+      return summary;
+    });
+  }
+
+  async listPersistedQualifiedLeads(runIdentifier, lease, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const rows = await transaction.lead.findMany({
+        where: { runId: runIdentifier, status: "qualified" },
+        orderBy: { id: "asc" }
+      });
+      return rows.map((row) => ({ ...serializeLead(row), shop_id: row.shopId }));
+    });
+  }
+
+  async readReusableTrafficCache(runIdentifier, lease, keys, now = new Date()) {
+    if (!Array.isArray(keys) || keys.length === 0) return [];
+    const OR = keys.map((key) => {
+      for (const field of ["source", "identity", "scopeKey", "metricSetKey", "contractVersion"]) {
+        if (typeof key?.[field] !== "string" || !key[field]) {
+          throw new Error("Traffic cache lookup key is invalid");
+        }
+      }
+      return {
+        source: key.source,
+        identity: key.identity,
+        scopeKey: key.scopeKey,
+        metricSetKey: key.metricSetKey,
+        contractVersion: key.contractVersion
+      };
+    });
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      return transaction.trafficEnrichmentCache.findMany({ where: { OR } });
+    });
+  }
+
+  async readReusableLatestCruxBigQueryCache(
+    runIdentifier,
+    lease,
+    identities,
+    now = new Date()
+  ) {
+    if (!Array.isArray(identities) || identities.length === 0) return [];
+    return this.prisma.$transaction(async (transaction) => {
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      return transaction.trafficEnrichmentCache.findMany({
+        where: {
+          source: "crux_bigquery",
+          identity: { in: [...new Set(identities)] },
+          scopeKey: { startsWith: "month:" }
+        },
+        orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
+      });
+    });
+  }
+
+  async saveTrafficSourceResults(
+    runIdentifier,
+    lease,
+    { sourceKey, records = [], summary = null, diagnostics = [] },
+    now = new Date()
+  ) {
+    const allowedSources = sourceKey === "dataforseo"
+      ? new Set(["dataforseo"])
+      : sourceKey === "cruxRest"
+        ? new Set(["crux_rest"])
+        : sourceKey === "cruxBigQuery"
+          ? new Set(["crux_bigquery"])
+          : null;
+    if (!allowedSources || records.some(({ source }) => !allowedSources.has(source))) {
+      throw new Error("Traffic source publication is invalid");
+    }
+    const rows = records.map((record) => leadTrafficEnrichmentRecordToCreate(
+      childId("lead_traffic", runIdentifier, `${record.leadId}:${record.source}`),
+      runIdentifier,
+      record.leadId,
+      record
+    ));
+    requireBoundedBatch("Traffic source records", rows, DATAFORSEO_TARGET_LIMIT);
+    requireUniqueBatchKeys(
+      "Traffic source records",
+      rows,
+      ({ leadId, source }) => `${leadId}\u0000${source}`
+    );
+    const diagnosticBase = sourceKey === "dataforseo"
+      ? 2_000_000
+      : sourceKey === "cruxRest"
+        ? 2_100_000
+        : 2_200_000;
+    const diagnosticRows = requireBoundedBatch("Traffic source diagnostics", diagnostics)
+      .map((diagnostic, index) => diagnosticRecordToCreate(
+        runIdentifier,
+        childId(
+          "diag",
+          runIdentifier,
+          `traffic:${sourceKey}:${index}:${diagnostic.code || "unknown"}`
+        ),
+        diagnosticBase + index,
+        diagnostic
+      ));
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now, stage: "enriching_traffic" }
+      }));
+      const leadIds = [...new Set(rows.map(({ leadId }) => leadId))];
+      const owned = leadIds.length
+        ? await transaction.lead.count({ where: { runId: runIdentifier, id: { in: leadIds } } })
+        : 0;
+      if (owned !== leadIds.length) {
+        throw new Error("Traffic enrichment references a lead outside this run");
+      }
+      const written = await bulkUpsertLeadTraffic(transaction, rows);
+      if (written.length !== rows.length) {
+        throw new Error("Bulk traffic source rows were not reconciled");
+      }
+      const run = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          trafficEnrichmentSummary: {
+            ...(run?.trafficEnrichmentSummary || {}),
+            version: "traffic-enrichment-summary-v1",
+            ...(summary == null ? {} : { [sourceKey]: summary })
+          }
+        }
+      }));
+      const writtenDiagnostics = await bulkUpsertDiagnostics(transaction, diagnosticRows);
+      if (writtenDiagnostics.length !== diagnosticRows.length) {
+        throw new Error("Bulk traffic diagnostics were not reconciled");
+      }
+      return rows.length;
+    });
+  }
+
+  async completeTrafficEnrichment(
+    runIdentifier,
+    lease,
+    summary,
+    diagnostics = [],
+    status = null,
+    now = new Date()
+  ) {
+    const diagnosticRows = requireBoundedBatch("Final traffic diagnostics", diagnostics)
+      .map((diagnostic, index) => diagnosticRecordToCreate(
+        runIdentifier,
+        childId(
+          "diag",
+          runIdentifier,
+          `traffic-final:${index}:${diagnostic.code || "unknown"}`
+        ),
+        2_900_000 + index,
+        diagnostic
+      ));
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const currentRun = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      const writtenDiagnostics = await bulkUpsertDiagnostics(transaction, diagnosticRows);
+      if (writtenDiagnostics.length !== diagnosticRows.length) {
+        throw new Error("Bulk final traffic diagnostics were not reconciled");
+      }
+      const priorTraffic = currentRun?.trafficEnrichmentSummary || null;
+      const priorHasMaterial = priorTraffic && [
+        "dataforseo", "cruxRest", "cruxBigQuery"
+      ].some((key) => priorTraffic[key] != null);
+      const finalTrafficSummary = summary?.state === "failed" && priorHasMaterial
+        ? { ...priorTraffic, ...summary, state: "partial" }
+        : summary;
+      const completed = await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: {
+          state: "completed",
+          phase: "finished",
+          stage: "completed",
+          completedAt: now,
+          resultsAvailable: true,
+          ...(finalTrafficSummary != null
+            ? { trafficEnrichmentSummary: finalTrafficSummary }
+            : {}),
+          ...(status ? { progress: progressFromStatus(status) } : {}),
+          safeErrorCode: null,
+          safeErrorMessage: null,
+          leaseOwner: null,
+          leaseToken: null,
+          leaseAcquiredAt: null,
+          leaseExpiresAt: null,
+          lastHeartbeatAt: null
+        }
+      });
+      requireLeaseMutation(completed);
+      return transaction.run.findUnique({ where: { id: runIdentifier } });
+    });
+  }
+
+  parseRunStoreCandidate(value) {
+    return parseRunStoreCandidate(value);
+  }
+
   async readFreshTrafficCache(runIdentifier, lease, keys, now = new Date()) {
     if (!Array.isArray(keys) || keys.length === 0) return [];
     const OR = keys.map((key) => {
@@ -878,8 +2580,11 @@ export class PrismaRunRepository {
     runIdentifier,
     lease,
     cacheRows,
-    now = new Date()
+    workClaimsOrNow = [],
+    requestedNow = new Date()
   ) {
+    const workClaims = workClaimsOrNow instanceof Date ? [] : workClaimsOrNow;
+    const now = workClaimsOrNow instanceof Date ? workClaimsOrNow : requestedNow;
     if (!Array.isArray(cacheRows)) throw new Error("CrUX cache rows are required");
     if (cacheRows.some(({ source }) => !["crux_rest", "crux_bigquery"].includes(source))) {
       throw new Error("Only CrUX cache rows can be written through this method");
@@ -887,26 +2592,55 @@ export class PrismaRunRepository {
     const rows = cacheRows.map((record) =>
       trafficCacheRecordToUpsert(cacheId(record), record)
     );
+    requireBoundedBatch("CrUX cache rows", rows, DATAFORSEO_TARGET_LIMIT);
+    requireUniqueBatchKeys("CrUX cache rows", rows, (row) => canonicalJson([
+      row.source, row.identity, row.scopeKey, row.metricSetKey, row.contractVersion
+    ]));
+    const normalizedClaims = requireBoundedBatch(
+      "CrUX work claims", workClaims, DATAFORSEO_TARGET_LIMIT
+    ).map((claim) => {
+      requireShopWorkKey(claim?.workType, claim?.scopeKey);
+      if (!["crux_rest", "crux_bigquery"].includes(claim.workType) ||
+          typeof claim.shopId !== "string") {
+        throw new Error("CrUX work claim is invalid");
+      }
+      return { shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey };
+    });
+    requireUniqueBatchKeys("CrUX work claims", normalizedClaims, shopWorkBatchKey);
+    if (normalizedClaims.length) {
+      if (normalizedClaims.length !== rows.length) {
+        throw new Error("CrUX cache rows do not reconcile with work claims");
+      }
+      const expectedWorkType = rows[0]?.source;
+      const expectedScopeKey = rows[0]?.scopeKey;
+      if (!expectedWorkType || !expectedScopeKey || rows.some((row) =>
+        row.source !== expectedWorkType || row.scopeKey !== expectedScopeKey
+      ) || normalizedClaims.some((claim) =>
+        claim.workType !== expectedWorkType || claim.scopeKey !== expectedScopeKey
+      )) {
+        throw new Error("CrUX cache rows and work claims have mismatched source or scope");
+      }
+    }
     return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }
       }));
-      for (const row of rows) {
-        const unique = {
-          source: row.source,
-          identity: row.identity,
-          scopeKey: row.scopeKey,
-          metricSetKey: row.metricSetKey,
-          contractVersion: row.contractVersion
-        };
-        const update = { ...row };
-        delete update.id;
-        await transaction.trafficEnrichmentCache.upsert({
-          where: { source_identity_scopeKey_metricSetKey_contractVersion: unique },
-          create: row,
-          update
-        });
+      const written = await bulkUpsertTrafficCache(transaction, rows, now);
+      if (written.length !== rows.length) {
+        throw new Error("Bulk CrUX cache rows were not reconciled");
+      }
+      const completed = await bulkFinishOwnedShopWork(
+        transaction,
+        normalizedClaims,
+        runIdentifier,
+        lease,
+        "completed",
+        now
+      );
+      if (completed.length !== normalizedClaims.length) {
+        throw new Error("Bulk CrUX work completion was not reconciled");
       }
       return rows.length;
     });
@@ -1060,7 +2794,7 @@ export class PrismaRunRepository {
     runIdentifier,
     lease,
     requestFingerprint,
-    { providerCostUsd, cacheRows },
+    { providerCostUsd, cacheRows, workClaims = [] },
     now = new Date()
   ) {
     if (!Number.isFinite(providerCostUsd) || providerCostUsd < 0) {
@@ -1070,17 +2804,42 @@ export class PrismaRunRepository {
     if (cacheRows.some(({ source }) => source !== "dataforseo")) {
       throw new Error("A DataForSEO ledger can commit only DataForSEO cache rows");
     }
+    for (const claim of workClaims) {
+      requireShopWorkKey(claim.workType, claim.scopeKey);
+      if (claim.workType !== "dataforseo" || typeof claim.shopId !== "string") {
+        throw new Error("DataForSEO work claim is invalid");
+      }
+    }
+    requireBoundedBatch("DataForSEO work claims", workClaims, DATAFORSEO_TARGET_LIMIT);
+    requireUniqueBatchKeys("DataForSEO work claims", workClaims, shopWorkBatchKey);
     const rows = cacheRows.map((record) => trafficCacheRecordToUpsert(cacheId(record), record));
+    requireBoundedBatch("DataForSEO cache rows", rows, DATAFORSEO_TARGET_LIMIT);
     const identities = new Set(rows.map((row) => canonicalJson([
       row.source, row.identity, row.scopeKey, row.metricSetKey, row.contractVersion
     ])));
     if (identities.size !== rows.length) throw new Error("Traffic cache rows contain duplicates");
 
     return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }
       }));
+      const ledger = await transaction.dataForSeoRequestLedger.findUnique({
+        where: { requestFingerprint }
+      });
+      if (!ledger || ledger.runId !== runIdentifier || ledger.state !== "in_flight" ||
+          ledger.leaseOwner !== lease.owner || ledger.leaseToken !== lease.token) {
+        throw new Error("DataForSEO success does not own the in-flight ledger");
+      }
+      if (rows.some((row) => row.scopeKey !== ledger.scopeKey) ||
+          workClaims.some((claim) => claim.scopeKey !== ledger.scopeKey)) {
+        throw new Error("DataForSEO success scope does not match its ledger");
+      }
+      if (rows.length > ledger.targetCount ||
+          (workClaims.length && workClaims.length !== ledger.targetCount)) {
+        throw new Error("DataForSEO success count does not match its ledger");
+      }
       const succeeded = await transaction.dataForSeoRequestLedger.updateMany({
         where: {
           requestFingerprint,
@@ -1100,25 +2859,58 @@ export class PrismaRunRepository {
         }
       });
       requireLeaseMutation(succeeded);
-      for (const row of rows) {
-        const unique = {
-          source: row.source,
-          identity: row.identity,
-          scopeKey: row.scopeKey,
-          metricSetKey: row.metricSetKey,
-          contractVersion: row.contractVersion
-        };
-        const update = { ...row };
-        delete update.id;
-        await transaction.trafficEnrichmentCache.upsert({
-          where: { source_identity_scopeKey_metricSetKey_contractVersion: unique },
-          create: row,
-          update
-        });
+      const written = await bulkUpsertTrafficCache(transaction, rows, now);
+      if (written.length !== rows.length) {
+        throw new Error("Bulk DataForSEO cache rows were not reconciled");
+      }
+      const completed = await bulkFinishOwnedShopWork(
+        transaction,
+        workClaims,
+        runIdentifier,
+        lease,
+        "completed",
+        now
+      );
+      if (completed.length !== workClaims.length) {
+        throw new Error("Bulk DataForSEO work completion was not reconciled");
       }
       return transaction.dataForSeoRequestLedger.findUnique({
         where: { requestFingerprint }
       });
+    });
+  }
+
+  async finishShopWorkClaims(
+    runIdentifier,
+    lease,
+    claims,
+    state,
+    now = new Date()
+  ) {
+    if (!Array.isArray(claims) || !["completed", "failed", "ambiguous"].includes(state)) {
+      throw new Error("Shop work completion is invalid");
+    }
+    const normalized = requireBoundedBatch(
+      "Shop work completions", claims, DATAFORSEO_TARGET_LIMIT
+    ).map((claim) => {
+      requireShopWorkKey(claim?.workType, claim?.scopeKey);
+      if (typeof claim.shopId !== "string") throw new Error("Shop work shop ID is invalid");
+      return { shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey };
+    });
+    requireUniqueBatchKeys("Shop work completions", normalized, shopWorkBatchKey);
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({
+        where: activeLeaseWhere(runIdentifier, lease, now),
+        data: { lastHeartbeatAt: now }
+      }));
+      const completed = await bulkFinishOwnedShopWork(
+        transaction, normalized, runIdentifier, lease, state, now
+      );
+      if (completed.length !== normalized.length) {
+        throw new Error("Bulk shop work completion was not fully reconciled");
+      }
+      return { count: completed.length };
     });
   }
 
@@ -1228,27 +3020,44 @@ export class PrismaRunRepository {
   }
 
   async markStaleDataForSeoRequestsAmbiguous(now = new Date()) {
-    return this.prisma.dataForSeoRequestLedger.updateMany({
-      where: {
-        state: "in_flight",
+    const where = {
+      state: "in_flight",
+      OR: [
+        { ambiguousAfter: { lte: now } },
+        { ambiguousAfter: null }
+      ],
+      run: {
         OR: [
-          { ambiguousAfter: { lte: now } },
-          { ambiguousAfter: null }
-        ],
-        run: {
-          OR: [
-            { state: { not: "running" } },
-            { leaseExpiresAt: { lte: now } },
-            { leaseExpiresAt: null }
-          ]
-        }
-      },
-      data: {
-        state: "ambiguous",
-        safeErrorCode: "PAID_REQUEST_OUTCOME_AMBIGUOUS",
-        safeErrorMessage: "The paid request outcome could not be confirmed safely.",
-        completedAt: now
+          { state: { not: "running" } },
+          { leaseExpiresAt: { lte: now } },
+          { leaseExpiresAt: null }
+        ]
       }
+    };
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const ledgers = await transaction.dataForSeoRequestLedger.findMany({
+        where,
+        select: { requestFingerprint: true, runId: true, scopeKey: true }
+      });
+      const transitioned = ledgers.length
+        ? await transaction.dataForSeoRequestLedger.updateMany({
+            where: {
+              ...where,
+              requestFingerprint: {
+                in: ledgers.map(({ requestFingerprint }) => requestFingerprint)
+              }
+            },
+            data: {
+              state: "ambiguous",
+              safeErrorCode: "PAID_REQUEST_OUTCOME_AMBIGUOUS",
+              safeErrorMessage: "The paid request outcome could not be confirmed safely.",
+              completedAt: now
+            }
+          })
+        : { count: 0 };
+      const workCount = await markPaidWorkForAmbiguousLedgers(transaction, now);
+      return { count: transitioned.count, workCount };
     });
   }
 
@@ -1433,24 +3242,50 @@ export class PrismaRunRepository {
   }
 
   async recoverExpiredRuns(now = new Date()) {
-    return this.prisma.run.updateMany({
-      where: {
-        state: "running",
-        OR: [
-          { leaseExpiresAt: { lte: now } },
-          { leaseExpiresAt: null }
-        ]
-      },
-      data: {
-        state: "failed",
-        phase: "finished",
-        stage: "failed",
-        completedAt: now,
-        resultsAvailable: false,
-        safeErrorCode: "RUN_LEASE_EXPIRED",
-        safeErrorMessage:
-          "The worker stopped renewing this run. Please start a new run."
-      }
+    const expired = {
+      state: "running",
+      OR: [
+        { leaseExpiresAt: { lte: now } },
+        { leaseExpiresAt: null }
+      ]
+    };
+    return this.prisma.$transaction(async (transaction) => {
+      const resumable = await transaction.run.updateMany({
+        where: {
+          ...expired,
+          phase: "scraping",
+          stage: { in: [
+            "stores_persisted",
+            "discovering_leads",
+            "leads_persisted",
+            "enriching_traffic"
+          ] }
+        },
+        data: {
+          state: "queued",
+          leaseOwner: null,
+          leaseToken: null,
+          leaseAcquiredAt: null,
+          leaseExpiresAt: null,
+          lastHeartbeatAt: null,
+          safeErrorCode: null,
+          safeErrorMessage: null
+        }
+      });
+      const failed = await transaction.run.updateMany({
+        where: expired,
+        data: {
+          state: "failed",
+          phase: "finished",
+          stage: "failed",
+          completedAt: now,
+          resultsAvailable: false,
+          safeErrorCode: "RUN_LEASE_EXPIRED",
+          safeErrorMessage:
+            "The worker stopped renewing this run. Please start a new run."
+        }
+      });
+      return { count: resumable.count + failed.count, resumable: resumable.count, failed: failed.count };
     });
   }
 }

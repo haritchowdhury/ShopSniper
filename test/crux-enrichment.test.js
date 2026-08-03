@@ -258,6 +258,28 @@ test("BigQuery JSON-row fixture parses exact aliased payloads", () => {
   );
   assert.equal(parsed.rowsByOrigin.get("https://www.shopify.com").popularity_rank, 5000);
   assert.equal(parsed.bytesBilled, 112197632);
+  assert.deepEqual(parsed.contractMismatchOrigins, []);
+});
+
+test("BigQuery isolates zero-density rows without discarding valid origins", () => {
+  const descriptor = buildCruxBigQueryLiveRequest({
+    origins: ["https://shopify.com", ORIGIN, "https://www.shopify.com"],
+    month: "202606",
+    projectId: "fixture-project",
+    location: "US",
+    maximumBytesBilled: 10000000000
+  });
+  const response = fixture("bigquery-json-row-v1-success.json");
+  const anomalous = JSON.parse(response.rows[0].f[0].v);
+  anomalous.phone_density = 0;
+  anomalous.desktop_density = 0;
+  anomalous.tablet_density = 0;
+  response.rows[0].f[0].v = JSON.stringify(anomalous);
+
+  const parsed = parseCruxBigQueryResponse(response, descriptor);
+  assert.equal(parsed.rowsByOrigin.has(anomalous.origin), false);
+  assert.equal(parsed.rowsByOrigin.size, 2);
+  assert.deepEqual(parsed.contractMismatchOrigins, [anomalous.origin]);
 });
 
 test("BigQuery no rows remains valid no coverage", () => {
@@ -339,6 +361,33 @@ test("popularity adapter reconciles a missing requested row as no coverage", asy
     "unavailable"
   );
   assert.equal(result.records.find((record) => record.origin === ORIGIN).popularityRank, 1000);
+});
+
+test("popularity adapter exposes a zero-density origin as a row-level contract mismatch", async () => {
+  const live = fixture("bigquery-json-row-v1-success.json");
+  const anomalous = JSON.parse(live.rows[0].f[0].v);
+  anomalous.phone_density = 0;
+  anomalous.desktop_density = 0;
+  anomalous.tablet_density = 0;
+  live.rows[0].f[0].v = JSON.stringify(anomalous);
+  const responses = [
+    fixture("bigquery-table-list-v1-success.json"),
+    fixture("bigquery-json-row-v1-success.json"),
+    live
+  ];
+  const result = await fetchCruxPopularity({
+    origins: ["https://shopify.com", ORIGIN, "https://www.shopify.com"],
+    config: config()
+  }, {
+    now: NOW,
+    tokenProvider: async () => "fixture-oauth-token",
+    request: async () => ({ status: 200, body: JSON.stringify(responses.shift()) })
+  });
+
+  const record = result.records.find(({ origin }) => origin === anomalous.origin);
+  assert.equal(record.coverage, "unavailable");
+  assert.equal(record.reason, "contract_mismatch");
+  assert.equal(result.records.filter(({ coverage }) => coverage === "available").length, 2);
 });
 
 test("dry-run over cap prevents the live query", async () => {

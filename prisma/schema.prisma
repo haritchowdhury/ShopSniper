@@ -69,6 +69,34 @@ enum DataForSeoRequestState {
   ambiguous
 }
 
+enum RunStoreState {
+  discovered
+  processing
+  completed
+  failed
+}
+
+enum ShopLeadProfileState {
+  processing
+  completed
+  failed
+}
+
+enum ShopWorkType {
+  lead_discovery
+  dataforseo
+  crux_rest
+  crux_bigquery
+}
+
+enum ShopWorkState {
+  pending
+  processing
+  completed
+  failed
+  ambiguous
+}
+
 model Run {
   id                     String          @id
   ownerId                String?
@@ -104,6 +132,9 @@ model Run {
   diagnostics            RunDiagnostic[]
   queries                RunQuery[]
   dataForSeoRequests     DataForSeoRequestLedger[]
+  runStores              RunStore[]
+  processingLeadProfiles ShopLeadProfile[] @relation("ShopLeadProfileProcessingRun")
+  processingShopWork     ShopWork[] @relation("ShopWorkProcessingRun")
 
   @@index([state])
   @@index([state, leaseExpiresAt])
@@ -153,6 +184,10 @@ model Lead {
   id                    String     @id
   runId                 String
   run                   Run        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shopId                String?
+  shop                  Shop?      @relation("LeadShop", fields: [shopId], references: [id], onDelete: SetNull)
+  shopLeadProfileId     String?
+  shopLeadProfile       ShopLeadProfile? @relation(fields: [shopLeadProfileId], references: [shopId], onDelete: SetNull)
   shopType              String?
   originalShopType      String?
   businessQualifier     String?
@@ -194,11 +229,83 @@ model Lead {
   trafficEnrichments    LeadTrafficEnrichment[]
 
   @@unique([id, runId])
+  @@unique([runId, shopId])
   @@index([runId, status])
   @@index([runId, leadScore])
   @@index([runId, storeName])
   @@index([runId, shopType])
   @@index([runId, googleRank])
+}
+
+model Shop {
+  id                 String   @id
+  stableKey          String   @unique
+  myshopifyDomain    String?
+  resolvedDomain     String?
+  canonicalUrl       String?
+  identityConfidence Int?
+  identityEvidence   Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  runStores          RunStore[]
+  leads              Lead[] @relation("LeadShop")
+  leadProfile        ShopLeadProfile?
+  work               ShopWork[]
+}
+
+model RunStore {
+  id               String        @id
+  runId            String
+  run              Run           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  shopId           String
+  shop             Shop          @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  state            RunStoreState @default(discovered)
+  candidatePayload Json
+  safeErrorCode    String?
+  safeErrorMessage String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@unique([runId, shopId])
+  @@index([runId, state])
+  @@index([shopId])
+}
+
+model ShopLeadProfile {
+  shopId           String               @id
+  shop             Shop                 @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  state            ShopLeadProfileState
+  profilePayload   Json?
+  processingRunId  String?
+  processingRun    Run?                 @relation("ShopLeadProfileProcessingRun", fields: [processingRunId], references: [id], onDelete: SetNull)
+  safeErrorCode    String?
+  safeErrorMessage String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  leads            Lead[]
+
+  @@index([state, processingRunId])
+}
+
+model ShopWork {
+  id                   String        @id
+  shopId               String
+  shop                 Shop          @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  workType             ShopWorkType
+  scopeKey             String
+  state                ShopWorkState @default(pending)
+  processingRunId      String?
+  processingRun        Run?          @relation("ShopWorkProcessingRun", fields: [processingRunId], references: [id], onDelete: SetNull)
+  processingLeaseToken String?
+  safeErrorCode        String?
+  safeErrorMessage     String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  @@unique([shopId, workType, scopeKey])
+  @@index([state, processingRunId])
 }
 
 model TrafficEnrichmentCache {

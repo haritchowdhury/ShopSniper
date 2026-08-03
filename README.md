@@ -147,18 +147,28 @@ editable PostgreSQL rows. When status reaches
 `POST /api/runs/{runId}/start`. Store discovery and lead extraction begin only
 after that final sanity check passes.
 
-Multiple owned runs may wait in PostgreSQL, while a partial unique index and
-atomic claim permit only one `running` row at a time. A run waiting for query
-review holds no worker lease. Status, query, result, and list reads require the
-same trusted `X-User-Id`; foreign and missing run IDs both return `404`.
-Editable drafts and completed result rows have no application expiry.
+Multiple owned runs may wait in PostgreSQL. Each server process drains work
+sequentially, while database lease and resource claims safely support more than
+one worker process. A run waiting for query review holds no worker lease.
+Status, query, result, and list reads require the same trusted `X-User-Id`;
+foreign and missing run IDs both return `404`. Editable drafts and completed
+result rows have no application expiry.
 
 The HTTP service is a long-running Node worker. Each database claim carries an
 opaque owner/token lease, and progress, heartbeat, failure, and completion writes
 must present that active unexpired lease. Another instance cannot fail or publish
-the run. Workers renew leases during long provider calls; expired or legacy
-unleased running work is marked failed once with a safe interruption error. This
-does not make the complete scraper suitable for a single AWS Lambda invocation.
+the run. Workers renew leases during long provider calls. Expired work at a
+progressive checkpoint is requeued and resumes from durable stores or leads;
+legacy work without a checkpoint is marked failed once with a safe interruption
+error. This does not make the complete scraper suitable for a single AWS Lambda
+invocation.
+
+Store and lead publication is progressive. `Shop` identity and completed contact
+profiles are shared globally, while `RunStore` and `Lead` provenance remains
+run-specific. Stores commit before contact discovery, each lead commits before
+traffic starts, and a traffic failure cannot delete or hide base leads. Existing
+completed profiles and traffic cache material are reused without an expiry check
+in this lean version; automated freshness/cron refresh is intentionally deferred.
 
 The private backend contract also provides:
 

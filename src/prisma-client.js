@@ -2,6 +2,7 @@ import { PrismaNeon } from "@prisma/adapter-neon";
 import { PrismaClient } from "@prisma/client";
 
 let sharedClient;
+const clientSchemas = new WeakMap();
 
 export function createPrismaClient(connectionString = process.env.DATABASE_URL) {
   if (!connectionString) {
@@ -12,7 +13,13 @@ export function createPrismaClient(connectionString = process.env.DATABASE_URL) 
     { connectionString },
     schema ? { schema } : undefined
   );
-  return new PrismaClient({ adapter });
+  const client = new PrismaClient({ adapter });
+  clientSchemas.set(client, schema || "public");
+  return client;
+}
+
+export function prismaSchemaForClient(client) {
+  return clientSchemas.get(client) || "public";
 }
 
 export function getPrismaClient() {

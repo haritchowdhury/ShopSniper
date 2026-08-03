@@ -116,6 +116,20 @@ class MemoryRepository {
     this.cache.push(...rows);
   }
 
+  async claimShopWorkBatch(_runId, _lease, claims) {
+    this.calls.push("work.claim.batch");
+    return claims.map((work) => ({
+      outcome: "won",
+      networkAllowed: true,
+      work: { ...work, state: "processing" }
+    }));
+  }
+
+  async finishShopWorkClaims() {
+    this.calls.push("work.finish.batch");
+    return { count: 0 };
+  }
+
   async planDataForSeoRequest(_runId, _lease, descriptor) {
     this.calls.push("ledger.plan");
     const existing = this.ledger.get(descriptor.requestFingerprint);
@@ -210,7 +224,10 @@ test("100 domains produce one paid task for each of ten scopes within the model"
     dataForSeo: true,
     maxCost: 0.24,
     repository,
-    leads: Array.from({ length: 100 }, (_, index) => lead(index)),
+    leads: Array.from({ length: 100 }, (_, index) => ({
+      ...lead(index),
+      shop_id: `shop_${index}`
+    })),
     dependencies: {
       fetchDataForSeoTraffic: async ({ targets, scope }) => {
         externalTasks += 1;
@@ -231,10 +248,91 @@ test("100 domains produce one paid task for each of ten scopes within the model"
     }
   }));
   assert.equal(externalTasks, 10);
+  assert.equal(repository.calls.filter((call) => call === "work.claim.batch").length, 10);
   assert.equal(result.trafficEnrichmentSummary.dataforseo.externalTasks, 10);
   assert.ok(result.trafficEnrichmentSummary.dataforseo.actualCostUsd <= 0.24);
   assert.equal(result.trafficEnrichments.length, 100);
   assert.ok(result.trafficEnrichments.every(({ state }) => state === "available"));
+});
+
+test("progressive traffic calls only won shops and attaches a concurrent winner cache", async () => {
+  const repository = new MemoryRepository();
+  repository.readReusableTrafficCache = repository.readFreshTrafficCache.bind(repository);
+  const policy = snapshot(true, false).dataForSeo;
+  const claimAttempts = new Map();
+  repository.claimShopWorkBatch = async (_runId, _lease, claims) => {
+    repository.calls.push("work.claim.batch");
+    return claims.map((claim) => {
+      if (claim.shopId === "shop_0") {
+        return {
+          outcome: "won",
+          networkAllowed: true,
+          work: { ...claim, state: "processing" }
+        };
+      }
+      const attempt = (claimAttempts.get(claim.scopeKey) || 0) + 1;
+      claimAttempts.set(claim.scopeKey, attempt);
+      if (attempt === 1) {
+        return {
+          outcome: "processing",
+          networkAllowed: false,
+          work: { ...claim, state: "processing" }
+        };
+      }
+      const identity = "store-1.example";
+      const scope = claim.scopeKey === "worldwide"
+        ? "worldwide"
+        : normalizedDataForSeoScope(policy.scopes.find((entry) =>
+            `country:${entry.countryIsoCode}:${entry.locationCode}` === claim.scopeKey
+          ));
+      repository.cache.push({
+        source: "dataforseo",
+        identity,
+        scopeKey: claim.scopeKey,
+        metricSetKey: policy.metricSetKey,
+        contractVersion: policy.contractVersion,
+        state: "available",
+        normalizedPayload: dataForSeoValue(identity, scope)
+      });
+      return {
+        outcome: "completed",
+        networkAllowed: false,
+        work: { ...claim, state: "completed" }
+      };
+    });
+  };
+  const providerTargets = [];
+  const leads = [0, 1].map((index) => ({ ...lead(index), shop_id: `shop_${index}` }));
+  const result = await enrichTraffic(options({
+    dataForSeo: true,
+    repository,
+    leads,
+    dependencies: {
+      waitForTrafficWork: async () => {},
+      fetchDataForSeoTraffic: async ({ targets, scope }) => {
+        providerTargets.push([...targets]);
+        return {
+          records: targets.map((target) => ({
+            state: "available",
+            value: dataForSeoValue(
+              target,
+              scope === "worldwide"
+                ? "worldwide"
+                : normalizedDataForSeoScope(scope)
+            )
+          })),
+          cost: { providerReported: 0.01 }
+        };
+      }
+    }
+  }));
+  assert.equal(providerTargets.length, 10);
+  assert.ok(providerTargets.every((targets) =>
+    targets.length === 1 && targets[0] === "store-0.example"
+  ));
+  assert.equal(result.trafficEnrichments[0].state, "available");
+  assert.equal(result.trafficEnrichments[1].state, "available");
+  assert.equal(result.trafficEnrichmentSummary.dataforseo.cacheHits, 10);
 });
 
 test("paid ambiguity is durable and is never automatically retried", async () => {
@@ -460,6 +558,42 @@ test("CrUX REST 404 and BigQuery missing row remain explicit no coverage", async
   }));
   assert.ok(result.trafficEnrichments.every(({ state }) => state === "no_coverage"));
   assert.equal(repository.cache.filter(({ state }) => state === "no_coverage").length, 2);
+});
+
+test("CrUX BigQuery row mismatch is isolated and is not cached as no coverage", async () => {
+  const repository = new MemoryRepository();
+  const result = await enrichTraffic(options({
+    crux: true,
+    repository,
+    dependencies: {
+      fetchCruxOriginMetrics: async ({ origin }) => cruxRestValue(origin),
+      fetchCruxLatestDatasetMonth: async () => "202606",
+      dryRunCruxPopularity: async () => ({ datasetMonth: "202606", bytesProcessed: 100 }),
+      fetchCruxPopularityForMonth: async ({ origins }) => ({
+        records: origins.map((origin) => ({
+          contractVersion: "crux-popularity-v1",
+          origin,
+          coverage: "unavailable",
+          reason: "contract_mismatch",
+          datasetMonth: "202606",
+          fetchedAt: NOW
+        })),
+        bytesProcessed: 90,
+        bytesBilled: 100,
+        cacheHit: false
+      })
+    }
+  }));
+
+  const popularity = result.trafficEnrichments.find(
+    ({ source }) => source === "crux_bigquery"
+  );
+  assert.equal(popularity.state, "contract_mismatch");
+  assert.equal("normalizedPayload" in popularity, false);
+  assert.equal(
+    repository.cache.some(({ source }) => source === "crux_bigquery"),
+    false
+  );
 });
 
 test("one provider contract failure preserves accepted output from the other", async () => {

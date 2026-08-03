@@ -150,6 +150,31 @@ test("traffic persistence accepts normalized contracts and rejects raw or secret
   ), /source contract|does not match/u);
 });
 
+test("traffic persistence accepts non-material CrUX states without payload timing", () => {
+  for (const record of [
+    {
+      source: "crux_rest",
+      state: "no_coverage",
+      contractVersion: "crux-origin-metrics-v1"
+    },
+    {
+      source: "crux_bigquery",
+      state: "contract_mismatch",
+      contractVersion: "crux-popularity-v1"
+    }
+  ]) {
+    const stored = leadTrafficEnrichmentRecordToCreate(
+      `traffic_${record.source}`,
+      "run_fixture",
+      "lead_fixture",
+      record
+    );
+    assert.equal(stored.state, record.state);
+    assert.equal(stored.normalizedPayload, undefined);
+    assert.equal(stored.fetchedAt, null);
+  }
+});
+
 test("normalized traffic storage rejects impossible cross-field material", () => {
   const metric = { etv: 1, count: 1 };
   const data = {

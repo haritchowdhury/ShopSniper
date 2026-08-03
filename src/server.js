@@ -22,6 +22,10 @@ import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
 import { enrichTraffic } from "./enrichment/orchestrator.js";
 import {
+  discoverLeadForRunStore,
+  discoverStoresFromQueryPlans,
+  failedLeadForRunStore,
+  materializeLeadFromProfile,
   planQueriesForReview,
   runDiscoveryFromQueryPlans,
   runPipeline,
@@ -450,7 +454,184 @@ function createHeartbeatMonitor({
   };
 }
 
-async function executeRun({
+async function processPersistedRunStores({
+  config,
+  identifier,
+  lease,
+  repository,
+  status,
+  now,
+  leadDiscoveryPipeline,
+  leadDependencyOverrides
+}) {
+  // A competing run may be inside bounded page/Browserless/AI timeouts. Keep
+  // this run fenced and retry long enough to observe completion or reclaim an
+  // expired owner lease without duplicating contact discovery.
+  const maxWaitRounds = 1200;
+  const outcomes = new Map();
+  for (let round = 0; round <= maxWaitRounds; round += 1) {
+    const rows = await repository.listRunStoresForProcessing(
+      identifier,
+      lease,
+      500,
+      currentDate(now)
+    );
+    const pendingRows = rows.filter(({ id }) => !outcomes.has(id));
+    if (!pendingRows.length) return [...outcomes.values()];
+    let progressed = false;
+    let waiting = false;
+    for (const row of pendingRows) {
+      const claimedStore = await repository.claimRunStore(
+        identifier,
+        lease,
+        row.id,
+        currentDate(now)
+      );
+      if (!claimedStore.owned) continue;
+      const runStore = claimedStore.runStore;
+      let leadWorkOwned = false;
+      try {
+        let reusable = await repository.readReusableShopLeadProfile(
+          identifier,
+          lease,
+          runStore.shopId,
+          currentDate(now)
+        );
+        if (reusable) {
+          const lead = materializeLeadFromProfile(
+            runStore.candidatePayload,
+            reusable.profilePayload
+          );
+          outcomes.set(runStore.id, {
+            runStoreId: runStore.id,
+            state: "completed",
+            lead,
+            profileReusable: true
+          });
+          progressed = true;
+          status.storesProcessed += 1;
+          if (lead.status === "qualified") status.storesQualified += 1;
+          else status.storesRejected += 1;
+          continue;
+        }
+        const work = await repository.claimShopWork(
+          identifier,
+          lease,
+          runStore.shopId,
+          "lead_discovery",
+          "current",
+          currentDate(now)
+        );
+        leadWorkOwned = work.networkAllowed;
+        if (!work.networkAllowed) {
+          if (["completed", "processing"].includes(work.outcome)) {
+            reusable = await repository.readReusableShopLeadProfile(
+              identifier,
+              lease,
+              runStore.shopId,
+              currentDate(now)
+            );
+          }
+          if (reusable) {
+            const lead = materializeLeadFromProfile(
+              runStore.candidatePayload,
+              reusable.profilePayload
+            );
+            outcomes.set(runStore.id, {
+              runStoreId: runStore.id,
+              state: "completed",
+              lead,
+              profileReusable: true
+            });
+            progressed = true;
+            status.storesProcessed += 1;
+            if (lead.status === "qualified") status.storesQualified += 1;
+            else status.storesRejected += 1;
+          } else if (work.outcome === "processing") {
+            waiting = true;
+          } else {
+            throw new Error("Reusable lead work completed without a valid profile");
+          }
+          continue;
+        }
+        const discovered = await leadDiscoveryPipeline(
+          config,
+          runStore,
+          leadDependencyOverrides
+        );
+        try {
+          await repository.saveDiscoveredShopLeadProfile(
+            identifier,
+            lease,
+            runStore.id,
+            discovered.profile,
+            currentDate(now)
+          );
+        } catch {
+          await repository.saveDiscoveredShopLeadProfile(
+            identifier,
+            lease,
+            runStore.id,
+            discovered.profile,
+            currentDate(now)
+          );
+        }
+        outcomes.set(runStore.id, {
+          runStoreId: runStore.id,
+          state: "completed",
+          lead: discovered.lead,
+          profileReusable: discovered.profile != null
+        });
+        progressed = true;
+        status.storesProcessed += 1;
+        if (discovered.lead.status === "qualified") status.storesQualified += 1;
+        else status.storesRejected += 1;
+      } catch (error) {
+        const failed = failedLeadForRunStore(runStore.candidatePayload, error);
+        if (leadWorkOwned) {
+          try {
+            await repository.failShopLeadDiscovery(
+              identifier, lease, runStore.id, currentDate(now)
+            );
+          } catch {
+            await repository.failShopLeadDiscovery(
+              identifier, lease, runStore.id, currentDate(now)
+            );
+          }
+        }
+        outcomes.set(runStore.id, {
+          runStoreId: runStore.id,
+          state: "failed",
+          lead: failed,
+          profileReusable: false,
+          diagnostic: {
+            scope: "store",
+            code: "lead_discovery_failed",
+            result_url: runStore.candidatePayload.representative.resultUrl,
+            details: {
+              errorType: error instanceof Error ? error.name : "Error",
+              shopId: runStore.shopId
+            }
+          }
+        });
+        progressed = true;
+        status.storesProcessed += 1;
+        status.storeProcessingFailures += 1;
+        status.failures += 1;
+      }
+    }
+    if (!waiting) continue;
+    if (round === maxWaitRounds) {
+      throw new Error("Concurrent shop lead discovery did not finish within the wait boundary");
+    }
+    if (!progressed) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  return [...outcomes.values()];
+}
+
+export async function executeRun({
   config,
   identifier,
   categories,
@@ -459,6 +640,9 @@ async function executeRun({
   planningPipeline,
   queryValidationPipeline,
   discoveryPipeline,
+  storeDiscoveryPipeline,
+  leadDiscoveryPipeline,
+  leadDependencyOverrides,
   trafficOrchestrator,
   trafficDependencyOverrides,
   trafficSnapshot,
@@ -472,9 +656,12 @@ async function executeRun({
 }) {
   const baseStatus = {
     ...createInitialStatus(),
+    ...(categories.progress && typeof categories.progress === "object"
+      ? categories.progress
+      : {}),
     state: "running",
     stage: categories.phase === "scraping"
-      ? "validating_confirmed_queries"
+      ? categories.stage || "validating_confirmed_queries"
       : "reading_categories",
     runId: identifier,
     shopTypesTotal: categories.items.length,
@@ -499,6 +686,7 @@ async function executeRun({
     clearIntervalFn,
     onLeaseLost
   });
+  let baseResultsPersisted = false;
 
   try {
     const supportsReview = typeof repository.saveGeneratedQueryPlan === "function";
@@ -547,40 +735,143 @@ async function executeRun({
       return;
     }
     if (supportsReview && categories.phase === "scraping") {
-      const rows = await repository.loadConfirmedQueryPlans(
-        identifier,
-        lease,
-        currentDate(now)
-      );
-      const validation = await queryValidationPipeline(config, tracker.status, {
-        rows,
-        categories: categories.items,
-        now: currentDate(now)
-      });
-      await repository.saveQueryValidation(
-        identifier,
-        lease,
-        validation.rows,
-        currentDate(now)
-      );
-      await tracker.flush();
-      if (!validation.valid) {
-        await heartbeat.stop();
-        await repository.returnRunToQueryReview(
-          identifier,
-          lease,
-          tracker.status,
-          currentDate(now)
-        );
-        logger("query_confirmation_rejected", {
-          runId: identifier,
-          invalidQueries: validation.rows.filter((row) => row.validationState === "invalid").length
-        });
-        return;
+      const progressive = typeof repository.saveDiscoveredStores === "function" &&
+        typeof repository.saveLeadBatch === "function";
+      const resumedLeadStage = progressive && [
+        "leads_persisted", "enriching_traffic"
+      ].includes(categories.stage);
+      const resumedStoreStage = progressive && [
+        "stores_persisted", "discovering_leads"
+      ].includes(categories.stage);
+      if (resumedLeadStage) {
+        baseResultsPersisted = true;
+        result = {
+          pipelineVersion: 2,
+          scoringVersion: 2,
+          leads: await repository.listPersistedQualifiedLeads(
+            identifier,
+            lease,
+            currentDate(now)
+          ),
+          queryAudits: [],
+          diagnostics: [],
+          summary: categories.leadSummary || {
+            total: 0, qualified: 0, rejected: 0, failed: 0
+          }
+        };
+      } else {
+        let validation = null;
+        if (!resumedStoreStage) {
+          const rows = await repository.loadConfirmedQueryPlans(
+            identifier,
+            lease,
+            currentDate(now)
+          );
+          validation = await queryValidationPipeline(config, tracker.status, {
+            rows,
+            categories: categories.items,
+            now: currentDate(now)
+          });
+          await repository.saveQueryValidation(
+            identifier,
+            lease,
+            validation.rows,
+            currentDate(now)
+          );
+          await tracker.flush();
+          if (!validation.valid) {
+            await heartbeat.stop();
+            await repository.returnRunToQueryReview(
+              identifier,
+              lease,
+              tracker.status,
+              currentDate(now)
+            );
+            logger("query_confirmation_rejected", {
+              runId: identifier,
+              invalidQueries: validation.rows.filter(
+                (row) => row.validationState === "invalid"
+              ).length
+            });
+            return;
+          }
+        }
+        if (progressive) {
+          if (!resumedStoreStage) {
+            const discovery = await storeDiscoveryPipeline(config, tracker.status, {
+              queryPlans: validation.queryPlans
+            });
+            tracker.status.stage = "stores_persisted";
+            tracker.status.storesPersisted = discovery.stores.length;
+            try {
+              await repository.saveDiscoveredStores(
+                identifier,
+                lease,
+                discovery.stores,
+                discovery.diagnostics,
+                tracker.status,
+                currentDate(now)
+              );
+            } catch {
+              await repository.saveDiscoveredStores(
+                identifier,
+                lease,
+                discovery.stores,
+                discovery.diagnostics,
+                tracker.status,
+                currentDate(now)
+              );
+            }
+          }
+          tracker.status.stage = "discovering_leads";
+          await tracker.flush();
+          const leadOutcomes = await processPersistedRunStores({
+            config,
+            identifier,
+            lease,
+            repository,
+            status: tracker.status,
+            now,
+            leadDiscoveryPipeline,
+            leadDependencyOverrides
+          });
+          let summary;
+          try {
+            summary = await repository.saveLeadBatch(
+              identifier,
+              lease,
+              leadOutcomes,
+              tracker.status,
+              currentDate(now)
+            );
+          } catch {
+            summary = await repository.saveLeadBatch(
+              identifier,
+              lease,
+              leadOutcomes,
+              tracker.status,
+              currentDate(now)
+            );
+          }
+          baseResultsPersisted = true;
+          result = {
+            pipelineVersion: 2,
+            scoringVersion: 2,
+            leads: await repository.listPersistedQualifiedLeads(
+              identifier,
+              lease,
+              currentDate(now)
+            ),
+            queryAudits: [],
+            diagnostics: [],
+            summary
+          };
+        } else {
+          result = await discoveryPipeline(config, tracker.status, {
+            queryPlans: validation.queryPlans
+          });
+        }
       }
-      result = await discoveryPipeline(config, tracker.status, {
-        queryPlans: validation.queryPlans
-      });
     } else {
       result = await pipeline(config, tracker.status, { categories: categories.items });
     }
@@ -603,6 +894,29 @@ async function executeRun({
         assertLeaseActive: () => {
           if (leaseLoss) throw leaseLoss;
         },
+        onBatchTelemetry: (fields) => logger("traffic_persistence_batch", {
+          runId: identifier,
+          ...fields
+        }),
+        ...(baseResultsPersisted && {
+          onSourceComplete: async (sourceResult) => {
+            const startedAt = performance.now();
+            const published = await repository.saveTrafficSourceResults(
+              identifier,
+              lease,
+              sourceResult,
+              currentDate(now)
+            );
+            logger("traffic_persistence_batch", {
+              runId: identifier,
+              operation: "source_publication",
+              source: sourceResult.sourceKey,
+              rowCount: sourceResult.records.length,
+              durationMs: Math.round((performance.now() - startedAt) * 10) / 10
+            });
+            return published;
+          }
+        }),
         dependencyOverrides: trafficDependencyOverrides
       });
       result = {
@@ -615,6 +929,32 @@ async function executeRun({
         runId: identifier,
         summary: traffic.trafficEnrichmentSummary
       });
+    }
+    if (baseResultsPersisted) {
+      tracker.status.stage = "completed";
+      tracker.status.outputRows = result.summary.total;
+      await tracker.flush();
+      if (leaseLoss) throw leaseLoss;
+      await heartbeat.renew();
+      if (leaseLoss) throw leaseLoss;
+      await heartbeat.stop();
+      await tracker.stop();
+      await repository.completeTrafficEnrichment(
+        identifier,
+        lease,
+        result.trafficEnrichmentSummary || null,
+        [],
+        tracker.status,
+        currentDate(now)
+      );
+      logger("run_completed", {
+        runId: identifier,
+        outputRows: result.summary.total,
+        qualified: result.summary.qualified,
+        rejected: result.summary.rejected,
+        failures: result.summary.failed
+      });
+      return;
     }
     tracker.status.stage = "writing_results";
     tracker.status.outputRows = result.leads.length;
@@ -649,6 +989,31 @@ async function executeRun({
       logger("run_lease_lost", { runId: identifier, code: "RUN_LEASE_LOST" });
       return;
     }
+    if (baseResultsPersisted && typeof repository.completeTrafficEnrichment === "function") {
+      await repository.completeTrafficEnrichment(
+        identifier,
+        lease,
+        {
+          version: "traffic-enrichment-summary-v1",
+          state: "failed",
+          safeErrorCode: "TRAFFIC_ENRICHMENT_FAILED"
+        },
+        [{
+          scope: "run",
+          code: "traffic_enrichment_failed",
+          details: { errorType: error instanceof Error ? error.name : "Error" }
+        }],
+        tracker.status,
+        currentDate(now)
+      ).catch((persistenceError) => {
+        logger("traffic_failure_persistence_failed", {
+          runId: identifier,
+          error: persistenceError
+        });
+      });
+      logger("traffic_enrichment_failed", { runId: identifier, error });
+      return;
+    }
     await repository
       .markFailed(
         identifier,
@@ -680,6 +1045,9 @@ export function createLeadServer(
     planningPipeline = planQueriesForReview,
     queryValidationPipeline = validateConfirmedQueries,
     discoveryPipeline = runDiscoveryFromQueryPlans,
+    storeDiscoveryPipeline = discoverStoresFromQueryPlans,
+    leadDiscoveryPipeline = discoverLeadForRunStore,
+    leadDependencyOverrides = {},
     trafficOrchestrator = enrichTraffic,
     trafficDependencyOverrides = {},
     repository = createPrismaRunRepository(),
@@ -792,12 +1160,21 @@ export function createLeadServer(
           await executeRun({
             config,
             identifier: run.run.id,
-            categories: { items: categories, phase: run.run.phase || "scraping" },
+            categories: {
+              items: categories,
+              phase: run.run.phase || "scraping",
+              stage: run.run.stage,
+              leadSummary: run.run.leadSummary,
+              progress: run.run.progress
+            },
             lease: run.lease,
             pipeline,
             planningPipeline,
             queryValidationPipeline,
             discoveryPipeline,
+            storeDiscoveryPipeline,
+            leadDiscoveryPipeline,
+            leadDependencyOverrides,
             trafficOrchestrator,
             trafficDependencyOverrides,
             trafficSnapshot: run.run.trafficEnrichmentConfig,

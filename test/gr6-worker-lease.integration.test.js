@@ -115,7 +115,7 @@ test(
       deploy(scopedUrl, baseline.configPath);
       const preMigration = createPrismaClient(scopedUrl);
       await preMigration.$executeRawUnsafe(`
-        INSERT INTO "Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
+        INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
         VALUES
           ('gr6_queued', 'owner', 'queued', 'queued', '[]'::jsonb, '{}'::jsonb, false),
           ('gr6_legacy_running', 'owner', 'running', 'extracting_leads', '[]'::jsonb, '{}'::jsonb, false),
