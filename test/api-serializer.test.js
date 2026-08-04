@@ -61,6 +61,11 @@ test("run serialization fills the complete progress contract", () => {
     createdAt: new Date("2026-07-31T00:00:00.000Z"),
     startedAt: null,
     completedAt: new Date("2026-07-31T01:00:00.000Z"),
+    normalizedShopTypes: [{
+      originalShopType: "Independent Eyewear",
+      shopType: "eyewear",
+      businessQualifier: "unspecified"
+    }],
     progress: { queriesTotal: 4 },
     resultsAvailable: true,
     safeErrorCode: null,
@@ -73,6 +78,11 @@ test("run serialization fills the complete progress contract", () => {
   assert.equal(serialized.resultsAvailable, true);
   assert.equal(serialized.error, null);
   assert.equal(serialized.pipelineVersion, null);
+  assert.deepEqual(serialized.categories, [{
+    originalShopType: "Independent Eyewear",
+    shopType: "eyewear",
+    businessQualifier: "unspecified"
+  }]);
 });
 
 test("traffic persistence accepts normalized contracts and rejects raw or secret-shaped envelopes", () => {

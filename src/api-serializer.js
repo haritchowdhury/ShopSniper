@@ -836,6 +836,13 @@ export function serializeRun(run) {
     : null;
   return {
     runId: run.id,
+    categories: Array.isArray(run.normalizedShopTypes)
+      ? run.normalizedShopTypes.map((category) => ({
+          originalShopType: category?.originalShopType || "",
+          shopType: category?.shopType || "",
+          businessQualifier: category?.businessQualifier || "unspecified"
+        }))
+      : [],
     state: run.state,
     phase: run.phase || null,
     stage: run.stage,

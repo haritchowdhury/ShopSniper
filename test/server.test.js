@@ -959,6 +959,11 @@ test("anonymous intent claim is idempotent and runs are owner-scoped", async (co
   const list = await listed.json();
   assert.equal(list.pagination.totalItems, 1);
   assert.equal(list.items[0].runId, firstRun.runId);
+  assert.deepEqual(list.items[0].categories, [{
+    originalShopType: "Independent eyewear",
+    shopType: "independent eyewear",
+    businessQualifier: "unspecified"
+  }]);
 });
 
 test("direct and intent admission share one simultaneous capacity reservation", async (context) => {
