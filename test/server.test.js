@@ -245,6 +245,10 @@ class TestRepository {
         ].some((value) => value?.toLowerCase().includes(needle))
       );
     }
+    if (filters.discoveryQueries?.length) {
+      const selected = new Set(filters.discoveryQueries);
+      items = items.filter((item) => selected.has(item.generatedQuery ?? item.searchQuery ?? "__unattributed__"));
+    }
     return {
       totalItems: items.length,
       items: items.slice(
@@ -252,6 +256,29 @@ class TestRepository {
         filters.page * filters.pageSize
       )
     };
+  }
+
+  async getResultSummary(identifier, _ownerId, filters) {
+    let items = this.items.get(identifier) || [];
+    if (filters.search) {
+      const needle = filters.search.toLowerCase();
+      items = items.filter((item) => [
+        item.storeName,
+        item.resolvedDomain,
+        item.myshopifyDomain,
+        item.email,
+        item.shopType
+      ].some((value) => value?.toLowerCase().includes(needle)));
+    }
+    if (filters.discoveryQueries?.length) {
+      const selected = new Set(filters.discoveryQueries);
+      items = items.filter((item) => selected.has(item.generatedQuery ?? item.searchQuery ?? "__unattributed__"));
+    }
+    return items.reduce((summary, item) => {
+      summary.total += 1;
+      summary[item.status] += 1;
+      return summary;
+    }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
   }
 
   async getTrafficEnrichmentsForLeadIds(identifier, ownerId, leadIds) {
@@ -276,9 +303,15 @@ class TestRepository {
         item.shopType
       ].some((value) => value?.toLowerCase().includes(needle)));
     }
+    if (filters.discoveryQueries?.length) {
+      const selected = new Set(filters.discoveryQueries);
+      items = items.filter((item) => selected.has(item.generatedQuery ?? item.searchQuery ?? "__unattributed__"));
+    }
     const traffic = this.trafficEnrichments.get(identifier) || [];
-    return items.map(({ id }) => ({
+    return items.map(({ id, generatedQuery, searchQuery }) => ({
       id,
+      generatedQuery,
+      searchQuery,
       trafficEnrichments: traffic.filter(({ leadId }) => leadId === id)
     }));
   }
@@ -774,9 +807,9 @@ test("traffic overview API searches owned leads and returns one validated aggreg
     dataForSeoEnrichmentEnabled: true
   });
   repository.items.set(run.id, [
-    { id: "lead_alpha", storeName: "Alpha Optics", resolvedDomain: "alpha.example" },
-    { id: "lead_beta", storeName: "Beta Optics", resolvedDomain: "beta.example" },
-    { id: "lead_other", storeName: "Other Store", resolvedDomain: "other.example" }
+    { id: "lead_alpha", storeName: "Alpha Optics", resolvedDomain: "alpha.example", generatedQuery: "premium optics" },
+    { id: "lead_beta", storeName: "Beta Optics", resolvedDomain: "beta.example", generatedQuery: "premium optics" },
+    { id: "lead_other", storeName: "Other Store", resolvedDomain: "other.example", generatedQuery: "other stores" }
   ]);
   const trafficRow = (leadId, target, organic) => ({
     leadId,
@@ -807,7 +840,7 @@ test("traffic overview API searches owned leads and returns one validated aggreg
   ]);
 
   const response = await fetch(
-    `${fixture.base}/api/runs/${run.id}/traffic-overview?search=%20optics%20`,
+    `${fixture.base}/api/runs/${run.id}/traffic-overview?search=%20optics%20&discoveryQuery=premium%20optics`,
     { headers: { "x-user-id": "user_alice" } }
   );
   assert.equal(response.status, 200);
@@ -833,6 +866,35 @@ test("traffic overview API searches owned leads and returns one validated aggreg
     { headers: { "x-user-id": "user_alice" } }
   );
   assert.equal(invalid.status, 400);
+});
+
+test("result summaries follow search and discovery-query facets while ignoring the active status tab", async (context) => {
+  const repository = new TestRepository();
+  const fixture = await startTestServer({ repository });
+  context.after(() => fixture.server.close());
+  const run = await repository.createRun("user_alice", [{ original: "eyewear", normalized: "eyewear" }]);
+  Object.assign(run, {
+    state: "completed",
+    stage: "completed",
+    resultsAvailable: true,
+    pipelineVersion: null,
+    scoringVersion: null,
+    leadSummary: { total: 3, qualified: 1, rejected: 1, failed: 1 }
+  });
+  repository.items.set(run.id, [
+    { id: "lead_selected_qualified", status: "qualified", storeName: "Selected One", generatedQuery: "selected query", pipelineVersion: null, scoringVersion: null, leadScore: 80 },
+    { id: "lead_selected_rejected", status: "rejected", storeName: "Selected Two", generatedQuery: "selected query", pipelineVersion: null, scoringVersion: null, leadScore: null },
+    { id: "lead_other_failed", status: "failed", storeName: "Other", generatedQuery: "other query", pipelineVersion: null, scoringVersion: null, leadScore: null }
+  ]);
+
+  const response = await fetch(
+    `${fixture.base}/api/runs/${run.id}/results?status=qualified&discoveryQuery=selected%20query`,
+    { headers: { "x-user-id": "user_alice" } }
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.deepEqual(body.summary, { total: 2, qualified: 1, rejected: 1, failed: 0 });
+  assert.equal(body.pagination.totalItems, 1);
 });
 
 test("API rejects invalid bodies, unsafe parameters, and unavailable database safely", async (context) => {

@@ -1116,6 +1116,33 @@ test("repository default ordering is deterministic with null scores last", async
   ]);
 });
 
+test("repository result summaries apply non-status facets and retain every status count", async () => {
+  let arguments_;
+  const repository = new PrismaRunRepository({
+    lead: {
+      groupBy: async (value) => {
+        arguments_ = value;
+        return [
+          { status: "qualified", _count: { _all: 4 } },
+          { status: "rejected", _count: { _all: 2 } }
+        ];
+      }
+    }
+  });
+  const summary = await repository.getResultSummary("run_abcdefghijklmnop", "user_alice", {
+    status: "qualified",
+    search: "optics",
+    discoveryQueries: ["premium optics"]
+  });
+  assert.deepEqual(summary, { total: 6, qualified: 4, rejected: 2, failed: 0 });
+  assert.equal(arguments_.where.status, undefined);
+  assert.equal(arguments_.where.OR.length, 5);
+  assert.deepEqual(arguments_.where.AND[0].OR, [
+    { generatedQuery: { in: ["premium optics"] } },
+    { searchQuery: { in: ["premium optics"] } }
+  ]);
+});
+
 test("master leads exclude provisional leads from unfinished runs", async () => {
   let query;
   const repository = new PrismaRunRepository({
@@ -1177,11 +1204,15 @@ test("traffic overview reads only identities and owned normalized traffic rows",
   await repository.getTrafficOverviewRows(
     "run_abcdefghijklmnop",
     "user_alice",
-    { search: "fashion" }
+    { search: "fashion", discoveryQueries: ["premium optics"] }
   );
   assert.equal(arguments_.where.runId, "run_abcdefghijklmnop");
   assert.equal(arguments_.where.run.ownerId, "user_alice");
   assert.equal(arguments_.where.OR.length, 5);
+  assert.deepEqual(arguments_.where.AND[0].OR, [
+    { generatedQuery: { in: ["premium optics"] } },
+    { searchQuery: { in: ["premium optics"] } }
+  ]);
   assert.deepEqual(arguments_.select, {
     id: true,
     generatedQuery: true,

@@ -640,7 +640,7 @@ function dataForSeoScoringEnabled(run) {
   return run?.trafficEnrichmentConfig?.dataForSeo?.enabled === true;
 }
 
-async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run) {
+export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run) {
   if (!dataForSeoScoringEnabled(run)) return 2;
   const [storedLeads, trafficEnrichments] = await Promise.all([
     transaction.lead.findMany({
@@ -694,6 +694,14 @@ function resultWhere(runIdentifier, ownerId, filters) {
     ].map((field) => ({
       [field]: { contains: filters.search, mode: "insensitive" }
     }));
+  }
+  if (filters.discoveryQueries?.length) {
+    const attributed = filters.discoveryQueries.filter((query) => query !== "__unattributed__");
+    const includeUnattributed = filters.discoveryQueries.includes("__unattributed__");
+    where.AND = [{ OR: [
+      ...(attributed.length ? [{ generatedQuery: { in: attributed } }, { searchQuery: { in: attributed } }] : []),
+      ...(includeUnattributed ? [{ AND: [{ generatedQuery: null }, { searchQuery: null }] }] : [])
+    ] }];
   }
   return where;
 }
@@ -3327,6 +3335,21 @@ export class PrismaRunRepository {
     return { totalItems, items };
   }
 
+  async getResultSummary(runIdentifier, ownerId, filters) {
+    const where = resultWhere(runIdentifier, ownerId, { ...filters, status: null });
+    const groups = await this.prisma.lead.groupBy({
+      by: ["status"],
+      where,
+      _count: { _all: true }
+    });
+    return groups.reduce((summary, group) => {
+      const count = group._count._all;
+      summary.total += count;
+      if (group.status in summary) summary[group.status] += count;
+      return summary;
+    }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
+  }
+
   async getMasterLeadsPage(ownerId, filters) {
     const where = {
       userId: ownerId,
@@ -3346,6 +3369,15 @@ export class PrismaRunRepository {
           } } }
         }
       ];
+    }
+    if (filters.discoveryQueries?.length) {
+      const attributed = filters.discoveryQueries.filter((query) => query !== "__unattributed__");
+      const includeUnattributed = filters.discoveryQueries.includes("__unattributed__");
+      const queryFilter = { run: { ownerId, state: "completed", resultsAvailable: true }, OR: [
+        ...(attributed.length ? [{ generatedQuery: { in: attributed } }, { searchQuery: { in: attributed } }] : []),
+        ...(includeUnattributed ? [{ AND: [{ generatedQuery: null }, { searchQuery: null }] }] : [])
+      ] };
+      where.AND = [{ shop: { leads: { some: queryFilter } } }];
     }
     const skip = (filters.page - 1) * filters.pageSize;
     const orderBy = filters.sortBy === "first_discovered"
@@ -3429,9 +3461,9 @@ export class PrismaRunRepository {
     });
   }
 
-  async getTrafficOverviewRows(runIdentifier, ownerId, { search }) {
+  async getTrafficOverviewRows(runIdentifier, ownerId, { search, discoveryQueries = [] }) {
     return this.prisma.lead.findMany({
-      where: resultWhere(runIdentifier, ownerId, { status: null, search }),
+      where: resultWhere(runIdentifier, ownerId, { status: null, search, discoveryQueries }),
       select: {
         id: true,
         generatedQuery: true,

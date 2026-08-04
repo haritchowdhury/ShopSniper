@@ -52,11 +52,12 @@ const RESULT_PARAMETERS = new Set([
   "status",
   "search",
   "sortBy",
-  "sortDirection"
+  "sortDirection",
+  "discoveryQuery"
 ]);
-const TRAFFIC_OVERVIEW_PARAMETERS = new Set(["search"]);
+const TRAFFIC_OVERVIEW_PARAMETERS = new Set(["search", "discoveryQuery"]);
 const MASTER_LEAD_PARAMETERS = new Set([
-  "page", "pageSize", "search", "sortBy", "sortDirection", "archived"
+  "page", "pageSize", "search", "sortBy", "sortDirection", "archived", "discoveryQuery"
 ]);
 const RESULT_STATUSES = new Set(["qualified", "rejected", "failed"]);
 const SORT_FIELDS = new Set([
@@ -135,7 +136,7 @@ export function parseResultFilters(searchParams) {
     (name) => !RESULT_PARAMETERS.has(name)
   );
   const duplicate = [...RESULT_PARAMETERS].filter(
-    (name) => searchParams.getAll(name).length > 1
+    (name) => name !== "discoveryQuery" && searchParams.getAll(name).length > 1
   );
   const page = parsePositiveInteger(searchParams.get("page"), 1);
   const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 100, {
@@ -146,6 +147,7 @@ export function parseResultFilters(searchParams) {
   const search = rawSearch == null ? null : rawSearch.trim();
   const sortBy = searchParams.get("sortBy") || null;
   const sortDirection = searchParams.get("sortDirection") || "desc";
+  const discoveryQueries = [...new Set(searchParams.getAll("discoveryQuery"))];
 
   const invalid = [];
   if (unknown.length) invalid.push({ parameters: unknown, issue: "unknown" });
@@ -164,6 +166,9 @@ export function parseResultFilters(searchParams) {
   if (!["asc", "desc"].includes(sortDirection)) {
     invalid.push({ parameter: "sortDirection", issue: "invalid" });
   }
+  if (discoveryQueries.length > 100 || discoveryQueries.some((query) => !query || query.length > 500)) {
+    invalid.push({ parameter: "discoveryQuery", issue: "invalid" });
+  }
   if (invalid.length) {
     throw new ApiError(
       400,
@@ -179,7 +184,8 @@ export function parseResultFilters(searchParams) {
     status,
     search: search || null,
     sortBy,
-    sortDirection
+    sortDirection,
+    discoveryQueries
   };
 }
 
@@ -188,15 +194,19 @@ export function parseTrafficOverviewFilters(searchParams) {
     (name) => !TRAFFIC_OVERVIEW_PARAMETERS.has(name)
   );
   const duplicate = [...TRAFFIC_OVERVIEW_PARAMETERS].filter(
-    (name) => searchParams.getAll(name).length > 1
+    (name) => name !== "discoveryQuery" && searchParams.getAll(name).length > 1
   );
   const rawSearch = searchParams.get("search");
   const search = rawSearch == null ? null : rawSearch.trim();
+  const discoveryQueries = [...new Set(searchParams.getAll("discoveryQuery"))];
   const invalid = [];
   if (unknown.length) invalid.push({ parameters: unknown, issue: "unknown" });
   if (duplicate.length) invalid.push({ parameters: duplicate, issue: "duplicate" });
   if (search != null && search.length > 200) {
     invalid.push({ parameter: "search", issue: "too_long" });
+  }
+  if (discoveryQueries.length > 100 || discoveryQueries.some((query) => !query || query.length > 500)) {
+    invalid.push({ parameter: "discoveryQuery", issue: "invalid" });
   }
   if (invalid.length) {
     throw new ApiError(
@@ -206,12 +216,12 @@ export function parseTrafficOverviewFilters(searchParams) {
       invalid
     );
   }
-  return { search: search || null };
+  return { search: search || null, discoveryQueries };
 }
 
 export function parseMasterLeadFilters(searchParams) {
   const unknown = [...searchParams.keys()].filter((name) => !MASTER_LEAD_PARAMETERS.has(name));
-  const duplicate = [...MASTER_LEAD_PARAMETERS].filter((name) => searchParams.getAll(name).length > 1);
+  const duplicate = [...MASTER_LEAD_PARAMETERS].filter((name) => name !== "discoveryQuery" && searchParams.getAll(name).length > 1);
   const page = parsePositiveInteger(searchParams.get("page"), 1);
   const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 50, { max: 200 });
   const rawSearch = searchParams.get("search");
@@ -219,6 +229,7 @@ export function parseMasterLeadFilters(searchParams) {
   const sortBy = searchParams.get("sortBy") || "lead_quality";
   const sortDirection = searchParams.get("sortDirection") || "desc";
   const archivedValue = searchParams.get("archived");
+  const discoveryQueries = [...new Set(searchParams.getAll("discoveryQuery"))];
   const invalid = [];
   if (unknown.length) invalid.push({ parameters: unknown, issue: "unknown" });
   if (duplicate.length) invalid.push({ parameters: duplicate, issue: "duplicate" });
@@ -228,8 +239,9 @@ export function parseMasterLeadFilters(searchParams) {
   if (!["lead_quality", "last_discovered", "first_discovered"].includes(sortBy)) invalid.push({ parameter: "sortBy", issue: "invalid" });
   if (!["asc", "desc"].includes(sortDirection)) invalid.push({ parameter: "sortDirection", issue: "invalid" });
   if (archivedValue != null && !["true", "false"].includes(archivedValue)) invalid.push({ parameter: "archived", issue: "invalid" });
+  if (discoveryQueries.length > 100 || discoveryQueries.some((query) => !query || query.length > 500)) invalid.push({ parameter: "discoveryQuery", issue: "invalid" });
   if (invalid.length) throw new ApiError(400, "INVALID_QUERY_PARAMETERS", "One or more lead query parameters are invalid.", invalid);
-  return { page, pageSize, search: search || null, sortBy, sortDirection, archived: archivedValue === "true" };
+  return { page, pageSize, search: search || null, sortBy, sortDirection, archived: archivedValue === "true", discoveryQueries };
 }
 
 function serializeMasterLead(item, cacheRows) {
@@ -1611,13 +1623,13 @@ export function createLeadServer(
     if (request.method === "GET") {
       if (requestUrl.pathname === "/api/leads/traffic-overview") {
         const ownerId = trustedUserId(request);
-        const { search } = parseTrafficOverviewFilters(requestUrl.searchParams);
+        const filters = parseTrafficOverviewFilters(requestUrl.searchParams);
         const page = await repository.getMasterLeadsPage(ownerId, {
-          page: 1, pageSize: 10_000, search, sortBy: "last_discovered",
+          page: 1, pageSize: 10_000, ...filters, sortBy: "last_discovered",
           sortDirection: "desc", archived: false
         }, currentDate(now));
         const items = page.items.map((item) => serializeMasterLead(item, page.cacheRows));
-        return sendJson(response, 200, aggregateMasterTraffic(items, search));
+        return sendJson(response, 200, aggregateMasterTraffic(items, filters.search));
       }
       if (requestUrl.pathname === "/api/leads") {
         const ownerId = trustedUserId(request);
@@ -1782,7 +1794,9 @@ export function createLeadServer(
           rows.push(row);
           trafficByLead.set(row.leadId, rows);
         }
-        const summary = run.leadSummary || {
+        const summary = filters.search || filters.discoveryQueries.length
+          ? await repository.getResultSummary(resultsIdentifier, ownerId, filters)
+          : run.leadSummary || {
           total: 0,
           qualified: 0,
           rejected: 0,
