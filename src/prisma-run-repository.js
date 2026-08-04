@@ -98,6 +98,61 @@ function childId(prefix, runIdentifier, identity) {
   return `${prefix}_${opaque}`;
 }
 
+async function grantRunShopsToOwner(transaction, runIdentifier, leadRows, now) {
+  const rows = [...new Map(leadRows.filter(({ shopId }) => shopId)
+    .map((row) => [row.shopId, { shopId: row.shopId, leadId: row.id }])).values()];
+  if (!rows.length || typeof transaction.$queryRaw !== "function") return;
+  await transaction.$queryRaw`
+    WITH input AS (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb)
+        AS value("shopId" text, "leadId" text)
+    ), owned AS (
+      SELECT r."ownerId" AS "userId", r."createdAt" AS "discoveredAt",
+        input."shopId", input."leadId"
+      FROM input JOIN "Run" r ON r."id" = ${runIdentifier}
+      WHERE r."ownerId" IS NOT NULL
+    ), granted AS (
+      INSERT INTO "UserShop" (
+        "id", "userId", "shopId", "firstDiscoveredAt", "lastDiscoveredAt",
+        "firstDiscoveredRunId", "lastDiscoveredRunId", "discoveryCount", "updatedAt"
+      )
+      SELECT 'user_shop_' || MD5("userId" || ':' || "shopId"), "userId", "shopId",
+        "discoveredAt", "discoveredAt", ${runIdentifier}, ${runIdentifier}, 0, ${now}
+      FROM owned
+      ON CONFLICT ("userId", "shopId") DO UPDATE SET "updatedAt" = "UserShop"."updatedAt"
+      RETURNING "id", "userId", "shopId"
+    ), inserted AS (
+      INSERT INTO "UserShopDiscovery" (
+        "id", "userShopId", "runId", "leadId", "discoveredAt"
+      )
+      SELECT 'user_shop_discovery_' || MD5(granted."id" || ':' || ${runIdentifier}),
+        granted."id", ${runIdentifier}, owned."leadId", owned."discoveredAt"
+      FROM granted JOIN owned USING ("userId", "shopId")
+      ON CONFLICT ("userShopId", "runId") DO NOTHING
+      RETURNING "userShopId"
+    )
+    UPDATE "UserShop" us SET
+      "firstDiscoveredAt" = stats."firstAt",
+      "lastDiscoveredAt" = stats."lastAt",
+      "firstDiscoveredRunId" = stats."firstRun",
+      "lastDiscoveredRunId" = stats."lastRun",
+      "discoveryCount" = stats."runCount",
+      "updatedAt" = ${now}
+    FROM (
+      SELECT d."userShopId", MIN(d."discoveredAt") "firstAt",
+        MAX(d."discoveredAt") "lastAt",
+        (ARRAY_AGG(d."runId" ORDER BY d."discoveredAt", d."runId"))[1] "firstRun",
+        (ARRAY_AGG(d."runId" ORDER BY d."discoveredAt" DESC, d."runId" DESC))[1] "lastRun",
+        COUNT(*)::integer "runCount"
+      FROM "UserShopDiscovery" d
+      WHERE d."userShopId" IN (SELECT "id" FROM granted)
+      GROUP BY d."userShopId"
+    ) stats
+    WHERE us."id" = stats."userShopId"
+    RETURNING us."id"
+  `;
+}
+
 export function stableLeadId(runIdentifier, record, index) {
   const identity = record.identity_evidence?.stableHostname || record.resolved_domain;
   if (!identity && !Number.isInteger(index)) {
@@ -1928,6 +1983,7 @@ export class PrismaRunRepository {
       if (missingLeads.length) {
         await transaction.lead.createMany({ data: missingLeads });
       }
+      await grantRunShopsToOwner(transaction, runIdentifier, expectedLeadRows, now);
       const completedIds = normalized
         .filter(({ state, runStoreId }) =>
           state === "completed" && runStoreById.get(runStoreId).state === "processing")
@@ -2170,6 +2226,7 @@ export class PrismaRunRepository {
       } else {
         await transaction.lead.create({ data: leadRow });
       }
+      await grantRunShopsToOwner(transaction, runIdentifier, [leadRow], now);
       requireLeaseMutation(await transaction.runStore.updateMany({
         where: { id: runStore.id, runId: runIdentifier, state: "processing" },
         data: { state: "completed", safeErrorCode: null, safeErrorMessage: null }
@@ -2218,6 +2275,7 @@ export class PrismaRunRepository {
         create: leadRow,
         update: leadRow
       });
+      await grantRunShopsToOwner(transaction, runIdentifier, [leadRow], now);
       await transaction.runStore.update({
         where: { id: runStore.id },
         data: {
@@ -3212,6 +3270,89 @@ export class PrismaRunRepository {
       })
     ]);
     return { totalItems, items };
+  }
+
+  async getMasterLeadsPage(ownerId, filters) {
+    const where = {
+      userId: ownerId,
+      ...(filters.archived ? {} : { archivedAt: null })
+    };
+    if (filters.search) {
+      where.OR = [
+        ...["stableKey", "resolvedDomain", "myshopifyDomain"].map((field) => ({
+          shop: { [field]: { contains: filters.search, mode: "insensitive" } }
+        })),
+        {
+          shop: { leads: { some: {
+            run: { ownerId },
+            OR: ["storeName", "email", "phone", "shopType"].map((field) => ({
+              [field]: { contains: filters.search, mode: "insensitive" }
+            }))
+          } } }
+        }
+      ];
+    }
+    const skip = (filters.page - 1) * filters.pageSize;
+    const orderBy = filters.sortBy === "first_discovered"
+      ? [{ firstDiscoveredAt: filters.sortDirection }, { id: "asc" }]
+      : [{ lastDiscoveredAt: filters.sortDirection }, { id: "asc" }];
+    const include = {
+      shop: {
+        include: {
+          leadProfile: true,
+          leads: {
+            where: { run: { ownerId } },
+            orderBy: [
+              { leadScore: { sort: "desc", nulls: "last" } },
+              { run: { createdAt: "desc" } }
+            ]
+          }
+        }
+      },
+      discoveries: {
+        orderBy: [{ discoveredAt: "desc" }, { id: "desc" }],
+        include: { run: { select: { createdAt: true, normalizedShopTypes: true } } }
+      }
+    };
+    const [totalItems, queriedItems] = await this.prisma.$transaction([
+      this.prisma.userShop.count({ where }),
+      this.prisma.userShop.findMany({
+        where,
+        orderBy,
+        ...(filters.sortBy === "lead_quality" ? {} : { skip, take: filters.pageSize }),
+        include
+      })
+    ]);
+    const items = filters.sortBy === "lead_quality"
+      ? queriedItems.sort((left, right) => {
+          const leftScore = left.shop.leads[0]?.leadScore ?? -1;
+          const rightScore = right.shop.leads[0]?.leadScore ?? -1;
+          return (rightScore - leftScore) * (filters.sortDirection === "desc" ? 1 : -1)
+            || left.id.localeCompare(right.id);
+        }).slice(skip, skip + filters.pageSize)
+      : queriedItems;
+    const hostnames = new Set();
+    const origins = new Set();
+    for (const item of items) {
+      for (const value of [item.shop.stableKey, item.shop.resolvedDomain, item.shop.myshopifyDomain]) {
+        if (value) hostnames.add(value.toLowerCase());
+      }
+      for (const value of [item.shop.canonicalUrl, item.shop.resolvedDomain && `https://${item.shop.resolvedDomain}`]) {
+        if (!value) continue;
+        try { origins.add(new URL(value).origin); } catch { /* Invalid stored URL is ignored. */ }
+      }
+    }
+    const OR = [
+      ...(hostnames.size ? [{ source: "dataforseo", identity: { in: [...hostnames] } }] : []),
+      ...(origins.size ? [{ source: { in: ["crux_rest", "crux_bigquery"] }, identity: { in: [...origins] } }] : [])
+    ];
+    const cacheRows = OR.length
+      ? await this.prisma.trafficEnrichmentCache.findMany({
+          where: { OR },
+          orderBy: [{ fetchedAt: "desc" }, { scopeKey: "asc" }]
+        })
+      : [];
+    return { totalItems, items, cacheRows };
   }
 
   async getTrafficEnrichmentsForLeadIds(runIdentifier, ownerId, leadIds) {

@@ -732,6 +732,54 @@ export function serializeTrafficEnrichment(rows, runSnapshot) {
   return value;
 }
 
+export function serializeCurrentShopTraffic(cacheRows, shop) {
+  const rows = Array.isArray(cacheRows) ? cacheRows : [];
+  const hostnames = new Set(
+    [shop?.stableKey, shop?.resolvedDomain, shop?.myshopifyDomain]
+      .filter(Boolean)
+      .map((value) => value.toLowerCase())
+  );
+  const origins = new Set();
+  for (const value of [shop?.canonicalUrl, shop?.resolvedDomain && `https://${shop.resolvedDomain}`]) {
+    if (!value) continue;
+    try { origins.add(new URL(value).origin); } catch { /* Ignore invalid durable URLs. */ }
+  }
+  const selected = [];
+  const dataForSeoRows = rows.filter((row) =>
+    row.source === "dataforseo" && hostnames.has(row.identity.toLowerCase()));
+  const availableDataForSeo = dataForSeoRows
+    .filter((row) => row.state === "available" && row.normalizedPayload)
+    .filter((row, index, all) => all.findIndex((item) => item.scopeKey === row.scopeKey) === index)
+    .sort((left, right) => {
+      const position = (scope) => scope === "worldwide"
+        ? -1
+        : DATAFORSEO_COUNTRY_ORDER.indexOf(scope.split(":")[1]);
+      return position(left.scopeKey) - position(right.scopeKey);
+    });
+  if (availableDataForSeo.length) {
+    selected.push({
+      source: "dataforseo",
+      state: availableDataForSeo.length === 10 ? "available" : "partial",
+      contractVersion: "dataforseo-traffic-v1",
+      normalizedPayload: { records: availableDataForSeo.map((row) => row.normalizedPayload) },
+      fetchedAt: new Date(Math.max(...availableDataForSeo.map((row) =>
+        new Date(row.fetchedAt).getTime()))),
+      coverageStartedAt: null,
+      coverageEndedAt: null
+    });
+  } else if (dataForSeoRows.some((row) => row.state === "no_coverage")) {
+    selected.push({ source: "dataforseo", state: "no_coverage", normalizedPayload: null });
+  }
+  for (const source of ["crux_rest", "crux_bigquery"]) {
+    const row = rows.find((item) => item.source === source && origins.has(item.identity));
+    if (row) selected.push({ ...row, state: row.state === "available" ? "available" : "no_coverage" });
+  }
+  return serializeTrafficEnrichment(selected, {
+    dataForSeo: { enabled: true },
+    crux: { enabled: true }
+  });
+}
+
 function emptyPublicDataForSeoMetrics() {
   return Object.fromEntries(DATAFORSEO_METRIC_KEYS.map((key) => [key, 0]));
 }

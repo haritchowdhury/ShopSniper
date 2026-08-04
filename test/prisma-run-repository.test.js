@@ -410,6 +410,7 @@ for (const size of [1, 40, 100]) {
       "shopLeadProfile.findMany",
       "lead.findMany:existing",
       "lead.createMany",
+      "$queryRaw:schema",
       "runStore.updateMany",
       "runStore.count",
       "lead.findMany:summary",

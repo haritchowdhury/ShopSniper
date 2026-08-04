@@ -135,6 +135,7 @@ model Run {
   runStores              RunStore[]
   processingLeadProfiles ShopLeadProfile[] @relation("ShopLeadProfileProcessingRun")
   processingShopWork     ShopWork[] @relation("ShopWorkProcessingRun")
+  userShopDiscoveries    UserShopDiscovery[]
 
   @@index([state])
   @@index([state, leaseExpiresAt])
@@ -251,6 +252,46 @@ model Shop {
   leads              Lead[] @relation("LeadShop")
   leadProfile        ShopLeadProfile?
   work               ShopWork[]
+  userShops          UserShop[]
+}
+
+model UserShop {
+  id                   String   @id
+  userId               String
+  shopId               String
+  shop                 Shop     @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  firstDiscoveredAt    DateTime
+  lastDiscoveredAt     DateTime
+  firstDiscoveredRunId String
+  lastDiscoveredRunId  String
+  discoveryCount       Int      @default(1)
+  lifecycleStatus      String?
+  notes                String?
+  tags                 String[] @default([])
+  archivedAt           DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  discoveries          UserShopDiscovery[]
+
+  @@unique([userId, shopId])
+  @@index([userId, lastDiscoveredAt])
+  @@index([userId, lifecycleStatus])
+  @@index([shopId])
+}
+
+model UserShopDiscovery {
+  id           String   @id
+  userShopId   String
+  userShop     UserShop @relation(fields: [userShopId], references: [id], onDelete: Cascade)
+  runId        String
+  run          Run      @relation(fields: [runId], references: [id], onDelete: Restrict)
+  leadId       String?
+  discoveredAt DateTime
+  createdAt    DateTime @default(now())
+
+  @@unique([userShopId, runId])
+  @@index([runId])
+  @@index([userShopId, discoveredAt])
 }
 
 model RunStore {

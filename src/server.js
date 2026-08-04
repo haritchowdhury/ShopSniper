@@ -12,6 +12,7 @@ import {
 } from "./api-errors.js";
 import {
   serializeDiagnostic,
+  serializeCurrentShopTraffic,
   serializeLead,
   serializeEditableQueries,
   serializeQueryAudit,
@@ -49,6 +50,9 @@ const RESULT_PARAMETERS = new Set([
   "sortDirection"
 ]);
 const TRAFFIC_OVERVIEW_PARAMETERS = new Set(["search"]);
+const MASTER_LEAD_PARAMETERS = new Set([
+  "page", "pageSize", "search", "sortBy", "sortDirection", "archived"
+]);
 const RESULT_STATUSES = new Set(["qualified", "rejected", "failed"]);
 const SORT_FIELDS = new Set([
   "lead_score",
@@ -198,6 +202,141 @@ export function parseTrafficOverviewFilters(searchParams) {
     );
   }
   return { search: search || null };
+}
+
+export function parseMasterLeadFilters(searchParams) {
+  const unknown = [...searchParams.keys()].filter((name) => !MASTER_LEAD_PARAMETERS.has(name));
+  const duplicate = [...MASTER_LEAD_PARAMETERS].filter((name) => searchParams.getAll(name).length > 1);
+  const page = parsePositiveInteger(searchParams.get("page"), 1);
+  const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 50, { max: 200 });
+  const rawSearch = searchParams.get("search");
+  const search = rawSearch == null ? null : rawSearch.trim();
+  const sortBy = searchParams.get("sortBy") || "lead_quality";
+  const sortDirection = searchParams.get("sortDirection") || "desc";
+  const archivedValue = searchParams.get("archived");
+  const invalid = [];
+  if (unknown.length) invalid.push({ parameters: unknown, issue: "unknown" });
+  if (duplicate.length) invalid.push({ parameters: duplicate, issue: "duplicate" });
+  if (page == null) invalid.push({ parameter: "page", issue: "invalid" });
+  if (pageSize == null) invalid.push({ parameter: "pageSize", issue: "invalid" });
+  if (search != null && search.length > 200) invalid.push({ parameter: "search", issue: "too_long" });
+  if (!["lead_quality", "last_discovered", "first_discovered"].includes(sortBy)) invalid.push({ parameter: "sortBy", issue: "invalid" });
+  if (!["asc", "desc"].includes(sortDirection)) invalid.push({ parameter: "sortDirection", issue: "invalid" });
+  if (archivedValue != null && !["true", "false"].includes(archivedValue)) invalid.push({ parameter: "archived", issue: "invalid" });
+  if (invalid.length) throw new ApiError(400, "INVALID_QUERY_PARAMETERS", "One or more lead query parameters are invalid.", invalid);
+  return { page, pageSize, search: search || null, sortBy, sortDirection, archived: archivedValue === "true" };
+}
+
+function serializeMasterLead(item, cacheRows) {
+  const profile = item.shop.leadProfile?.state === "completed"
+    ? item.shop.leadProfile.profilePayload
+    : null;
+  const latest = item.shop.leads[0] || null;
+  const historical = latest ? serializeLead(latest) : {};
+  const traffic = serializeCurrentShopTraffic(cacheRows, item.shop);
+  return {
+    ...historical,
+    id: item.id,
+    store_name: profile?.storeName || null,
+    email: profile?.email || null,
+    email_source_url: profile?.emailSourceUrl || null,
+    phone: profile?.phone || null,
+    phone_source_url: profile?.phoneSourceUrl || null,
+    contact_url: profile?.contactUrl || null,
+    social_profiles: Array.isArray(profile?.socialProfiles) ? profile.socialProfiles : [],
+    contactability_tier: profile?.contactabilityTier || null,
+    contact_evidence: profile?.contactEvidence || null,
+    identity_confidence: profile?.identityConfidence ?? item.shop.identityConfidence ?? null,
+    identity_evidence: profile?.identityEvidence || item.shop.identityEvidence || null,
+    myshopify_domain: item.shop.myshopifyDomain,
+    resolved_domain: item.shop.resolvedDomain,
+    canonical_url: item.shop.canonicalUrl,
+    final_url: item.shop.canonicalUrl || (item.shop.resolvedDomain ? `https://${item.shop.resolvedDomain}/` : null),
+    ...(traffic ? { traffic_enrichment: traffic } : {}),
+    master: {
+      shop_id: item.shopId,
+      first_discovered_at: safeDate(item.firstDiscoveredAt),
+      last_discovered_at: safeDate(item.lastDiscoveredAt),
+      discovery_count: item.discoveryCount,
+      lifecycle_status: item.lifecycleStatus,
+      notes: item.notes,
+      tags: item.tags,
+      archived: item.archivedAt != null,
+      profile_updated_at: item.shop.leadProfile?.updatedAt
+        ? safeDate(item.shop.leadProfile.updatedAt)
+        : null,
+      runs: item.discoveries.map((discovery) => ({
+        href: `/runs/${encodeURIComponent(discovery.runId)}`,
+        discovered_at: safeDate(discovery.discoveredAt)
+      })),
+      discovery_queries: [...new Set(item.shop.leads.map((lead) =>
+        lead.generatedQuery || lead.searchQuery).filter(Boolean))].sort()
+    }
+  };
+}
+
+const MASTER_TRAFFIC_KEYS = [
+  "estimated_google_search_traffic", "organic_estimated_traffic", "organic_keyword_count",
+  "paid_estimated_traffic", "paid_keyword_count", "featured_snippet_estimated_traffic",
+  "featured_snippet_keyword_count", "local_pack_estimated_traffic", "local_pack_keyword_count"
+];
+
+function addMasterTraffic(target, source) {
+  for (const key of MASTER_TRAFFIC_KEYS) target[key] = (target[key] || 0) + (source[key] || 0);
+}
+
+function aggregateMasterTraffic(items, search) {
+  let worldwide;
+  let leadsWithTraffic = 0;
+  const markets = new Map();
+  const groups = new Map();
+  for (const item of items) {
+    const traffic = item.traffic_enrichment?.dataforseo;
+    const itemGroups = (item.master.discovery_queries.length
+      ? item.master.discovery_queries
+      : [null]).map((query) => {
+        const key = query || "__unattributed__";
+        const group = groups.get(key) || { query, shopsFound: 0, leadsWithTraffic: 0, markets: new Map() };
+        group.shopsFound += 1;
+        groups.set(key, group);
+        return group;
+      });
+    if (!traffic?.worldwide && !traffic?.markets?.length) continue;
+    leadsWithTraffic += 1;
+    for (const group of itemGroups) group.leadsWithTraffic += 1;
+    if (traffic.worldwide) {
+      worldwide ||= {};
+      addMasterTraffic(worldwide, traffic.worldwide);
+      for (const group of itemGroups) {
+        group.worldwide ||= {};
+        addMasterTraffic(group.worldwide, traffic.worldwide);
+      }
+    }
+    for (const market of traffic.markets || []) {
+      const total = markets.get(market.country_code) || { country_code: market.country_code };
+      addMasterTraffic(total, market);
+      markets.set(market.country_code, total);
+      for (const group of itemGroups) {
+        const grouped = group.markets.get(market.country_code) || { country_code: market.country_code };
+        addMasterTraffic(grouped, market);
+        group.markets.set(market.country_code, grouped);
+      }
+    }
+  }
+  return {
+    version: "traffic-overview-v1",
+    runId: "master",
+    scope: { search, matchedLeads: items.length, leadsWithTraffic },
+    ...(worldwide ? { worldwide } : {}),
+    markets: [...markets.values()],
+    queries: [...groups.values()].map((group) => ({
+      query: group.query,
+      shopsFound: group.shopsFound,
+      leadsWithTraffic: group.leadsWithTraffic,
+      ...(group.worldwide ? { worldwide: group.worldwide } : {}),
+      markets: [...group.markets.values()]
+    }))
+  };
 }
 
 function requestedRunId(pathname, suffix = "") {
@@ -1452,6 +1591,30 @@ export function createLeadServer(
     }
 
     if (request.method === "GET") {
+      if (requestUrl.pathname === "/api/leads/traffic-overview") {
+        const ownerId = trustedUserId(request);
+        const { search } = parseTrafficOverviewFilters(requestUrl.searchParams);
+        const page = await repository.getMasterLeadsPage(ownerId, {
+          page: 1, pageSize: 10_000, search, sortBy: "last_discovered",
+          sortDirection: "desc", archived: false
+        }, currentDate(now));
+        const items = page.items.map((item) => serializeMasterLead(item, page.cacheRows));
+        return sendJson(response, 200, aggregateMasterTraffic(items, search));
+      }
+      if (requestUrl.pathname === "/api/leads") {
+        const ownerId = trustedUserId(request);
+        const filters = parseMasterLeadFilters(requestUrl.searchParams);
+        const page = await repository.getMasterLeadsPage(ownerId, filters, currentDate(now));
+        return sendJson(response, 200, {
+          pagination: {
+            page: filters.page,
+            pageSize: filters.pageSize,
+            totalItems: page.totalItems,
+            totalPages: Math.ceil(page.totalItems / filters.pageSize)
+          },
+          items: page.items.map((item) => serializeMasterLead(item, page.cacheRows))
+        });
+      }
       if (requestUrl.pathname === "/api/runs") {
         const ownerId = trustedUserId(request);
         const pagination = parseRunListPagination(requestUrl.searchParams);
