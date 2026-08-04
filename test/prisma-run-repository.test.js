@@ -306,6 +306,10 @@ test("zero-row lifecycle barriers advance truthfully without row-level writes", 
     $transaction: async (callback) => callback({
       $queryRaw: async () => { leadCalls.push("schema"); return []; },
       run: {
+        findUnique: async () => {
+          leadCalls.push("run.snapshot");
+          return { trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({}) };
+        },
         updateMany: async ({ data }) => {
           leadCalls.push(data.stage === "leads_persisted" ? "run.publish" : "run.fence");
           return { count: 1 };
@@ -321,7 +325,7 @@ test("zero-row lifecycle barriers advance truthfully without row-level writes", 
     "run_abcdefghijklmnop", LEASE, [], null, NOW
   ), { total: 0, qualified: 0, rejected: 0, failed: 0 });
   assert.deepEqual(leadCalls, [
-    "schema", "run.fence", "runStore.count", "lead.summary", "run.publish"
+    "schema", "run.fence", "runStore.count", "lead.summary", "run.snapshot", "run.publish"
   ]);
 
   let claimTransactionStarted = false;
@@ -332,6 +336,182 @@ test("zero-row lifecycle barriers advance truthfully without row-level writes", 
     "run_abcdefghijklmnop", LEASE, [], NOW
   ), []);
   assert.equal(claimTransactionStarted, false);
+});
+
+test("DataForSEO scoring keeps lead checkpoints private until v3 finalization", async () => {
+  let publication;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
+      run: {
+        findUnique: async () => ({
+          trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({
+            dataForSeoEnrichmentEnabled: true
+          })
+        }),
+        updateMany: async ({ data }) => {
+          if (data.stage === "leads_persisted") publication = data;
+          return { count: 1 };
+        }
+      },
+      runStore: { count: async () => 0 },
+      lead: { findMany: async () => [] }
+    })
+  });
+  await repository.saveLeadBatch("run_abcdefghijklmnop", LEASE, [], null, NOW);
+  assert.equal(publication.resultsAvailable, false);
+  assert.equal(publication.scoringVersion, 2);
+});
+
+test("progressive completion finalizes every lead to v3 before publication", async () => {
+  const run = {
+    trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({
+      dataForSeoEnrichmentEnabled: true,
+      cruxEnrichmentEnabled: false
+    }),
+    trafficEnrichmentSummary: null
+  };
+  const storedLead = {
+    id: "lead_one",
+    runId: "run_abcdefghijklmnop",
+    status: "qualified",
+    resolvedDomain: "fixture.example",
+    finalUrl: "https://fixture.example/",
+    identityConfidence: 100,
+    shopifyConfidence: 100,
+    relevanceScore: 100,
+    email: "hello@fixture.example",
+    phone: null,
+    contactUrl: "https://fixture.example/contact",
+    socialProfiles: [],
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    leadScore: 80,
+    scoreBreakdown: {
+      version: 2,
+      components: {
+        identity: 20,
+        shopifyValidation: 25,
+        categoryFit: 30,
+        contactEvidence: 5
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    }
+  };
+  const trafficRow = {
+    leadId: "lead_one",
+    source: "dataforseo",
+    state: "partial",
+    contractVersion: "dataforseo-traffic-v1",
+    normalizedPayload: { records: [{
+      contractVersion: "dataforseo-traffic-v1",
+      target: "fixture.example",
+      scope: "worldwide",
+      languageScope: "all_available",
+      metrics: {
+        organic: { etv: 1000, count: 10 },
+        paid: { etv: 0, count: 0 },
+        featuredSnippet: { etv: 99999, count: 1 },
+        localPack: { etv: 99999, count: 1 }
+      },
+      fetchedAt: "2026-08-04T00:00:00.000Z"
+    }] }
+  };
+  let leadUpdate;
+  let published;
+  const transaction = {
+    $queryRaw: async () => [],
+    run: {
+      findUnique: async () => run,
+      updateMany: async ({ data }) => {
+        if (data.state === "completed") published = data;
+        return { count: 1 };
+      }
+    },
+    runDiagnostic: {},
+    lead: {
+      findMany: async () => [storedLead],
+      updateMany: async ({ data }) => { leadUpdate = data; return { count: 1 }; }
+    },
+    leadTrafficEnrichment: { findMany: async () => [trafficRow] }
+  };
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback(transaction)
+  });
+  await repository.completeTrafficEnrichment(
+    "run_abcdefghijklmnop",
+    LEASE,
+    { version: "traffic-enrichment-summary-v1" },
+    [],
+    null,
+    NOW
+  );
+  assert.equal(leadUpdate.scoringVersion, 3);
+  assert.equal(leadUpdate.leadScore, 75);
+  assert.equal(leadUpdate.scoreBreakdown.components.traffic, 24);
+  assert.equal(published.resultsAvailable, true);
+  assert.equal(published.scoringVersion, 3);
+});
+
+test("a progressive v3 score write failure prevents the publication update", async () => {
+  const run = {
+    trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({
+      dataForSeoEnrichmentEnabled: true
+    }),
+    trafficEnrichmentSummary: null
+  };
+  let publicationAttempted = false;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => callback({
+      $queryRaw: async () => [],
+      run: {
+        findUnique: async () => run,
+        updateMany: async ({ data }) => {
+          if (data.state === "completed") publicationAttempted = true;
+          return { count: 1 };
+        }
+      },
+      lead: {
+        findMany: async () => [{
+          id: "lead_one",
+          runId: "run_abcdefghijklmnop",
+          status: "qualified",
+          resolvedDomain: "fixture.example",
+          finalUrl: "https://fixture.example/",
+          socialProfiles: [],
+          pipelineVersion: 2,
+          scoringVersion: 2,
+          leadScore: 80,
+          scoreBreakdown: {
+            version: 2,
+            components: {
+              identity: 20,
+              shopifyValidation: 25,
+              categoryFit: 30,
+              contactEvidence: 5
+            },
+            total: 80,
+            semantics: "deterministic_evidence_rank_not_probability"
+          }
+        }],
+        updateMany: async () => { throw new Error("injected score write failure"); }
+      },
+      leadTrafficEnrichment: { findMany: async () => [] }
+    })
+  });
+  await assert.rejects(
+    repository.completeTrafficEnrichment(
+      "run_abcdefghijklmnop",
+      LEASE,
+      { version: "traffic-enrichment-summary-v1" },
+      [],
+      null,
+      NOW
+    ),
+    /injected score write failure/u
+  );
+  assert.equal(publicationAttempted, false);
 });
 
 for (const size of [1, 40, 100]) {
@@ -354,6 +534,10 @@ for (const size of [1, 40, 100]) {
     const transaction = {
       $queryRaw: async () => { calls.push("$queryRaw:schema"); return []; },
       run: {
+        findUnique: async () => {
+          calls.push("run.findUnique");
+          return { trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({}) };
+        },
         updateMany: async () => { calls.push("run.updateMany"); return { count: 1 }; }
       },
       runStore: {
@@ -414,6 +598,7 @@ for (const size of [1, 40, 100]) {
       "runStore.updateMany",
       "runStore.count",
       "lead.findMany:summary",
+      "run.findUnique",
       "run.updateMany"
     ]);
   });
@@ -929,6 +1114,37 @@ test("repository default ordering is deterministic with null scores last", async
     { storeName: { sort: "asc", nulls: "last" } },
     { id: "asc" }
   ]);
+});
+
+test("master leads exclude provisional leads from unfinished runs", async () => {
+  let query;
+  const repository = new PrismaRunRepository({
+    $transaction: async (operations) => Promise.all(operations),
+    userShop: {
+      count: async () => 0,
+      findMany: async (value) => { query = value; return []; }
+    },
+    trafficEnrichmentCache: { findMany: async () => [] }
+  });
+  await repository.getMasterLeadsPage("owner_fixture", {
+    page: 1,
+    pageSize: 20,
+    search: "fixture",
+    sortBy: "last_discovered",
+    sortDirection: "desc",
+    archived: false
+  });
+  assert.deepEqual(query.include.shop.include.leads.where, {
+    run: {
+      ownerId: "owner_fixture",
+      state: "completed",
+      resultsAvailable: true
+    }
+  });
+  assert.deepEqual(
+    query.where.OR.at(-1).shop.leads.some.run,
+    { ownerId: "owner_fixture", state: "completed", resultsAvailable: true }
+  );
 });
 
 test("result traffic reads are restricted to the requested page lead IDs", async () => {

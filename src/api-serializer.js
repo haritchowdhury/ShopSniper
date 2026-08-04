@@ -919,6 +919,12 @@ export function serializeLead(lead, { trafficEnrichments, trafficEnrichmentConfi
   return item;
 }
 
+export function runResultsAvailable(run) {
+  if (!run?.resultsAvailable) return false;
+  const requiresV3 = run.trafficEnrichmentConfig?.dataForSeo?.enabled === true;
+  return !requiresV3 || run.scoringVersion === 3;
+}
+
 export function serializeRun(run) {
   const progress = createInitialProgress();
   for (const key of Object.keys(progress)) {
@@ -945,7 +951,7 @@ export function serializeRun(run) {
     startedAt: run.startedAt?.toISOString() || null,
     completedAt: run.completedAt?.toISOString() || null,
     progress,
-    resultsAvailable: Boolean(run.resultsAvailable),
+    resultsAvailable: runResultsAvailable(run),
     pipelineVersion: run.pipelineVersion ?? null,
     scoringVersion: run.scoringVersion ?? null,
     queryReview: run.queryRevision > 0

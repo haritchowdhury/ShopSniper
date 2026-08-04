@@ -17,11 +17,13 @@ import {
   serializeEditableQueries,
   serializeQueryAudit,
   serializeRun,
-  serializeTrafficOverview
+  serializeTrafficOverview,
+  runResultsAvailable
 } from "./api-serializer.js";
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
 import { log } from "./logger.js";
+import { finalizeLeadScoresV3 } from "./lead-score-finalizer.js";
 import { enrichTraffic } from "./enrichment/orchestrator.js";
 import {
   discoverLeadForRunStore,
@@ -33,7 +35,10 @@ import {
   runPipeline,
   validateConfirmedQueries
 } from "./pipeline.js";
-import { createPrismaRunRepository } from "./prisma-run-repository.js";
+import {
+  createPrismaRunRepository,
+  stableLeadId
+} from "./prisma-run-repository.js";
 import { validateEditableQueryList } from "./query-review.js";
 import { readJsonBody } from "./request-json.js";
 import { createInitialStatus } from "./status.js";
@@ -1097,6 +1102,19 @@ export async function executeRun({
         summary: traffic.trafficEnrichmentSummary
       });
     }
+    if (!baseResultsPersisted && trafficSnapshot?.dataForSeo?.enabled === true) {
+      result = {
+        ...result,
+        leads: finalizeLeadScoresV3({
+          leads: result.leads,
+          trafficEnrichments: result.trafficEnrichments || [],
+          cruxEnabled: trafficSnapshot?.crux?.enabled === true,
+          leadIdFor: (lead, index) => stableLeadId(identifier, lead, index)
+        }),
+        pipelineVersion: 2,
+        scoringVersion: 3
+      };
+    }
     if (baseResultsPersisted) {
       tracker.status.stage = "completed";
       tracker.status.outputRows = result.summary.total;
@@ -1658,7 +1676,7 @@ export function createLeadServer(
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
-        if (!run.resultsAvailable) {
+        if (!runResultsAvailable(run)) {
           throw new ApiError(409, "RESULTS_UNAVAILABLE", "Results are unavailable for this run.");
         }
         const page = collection === "query-audits"
@@ -1686,7 +1704,7 @@ export function createLeadServer(
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
-        if (!run.resultsAvailable && [
+        if (!runResultsAvailable(run) && [
           "queued",
           "running",
           "awaiting_query_confirmation"
@@ -1697,7 +1715,7 @@ export function createLeadServer(
             "Results are not ready for this run."
           );
         }
-        if (!run.resultsAvailable) {
+        if (!runResultsAvailable(run)) {
           throw new ApiError(
             409,
             "RESULTS_UNAVAILABLE",
@@ -1725,7 +1743,7 @@ export function createLeadServer(
         if (!run) {
           throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
         }
-        if (!run.resultsAvailable && [
+        if (!runResultsAvailable(run) && [
           "queued",
           "running",
           "awaiting_query_confirmation"
@@ -1736,7 +1754,7 @@ export function createLeadServer(
             "Results are not ready for this run."
           );
         }
-        if (!run.resultsAvailable) {
+        if (!runResultsAvailable(run)) {
           throw new ApiError(
             409,
             "RESULTS_UNAVAILABLE",
@@ -1770,6 +1788,16 @@ export function createLeadServer(
           rejected: 0,
           failed: 0
         };
+        const items = page.items.map((lead) => serializeLead(lead, {
+          trafficEnrichmentConfig: trafficConfig,
+          trafficEnrichments: trafficByLead.get(lead.id) || []
+        }));
+        if (items.some((lead) =>
+          lead.pipeline_version !== (run.pipelineVersion ?? null) ||
+          lead.scoring_version !== (run.scoringVersion ?? null)
+        )) {
+          throw new Error("Published run and lead score versions do not agree");
+        }
         return sendJson(response, 200, {
           runId: resultsIdentifier,
           summary,
@@ -1779,10 +1807,7 @@ export function createLeadServer(
             totalItems: page.totalItems,
             totalPages: Math.ceil(page.totalItems / filters.pageSize)
           },
-          items: page.items.map((lead) => serializeLead(lead, {
-            trafficEnrichmentConfig: trafficConfig,
-            trafficEnrichments: trafficByLead.get(lead.id) || []
-          }))
+          items
         });
       }
 

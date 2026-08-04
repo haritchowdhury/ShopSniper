@@ -83,6 +83,16 @@ test("run serialization fills the complete progress contract", () => {
     shopType: "eyewear",
     businessQualifier: "unspecified"
   }]);
+  assert.equal(serializeRun({
+    ...serialized,
+    id: serialized.runId,
+    createdAt: new Date(serialized.createdAt),
+    completedAt: new Date(serialized.completedAt),
+    normalizedShopTypes: [],
+    resultsAvailable: true,
+    scoringVersion: 2,
+    trafficEnrichmentConfig: { dataForSeo: { enabled: true } }
+  }).resultsAvailable, false);
 });
 
 test("traffic persistence accepts normalized contracts and rejects raw or secret-shaped envelopes", () => {
@@ -576,6 +586,29 @@ test("shared lead score-state fixtures agree with persistence and serialization"
     (error) => error instanceof LeadStateInvariantError &&
       error.code === "new_persistence_requires_v2"
   );
+});
+
+test("shared v3 lead score-state fixtures agree with persistence and serialization", () => {
+  const fixtures = JSON.parse(fs.readFileSync(
+    new URL("../../contracts/lead-score-state-v3.fixtures.json", import.meta.url),
+    "utf8"
+  ));
+  for (const fixture of fixtures.valid) {
+    assert.doesNotThrow(() => assertPublicLeadScoreState(fixture.lead), fixture.name);
+    const stored = leadRecordToCreate(
+      "run_abcdefghijklmnop",
+      `lead_${fixture.name}`,
+      fixture.lead
+    );
+    assert.equal(serializeLead(stored).score_semantics, fixture.lead.score_semantics);
+  }
+  for (const fixture of fixtures.invalid) {
+    assert.throws(
+      () => assertPublicLeadScoreState(fixture.lead),
+      LeadStateInvariantError,
+      fixture.name
+    );
+  }
 });
 
 test("structured logging redacts PostgreSQL credentials", () => {

@@ -135,6 +135,8 @@ class TestRepository {
     run.progress = { ...status };
     run.resultsAvailable = true;
     run.leadSummary = result.summary;
+    run.pipelineVersion = result.pipelineVersion ?? 2;
+    run.scoringVersion = result.scoringVersion ?? 2;
     this.items.set(
       identifier,
       result.leads.map((lead, index) => ({
@@ -355,6 +357,12 @@ test("worker enriches from the stored run snapshot before atomic publication", a
       leads: [{
         resolved_domain: "traffic.example",
         final_url: "https://traffic.example/products/item",
+        identity_confidence: 100,
+        shopify_confidence: 100,
+        relevance_score: 100,
+        email: "hello@traffic.example",
+        phone: "+12125550100",
+        contact_url: "https://traffic.example/contact",
         status: "qualified",
         pipeline_version: 2,
         scoring_version: 2,
@@ -375,10 +383,30 @@ test("worker enriches from the stored run snapshot before atomic publication", a
       diagnostics: [],
       summary: { total: 1, qualified: 1, rejected: 0, failed: 0 }
     }),
-    trafficOrchestrator: async ({ runSnapshot }) => {
+    trafficOrchestrator: async ({ runId, runSnapshot, leads }) => {
       observedSnapshot = runSnapshot;
+      const leadId = stableLeadId(runId, leads[0], 0);
       return {
-        trafficEnrichments: [],
+        trafficEnrichments: [{
+          leadId,
+          source: "dataforseo",
+          state: "partial",
+          contractVersion: "dataforseo-traffic-v1",
+          normalizedPayload: { records: [{
+            contractVersion: "dataforseo-traffic-v1",
+            target: "traffic.example",
+            scope: "worldwide",
+            languageScope: "all_available",
+            metrics: {
+              organic: { etv: 1000, count: 10 },
+              paid: { etv: 0, count: 0 },
+              featuredSnippet: { etv: 100000, count: 100 },
+              localPack: { etv: 100000, count: 100 }
+            },
+            fetchedAt: "2026-08-03T00:00:00.000Z"
+          }] },
+          fetchedAt: "2026-08-03T00:00:00.000Z"
+        }],
         trafficEnrichmentSummary: { version: "traffic-enrichment-summary-v1" },
         diagnostics: [{ scope: "run", code: "traffic_fixture", details: {} }]
       };
@@ -398,6 +426,10 @@ test("worker enriches from the stored run snapshot before atomic publication", a
   assert.ok(stages.includes("enriching_traffic"));
   assert.equal(published.trafficEnrichmentSummary.version, "traffic-enrichment-summary-v1");
   assert.equal(published.diagnostics.at(-1).code, "traffic_fixture");
+  assert.equal(published.scoringVersion, 3);
+  assert.equal(published.leads[0].scoring_version, 3);
+  assert.equal(published.leads[0].lead_score, 79);
+  assert.equal(published.leads[0].score_breakdown.components.traffic, 24);
   assert.equal(repository.runs.get(runId).state, "completed");
 });
 
@@ -672,6 +704,8 @@ test("results API publishes owned optional traffic material and fails closed on 
   run.state = "completed";
   run.stage = "completed";
   run.resultsAvailable = true;
+  run.pipelineVersion = 2;
+  run.scoringVersion = 3;
   run.leadSummary = { total: 2, qualified: 2, rejected: 0, failed: 0 };
   run.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot({
     dataForSeoEnrichmentEnabled: true,
@@ -681,14 +715,9 @@ test("results API publishes owned optional traffic material and fails closed on 
     id,
     status: "qualified",
     pipelineVersion: 2,
-    scoringVersion: 2,
-    leadScore: 80,
-    scoreBreakdown: {
-      version: 2,
-      components: { identity: 14, shopifyValidation: 20, categoryFit: 24, contactEvidence: 22 },
-      total: 80,
-      semantics: "deterministic_evidence_rank_not_probability"
-    }
+    scoringVersion: 3,
+    leadScore: null,
+    scoreBreakdown: null
   }));
   repository.items.set(run.id, leads);
   repository.trafficEnrichments.set(run.id, [{
@@ -739,6 +768,8 @@ test("traffic overview API searches owned leads and returns one validated aggreg
   run.state = "completed";
   run.stage = "completed";
   run.resultsAvailable = true;
+  run.pipelineVersion = 2;
+  run.scoringVersion = 3;
   run.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot({
     dataForSeoEnrichmentEnabled: true
   });

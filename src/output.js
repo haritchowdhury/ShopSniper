@@ -40,6 +40,7 @@ export const OUTPUT_HEADERS = [
   "identity_confidence",
   "identity_evidence",
   "score_breakdown",
+  "score_semantics",
   "discovery_occurrences",
   "matched_categories",
   "original_shop_type"

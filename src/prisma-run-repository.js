@@ -16,6 +16,7 @@ import {
   trafficCacheRecordToUpsert
 } from "./api-serializer.js";
 import { loadConfig } from "./config.js";
+import { finalizeLeadScoresV3 } from "./lead-score-finalizer.js";
 import {
   DATAFORSEO_COUNTRY_LOCATION_CODES,
   DATAFORSEO_ITEM_TYPES,
@@ -633,6 +634,51 @@ function cacheId(record) {
 
 function resultFingerprint(payload) {
   return createHash("sha256").update(canonicalJson(payload)).digest("hex");
+}
+
+function dataForSeoScoringEnabled(run) {
+  return run?.trafficEnrichmentConfig?.dataForSeo?.enabled === true;
+}
+
+async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run) {
+  if (!dataForSeoScoringEnabled(run)) return 2;
+  const [storedLeads, trafficEnrichments] = await Promise.all([
+    transaction.lead.findMany({
+      where: { runId: runIdentifier },
+      orderBy: { id: "asc" }
+    }),
+    transaction.leadTrafficEnrichment.findMany({
+      where: { runId: runIdentifier },
+      orderBy: [{ leadId: "asc" }, { source: "asc" }]
+    })
+  ]);
+  const publicLeads = storedLeads.map((lead) => serializeLead(lead));
+  const finalLeads = finalizeLeadScoresV3({
+    leads: publicLeads,
+    trafficEnrichments,
+    cruxEnabled: run.trafficEnrichmentConfig?.crux?.enabled === true
+  });
+  if (finalLeads.length !== storedLeads.length) {
+    throw new Error("V3 score finalization did not reconcile every lead");
+  }
+  let updatedCount = 0;
+  for (const lead of finalLeads) {
+    const validated = leadRecordToCreate(runIdentifier, lead.id, lead);
+    const updated = await transaction.lead.updateMany({
+      where: { id: lead.id, runId: runIdentifier },
+      data: {
+        pipelineVersion: validated.pipelineVersion,
+        scoringVersion: validated.scoringVersion,
+        leadScore: validated.leadScore,
+        scoreBreakdown: validated.scoreBreakdown ?? null
+      }
+    });
+    updatedCount += updated.count;
+  }
+  if (updatedCount !== storedLeads.length) {
+    throw new Error("V3 score finalization row count did not reconcile every lead");
+  }
+  return 3;
 }
 
 function resultWhere(runIdentifier, ownerId, filters) {
@@ -2037,11 +2083,12 @@ export class PrismaRunRepository {
         counts[row.status] += 1;
         return counts;
       }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      const currentRun = await transaction.run.findUnique({ where: { id: runIdentifier } });
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: {
           stage: "leads_persisted",
-          resultsAvailable: true,
+          resultsAvailable: !dataForSeoScoringEnabled(currentRun),
           leadSummary: summary,
           pipelineVersion: 2,
           scoringVersion: 2,
@@ -2352,11 +2399,12 @@ export class PrismaRunRepository {
         counts[row.status] += 1;
         return counts;
       }, { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      const currentRun = await transaction.run.findUnique({ where: { id: runIdentifier } });
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: {
           stage: "leads_persisted",
-          resultsAvailable: true,
+          resultsAvailable: !dataForSeoScoringEnabled(currentRun),
           leadSummary: summary,
           pipelineVersion: 2,
           scoringVersion: 2,
@@ -2550,6 +2598,11 @@ export class PrismaRunRepository {
       const finalTrafficSummary = summary?.state === "failed" && priorHasMaterial
         ? { ...priorTraffic, ...summary, state: "partial" }
         : summary;
+      const scoringVersion = await finalizePersistedLeadScoresV3(
+        transaction,
+        runIdentifier,
+        currentRun
+      );
       const completed = await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: {
@@ -2558,6 +2611,8 @@ export class PrismaRunRepository {
           stage: "completed",
           completedAt: now,
           resultsAvailable: true,
+          pipelineVersion: 2,
+          scoringVersion,
           ...(finalTrafficSummary != null
             ? { trafficEnrichmentSummary: finalTrafficSummary }
             : {}),
@@ -3284,7 +3339,7 @@ export class PrismaRunRepository {
         })),
         {
           shop: { leads: { some: {
-            run: { ownerId },
+            run: { ownerId, state: "completed", resultsAvailable: true },
             OR: ["storeName", "email", "phone", "shopType"].map((field) => ({
               [field]: { contains: filters.search, mode: "insensitive" }
             }))
@@ -3301,7 +3356,7 @@ export class PrismaRunRepository {
         include: {
           leadProfile: true,
           leads: {
-            where: { run: { ownerId } },
+            where: { run: { ownerId, state: "completed", resultsAvailable: true } },
             orderBy: [
               { leadScore: { sort: "desc", nulls: "last" } },
               { run: { createdAt: "desc" } }
@@ -3431,6 +3486,7 @@ export class PrismaRunRepository {
         },
         data: {
           state: "queued",
+          resultsAvailable: false,
           leaseOwner: null,
           leaseToken: null,
           leaseAcquiredAt: null,
