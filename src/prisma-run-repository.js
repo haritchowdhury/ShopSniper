@@ -3214,10 +3214,35 @@ export class PrismaRunRepository {
     return { totalItems, items };
   }
 
+  async getTrafficEnrichmentsForLeadIds(runIdentifier, ownerId, leadIds) {
+    if (!leadIds.length) return [];
+    return this.prisma.leadTrafficEnrichment.findMany({
+      where: {
+        runId: runIdentifier,
+        leadId: { in: leadIds },
+        lead: { run: { ownerId } }
+      },
+      orderBy: [{ leadId: "asc" }, { source: "asc" }]
+    });
+  }
+
   async getTrafficEnrichmentsForRun(runIdentifier, ownerId) {
     return this.prisma.leadTrafficEnrichment.findMany({
       where: { runId: runIdentifier, lead: { run: { ownerId } } },
       orderBy: [{ leadId: "asc" }, { source: "asc" }]
+    });
+  }
+
+  async getTrafficOverviewRows(runIdentifier, ownerId, { search }) {
+    return this.prisma.lead.findMany({
+      where: resultWhere(runIdentifier, ownerId, { status: null, search }),
+      select: {
+        id: true,
+        trafficEnrichments: {
+          orderBy: { source: "asc" }
+        }
+      },
+      orderBy: { id: "asc" }
     });
   }
 

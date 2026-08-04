@@ -169,6 +169,17 @@ const PUBLIC_TRAFFIC_VERSION = "traffic-enrichment-public-v1";
 const DATAFORSEO_COUNTRY_ORDER = Object.freeze([
   "US", "GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"
 ]);
+const DATAFORSEO_METRIC_KEYS = Object.freeze([
+  "estimated_google_search_traffic",
+  "organic_estimated_traffic",
+  "organic_keyword_count",
+  "paid_estimated_traffic",
+  "paid_keyword_count",
+  "featured_snippet_estimated_traffic",
+  "featured_snippet_keyword_count",
+  "local_pack_estimated_traffic",
+  "local_pack_keyword_count"
+]);
 const PUBLIC_SOURCE_STATES = new Set(["available", "partial", "no_coverage", "unavailable"]);
 const CRUX_ATTRIBUTION = Object.freeze({
   source: "crux",
@@ -719,6 +730,67 @@ export function serializeTrafficEnrichment(rows, runSnapshot) {
     value.traffic_attributions = attributions;
   }
   return value;
+}
+
+function emptyPublicDataForSeoMetrics() {
+  return Object.fromEntries(DATAFORSEO_METRIC_KEYS.map((key) => [key, 0]));
+}
+
+function addPublicDataForSeoMetrics(target, source) {
+  for (const key of DATAFORSEO_METRIC_KEYS) {
+    const value = target[key] + source[key];
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error("Traffic overview metric aggregation is invalid");
+    }
+    target[key] = value;
+  }
+}
+
+export function serializeTrafficOverview(runId, leads, runSnapshot, search = null) {
+  let worldwide;
+  let leadsWithTraffic = 0;
+  const markets = new Map();
+  const safeLeads = Array.isArray(leads) ? leads : [];
+
+  for (const lead of safeLeads) {
+    const enrichment = serializeTrafficEnrichment(
+      lead.trafficEnrichments,
+      runSnapshot
+    );
+    const traffic = enrichment?.dataforseo;
+    if (!traffic?.worldwide && !traffic?.markets?.length) continue;
+    leadsWithTraffic += 1;
+    if (traffic.worldwide) {
+      worldwide ??= emptyPublicDataForSeoMetrics();
+      addPublicDataForSeoMetrics(worldwide, traffic.worldwide);
+    }
+    for (const market of traffic.markets || []) {
+      let aggregate = markets.get(market.country_code);
+      if (!aggregate) {
+        aggregate = {
+          country_code: market.country_code,
+          ...emptyPublicDataForSeoMetrics()
+        };
+        markets.set(market.country_code, aggregate);
+      }
+      addPublicDataForSeoMetrics(aggregate, market);
+    }
+  }
+
+  return {
+    version: "traffic-overview-v1",
+    runId,
+    scope: {
+      search,
+      matchedLeads: safeLeads.length,
+      leadsWithTraffic
+    },
+    ...(worldwide ? { worldwide } : {}),
+    markets: DATAFORSEO_COUNTRY_ORDER.flatMap((countryCode) => {
+      const market = markets.get(countryCode);
+      return market ? [market] : [];
+    })
+  };
 }
 
 export function serializeLead(lead, { trafficEnrichments, trafficEnrichmentConfig } = {}) {

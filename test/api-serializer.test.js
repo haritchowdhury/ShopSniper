@@ -7,6 +7,7 @@ import {
   serializeLead,
   serializeRun,
   serializeTrafficEnrichment,
+  serializeTrafficOverview,
   trafficCacheRecordToUpsert
 } from "../src/api-serializer.js";
 import {
@@ -360,6 +361,40 @@ test("public traffic serialization derives labelled DataForSEO metrics without o
   assert.deepEqual(serialized.traffic_sources, ["dataforseo"]);
   assert.equal(serialized.traffic_attributions[0].source, "dataforseo");
   assert.equal(JSON.stringify(serialized).includes("providerCost"), false);
+});
+
+test("traffic overview aggregates validated DataForSEO material without exposing lead rows", () => {
+  const india = dataForSeoPublished({ countryIsoCode: "IN", locationCode: 2356 });
+  const first = dataForSeoPublished();
+  first.normalizedPayload.records.push(india.normalizedPayload.records[0]);
+  const malformed = {
+    source: "dataforseo",
+    state: "available",
+    contractVersion: "dataforseo-traffic-v1",
+    normalizedPayload: { rawBody: ["must-not-leak"] }
+  };
+  const overview = serializeTrafficOverview(
+    "run_abcdefghijklmnop",
+    [
+      { id: "lead_one", trafficEnrichments: [first] },
+      { id: "lead_two", trafficEnrichments: [dataForSeoPublished()] },
+      { id: "lead_bad", trafficEnrichments: [malformed] }
+    ],
+    trafficSnapshot(true, false),
+    "fixture"
+  );
+
+  assert.equal(overview.version, "traffic-overview-v1");
+  assert.deepEqual(overview.scope, {
+    search: "fixture",
+    matchedLeads: 3,
+    leadsWithTraffic: 2
+  });
+  assert.equal(overview.worldwide.estimated_google_search_traffic, 24);
+  assert.equal(overview.markets[0].country_code, "IN");
+  assert.equal(overview.markets[0].estimated_google_search_traffic, 12);
+  assert.equal(JSON.stringify(overview).includes("must-not-leak"), false);
+  assert.equal(JSON.stringify(overview).includes("lead_one"), false);
 });
 
 test("public CrUX serialization groups components and attributes only material", () => {

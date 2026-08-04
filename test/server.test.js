@@ -252,9 +252,33 @@ class TestRepository {
     };
   }
 
-  async getTrafficEnrichmentsForRun(identifier, ownerId) {
+  async getTrafficEnrichmentsForLeadIds(identifier, ownerId, leadIds) {
     const run = this.runs.get(identifier);
-    return run?.ownerId === ownerId ? this.trafficEnrichments.get(identifier) || [] : [];
+    return run?.ownerId === ownerId
+      ? (this.trafficEnrichments.get(identifier) || [])
+          .filter(({ leadId }) => leadIds.includes(leadId))
+      : [];
+  }
+
+  async getTrafficOverviewRows(identifier, ownerId, filters) {
+    const run = this.runs.get(identifier);
+    if (run?.ownerId !== ownerId) return [];
+    let items = this.items.get(identifier) || [];
+    if (filters.search) {
+      const needle = filters.search.toLowerCase();
+      items = items.filter((item) => [
+        item.storeName,
+        item.resolvedDomain,
+        item.myshopifyDomain,
+        item.email,
+        item.shopType
+      ].some((value) => value?.toLowerCase().includes(needle)));
+    }
+    const traffic = this.trafficEnrichments.get(identifier) || [];
+    return items.map(({ id }) => ({
+      id,
+      trafficEnrichments: traffic.filter(({ leadId }) => leadId === id)
+    }));
   }
 
   async getQueryAuditsPage(identifier, _ownerId, pagination) {
@@ -705,6 +729,79 @@ test("results API publishes owned optional traffic material and fails closed on 
     headers: { "x-user-id": "user_bob" }
   });
   assert.equal(foreign.status, 404);
+});
+
+test("traffic overview API searches owned leads and returns one validated aggregate", async (context) => {
+  const repository = new TestRepository();
+  const fixture = await startTestServer({ repository });
+  context.after(() => fixture.server.close());
+  const run = await repository.createRun("user_alice", [{ original: "eyewear", normalized: "eyewear" }]);
+  run.state = "completed";
+  run.stage = "completed";
+  run.resultsAvailable = true;
+  run.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot({
+    dataForSeoEnrichmentEnabled: true
+  });
+  repository.items.set(run.id, [
+    { id: "lead_alpha", storeName: "Alpha Optics", resolvedDomain: "alpha.example" },
+    { id: "lead_beta", storeName: "Beta Optics", resolvedDomain: "beta.example" },
+    { id: "lead_other", storeName: "Other Store", resolvedDomain: "other.example" }
+  ]);
+  const trafficRow = (leadId, target, organic) => ({
+    leadId,
+    source: "dataforseo",
+    state: "partial",
+    contractVersion: "dataforseo-traffic-v1",
+    fetchedAt: new Date("2026-08-01T00:00:00.000Z"),
+    normalizedPayload: {
+      records: [{
+        contractVersion: "dataforseo-traffic-v1",
+        target,
+        scope: "worldwide",
+        languageScope: "all_available",
+        metrics: {
+          organic: { etv: organic, count: 2 },
+          paid: { etv: 1, count: 1 },
+          featuredSnippet: { etv: 0, count: 0 },
+          localPack: { etv: 0, count: 0 }
+        },
+        fetchedAt: "2026-08-01T00:00:00.000Z"
+      }]
+    }
+  });
+  repository.trafficEnrichments.set(run.id, [
+    trafficRow("lead_alpha", "alpha.example", 10),
+    trafficRow("lead_beta", "beta.example", 20),
+    trafficRow("lead_other", "other.example", 100)
+  ]);
+
+  const response = await fetch(
+    `${fixture.base}/api/runs/${run.id}/traffic-overview?search=%20optics%20`,
+    { headers: { "x-user-id": "user_alice" } }
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.version, "traffic-overview-v1");
+  assert.deepEqual(body.scope, {
+    search: "optics",
+    matchedLeads: 2,
+    leadsWithTraffic: 2
+  });
+  assert.equal(body.worldwide.organic_estimated_traffic, 30);
+  assert.equal(body.worldwide.paid_estimated_traffic, 2);
+  assert.equal(body.worldwide.estimated_google_search_traffic, 32);
+  assert.deepEqual(body.markets, []);
+
+  const foreign = await fetch(
+    `${fixture.base}/api/runs/${run.id}/traffic-overview`,
+    { headers: { "x-user-id": "user_bob" } }
+  );
+  assert.equal(foreign.status, 404);
+  const invalid = await fetch(
+    `${fixture.base}/api/runs/${run.id}/traffic-overview?page=1`,
+    { headers: { "x-user-id": "user_alice" } }
+  );
+  assert.equal(invalid.status, 400);
 });
 
 test("API rejects invalid bodies, unsafe parameters, and unavailable database safely", async (context) => {

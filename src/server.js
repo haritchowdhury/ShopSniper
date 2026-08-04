@@ -15,7 +15,8 @@ import {
   serializeLead,
   serializeEditableQueries,
   serializeQueryAudit,
-  serializeRun
+  serializeRun,
+  serializeTrafficOverview
 } from "./api-serializer.js";
 import { normalizeShopTypes } from "./category-input.js";
 import { assertRunConfig, loadConfig } from "./config.js";
@@ -47,6 +48,7 @@ const RESULT_PARAMETERS = new Set([
   "sortBy",
   "sortDirection"
 ]);
+const TRAFFIC_OVERVIEW_PARAMETERS = new Set(["search"]);
 const RESULT_STATUSES = new Set(["qualified", "rejected", "failed"]);
 const SORT_FIELDS = new Set([
   "lead_score",
@@ -170,6 +172,32 @@ export function parseResultFilters(searchParams) {
     sortBy,
     sortDirection
   };
+}
+
+export function parseTrafficOverviewFilters(searchParams) {
+  const unknown = [...searchParams.keys()].filter(
+    (name) => !TRAFFIC_OVERVIEW_PARAMETERS.has(name)
+  );
+  const duplicate = [...TRAFFIC_OVERVIEW_PARAMETERS].filter(
+    (name) => searchParams.getAll(name).length > 1
+  );
+  const rawSearch = searchParams.get("search");
+  const search = rawSearch == null ? null : rawSearch.trim();
+  const invalid = [];
+  if (unknown.length) invalid.push({ parameters: unknown, issue: "unknown" });
+  if (duplicate.length) invalid.push({ parameters: duplicate, issue: "duplicate" });
+  if (search != null && search.length > 200) {
+    invalid.push({ parameter: "search", issue: "too_long" });
+  }
+  if (invalid.length) {
+    throw new ApiError(
+      400,
+      "INVALID_QUERY_PARAMETERS",
+      "One or more traffic overview query parameters are invalid.",
+      invalid
+    );
+  }
+  return { search: search || null };
 }
 
 function requestedRunId(pathname, suffix = "") {
@@ -1484,6 +1512,48 @@ export function createLeadServer(
         });
       }
 
+      const trafficOverviewIdentifier = requestedRunId(
+        requestUrl.pathname,
+        "traffic-overview"
+      );
+      if (trafficOverviewIdentifier) {
+        const ownerId = trustedUserId(request);
+        const filters = parseTrafficOverviewFilters(requestUrl.searchParams);
+        const run = await repository.getRun(trafficOverviewIdentifier, ownerId);
+        if (!run) {
+          throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");
+        }
+        if (!run.resultsAvailable && [
+          "queued",
+          "running",
+          "awaiting_query_confirmation"
+        ].includes(run.state)) {
+          throw new ApiError(
+            409,
+            "RESULTS_NOT_READY",
+            "Results are not ready for this run."
+          );
+        }
+        if (!run.resultsAvailable) {
+          throw new ApiError(
+            409,
+            "RESULTS_UNAVAILABLE",
+            "Results are unavailable for this run."
+          );
+        }
+        const rows = await repository.getTrafficOverviewRows(
+          trafficOverviewIdentifier,
+          ownerId,
+          filters
+        );
+        return sendJson(response, 200, serializeTrafficOverview(
+          trafficOverviewIdentifier,
+          rows,
+          run.trafficEnrichmentConfig,
+          filters.search
+        ));
+      }
+
       const resultsIdentifier = requestedRunId(requestUrl.pathname, "results");
       if (resultsIdentifier) {
         const ownerId = trustedUserId(request);
@@ -1518,9 +1588,12 @@ export function createLeadServer(
         const trafficConfig = run.trafficEnrichmentConfig;
         const trafficEnabled = trafficConfig?.dataForSeo?.enabled === true ||
           trafficConfig?.crux?.enabled === true;
-        const trafficRows = trafficEnabled &&
-          typeof repository.getTrafficEnrichmentsForRun === "function"
-          ? await repository.getTrafficEnrichmentsForRun(resultsIdentifier, ownerId)
+        const trafficRows = trafficEnabled && page.items.length
+          ? await repository.getTrafficEnrichmentsForLeadIds(
+              resultsIdentifier,
+              ownerId,
+              page.items.map(({ id }) => id)
+            )
           : [];
         const trafficByLead = new Map();
         for (const row of trafficRows) {

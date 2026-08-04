@@ -930,6 +930,48 @@ test("repository default ordering is deterministic with null scores last", async
   ]);
 });
 
+test("result traffic reads are restricted to the requested page lead IDs", async () => {
+  let arguments_;
+  const repository = new PrismaRunRepository({
+    leadTrafficEnrichment: {
+      findMany: async (value) => { arguments_ = value; return []; }
+    }
+  });
+  await repository.getTrafficEnrichmentsForLeadIds(
+    "run_abcdefghijklmnop",
+    "user_alice",
+    ["lead_one", "lead_two"]
+  );
+  assert.deepEqual(arguments_.where, {
+    runId: "run_abcdefghijklmnop",
+    leadId: { in: ["lead_one", "lead_two"] },
+    lead: { run: { ownerId: "user_alice" } }
+  });
+  assert.deepEqual(arguments_.orderBy, [{ leadId: "asc" }, { source: "asc" }]);
+});
+
+test("traffic overview reads only identities and owned normalized traffic rows", async () => {
+  let arguments_;
+  const repository = new PrismaRunRepository({
+    lead: {
+      findMany: async (value) => { arguments_ = value; return []; }
+    }
+  });
+  await repository.getTrafficOverviewRows(
+    "run_abcdefghijklmnop",
+    "user_alice",
+    { search: "fashion" }
+  );
+  assert.equal(arguments_.where.runId, "run_abcdefghijklmnop");
+  assert.equal(arguments_.where.run.ownerId, "user_alice");
+  assert.equal(arguments_.where.OR.length, 5);
+  assert.deepEqual(arguments_.select, {
+    id: true,
+    trafficEnrichments: { orderBy: { source: "asc" } }
+  });
+  assert.deepEqual(arguments_.orderBy, { id: "asc" });
+});
+
 test("restart recovery requeues progressive checkpoints and fails only legacy work", async () => {
   const updates = [];
   const repository = new PrismaRunRepository({
