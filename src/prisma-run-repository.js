@@ -3238,6 +3238,8 @@ export class PrismaRunRepository {
       where: resultWhere(runIdentifier, ownerId, { status: null, search }),
       select: {
         id: true,
+        generatedQuery: true,
+        searchQuery: true,
         trafficEnrichments: {
           orderBy: { source: "asc" }
         }

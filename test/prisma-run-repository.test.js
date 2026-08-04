@@ -967,6 +967,8 @@ test("traffic overview reads only identities and owned normalized traffic rows",
   assert.equal(arguments_.where.OR.length, 5);
   assert.deepEqual(arguments_.select, {
     id: true,
+    generatedQuery: true,
+    searchQuery: true,
     trafficEnrichments: { orderBy: { source: "asc" } }
   });
   assert.deepEqual(arguments_.orderBy, { id: "asc" });

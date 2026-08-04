@@ -750,6 +750,7 @@ export function serializeTrafficOverview(runId, leads, runSnapshot, search = nul
   let worldwide;
   let leadsWithTraffic = 0;
   const markets = new Map();
+  const queryGroups = new Map();
   const safeLeads = Array.isArray(leads) ? leads : [];
 
   for (const lead of safeLeads) {
@@ -758,11 +759,32 @@ export function serializeTrafficOverview(runId, leads, runSnapshot, search = nul
       runSnapshot
     );
     const traffic = enrichment?.dataforseo;
+    const query = typeof lead.generatedQuery === "string" && lead.generatedQuery.trim()
+      ? lead.generatedQuery.trim()
+      : typeof lead.searchQuery === "string" && lead.searchQuery.trim()
+        ? lead.searchQuery.trim()
+        : null;
+    const queryKey = query || "__unattributed__";
+    let queryGroup = queryGroups.get(queryKey);
+    if (!queryGroup) {
+      queryGroup = {
+        query,
+        shopsFound: 0,
+        leadsWithTraffic: 0,
+        worldwide: undefined,
+        markets: new Map()
+      };
+      queryGroups.set(queryKey, queryGroup);
+    }
+    queryGroup.shopsFound += 1;
     if (!traffic?.worldwide && !traffic?.markets?.length) continue;
     leadsWithTraffic += 1;
+    queryGroup.leadsWithTraffic += 1;
     if (traffic.worldwide) {
       worldwide ??= emptyPublicDataForSeoMetrics();
       addPublicDataForSeoMetrics(worldwide, traffic.worldwide);
+      queryGroup.worldwide ??= emptyPublicDataForSeoMetrics();
+      addPublicDataForSeoMetrics(queryGroup.worldwide, traffic.worldwide);
     }
     for (const market of traffic.markets || []) {
       let aggregate = markets.get(market.country_code);
@@ -774,6 +796,15 @@ export function serializeTrafficOverview(runId, leads, runSnapshot, search = nul
         markets.set(market.country_code, aggregate);
       }
       addPublicDataForSeoMetrics(aggregate, market);
+      let queryMarket = queryGroup.markets.get(market.country_code);
+      if (!queryMarket) {
+        queryMarket = {
+          country_code: market.country_code,
+          ...emptyPublicDataForSeoMetrics()
+        };
+        queryGroup.markets.set(market.country_code, queryMarket);
+      }
+      addPublicDataForSeoMetrics(queryMarket, market);
     }
   }
 
@@ -789,7 +820,23 @@ export function serializeTrafficOverview(runId, leads, runSnapshot, search = nul
     markets: DATAFORSEO_COUNTRY_ORDER.flatMap((countryCode) => {
       const market = markets.get(countryCode);
       return market ? [market] : [];
-    })
+    }),
+    queries: [...queryGroups.values()]
+      .map((group) => ({
+        query: group.query,
+        shopsFound: group.shopsFound,
+        leadsWithTraffic: group.leadsWithTraffic,
+        ...(group.worldwide ? { worldwide: group.worldwide } : {}),
+        markets: DATAFORSEO_COUNTRY_ORDER.flatMap((countryCode) => {
+          const market = group.markets.get(countryCode);
+          return market ? [market] : [];
+        })
+      }))
+      .sort((left, right) =>
+        (right.worldwide?.estimated_google_search_traffic ?? 0)
+        - (left.worldwide?.estimated_google_search_traffic ?? 0)
+        || (left.query ?? "").localeCompare(right.query ?? "")
+      )
   };
 }
 
