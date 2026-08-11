@@ -1,0 +1,9 @@
+{
+  "contractVersion": "pipeline-contract-negative-fixtures-v1",
+  "cases": [
+    "unknown_field", "missing_field", "occurrences_1001", "diagnostics_1001",
+    "identifier_traversal", "identity_mismatch", "fingerprint_mismatch",
+    "domain_set_mismatch", "candidate_key_mismatch", "needs_crux_mismatch",
+    "itemIds", "raw_provider_body", "credential_url", "persisted_browserless_html"
+  ]
+}

@@ -18,6 +18,13 @@ import {
 import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
 import { normalizeDataForSeoHostname } from "../src/enrichment/dataforseo/request.js";
 import { normalizeCruxOrigin } from "../src/enrichment/crux/api-request.js";
+import {
+  parseCombinedTrafficCruxResult, parseConfirmedQueryManifest, parseDomainManifest,
+  parseDomainStageManifest, parseDomainWorkPlan, parseLeadResultArtifact,
+  parseQueryDiscoveryArtifact
+} from "../src/aws-pipeline/contracts/artifacts.js";
+import { parseAggregationCheckMessage, parseWorkMessage } from
+  "../src/aws-pipeline/contracts/messages.js";
 
 const PROBE_VERSION = "payload-discovery-v1";
 const FIXTURE_ROOT = path.resolve("test/fixtures/aws-pipeline/v1");
@@ -549,6 +556,24 @@ async function localContractsProbe() {
   };
   envelopes.encodedBytes = Object.fromEntries(Object.entries(envelopes.messages)
     .map(([key, value]) => [key, encodedBytes(value)]));
+
+  // G4 production-contract verification remains entirely local and deterministic.
+  parseConfirmedQueryManifest(confirmedQueryManifest);
+  parseQueryDiscoveryArtifact(perQueryArtifact);
+  parseDomainManifest(domainManifest);
+  parseDomainWorkPlan(workPlan);
+  parseDomainStageManifest({
+    contractVersion: "domain-stage-manifest-v1",
+    domainManifest,
+    workPlan
+  });
+  parseLeadResultArtifact({ contractVersion: "lead-result-v1", result: leadResults.success });
+  parseLeadResultArtifact({ contractVersion: "lead-result-v1", result: leadResults.failure });
+  parseCombinedTrafficCruxResult(trafficResult);
+  parseWorkMessage(envelopes.messages.discovery);
+  parseWorkMessage(envelopes.messages.lead);
+  parseWorkMessage(envelopes.messages.traffic);
+  parseAggregationCheckMessage(envelopes.messages.aggregateCheck);
 
   const maxOccurrence = structuredClone(candidate.occurrences[0]);
   const boundaryCandidate = structuredClone(candidate);

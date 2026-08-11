@@ -11,6 +11,8 @@
     "test": "node --test",
     "test:integration": "node -r dotenv/config --test --test-concurrency=1 test/*.integration.test.js",
     "check:secrets": "node scripts/check-secrets.js",
+    "build:lambda": "node scripts/build-lambda.js",
+    "measure:lambda": "node scripts/measure-lambda-packages.js",
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
@@ -23,6 +25,9 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1107.0",
+    "@aws-sdk/client-secrets-manager": "3.1107.0",
+    "@aws-sdk/client-sqs": "3.1107.0",
     "@neondatabase/serverless": "1.1.0",
     "@prisma/adapter-neon": "6.19.3",
     "@prisma/client": "6.19.3",
@@ -31,6 +36,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "prisma": "6.19.3"
   }
 }

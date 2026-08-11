@@ -8,3 +8,5 @@ data/*.tmp
 .DS_Store
 /My workflow 3.json
 /My workflow 4.json
+.lambda-build/
+dist/lambda/
