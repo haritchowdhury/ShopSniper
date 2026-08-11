@@ -76,6 +76,35 @@ enum RunStoreState {
   failed
 }
 
+enum RunExecutionBackend {
+  local
+  aws
+}
+
+enum PipelineStageName {
+  discovery
+  lead
+  traffic_crux
+}
+
+enum PipelineStageState {
+  collecting
+  ready
+  aggregating
+  completed
+  failed
+  cancelled
+}
+
+enum PipelineTaskState {
+  pending
+  processing
+  succeeded
+  skipped
+  failed
+  cancelled
+}
+
 enum ShopLeadProfileState {
   processing
   completed
@@ -115,6 +144,8 @@ model Run {
   pipelineVersion        Int?
   scoringVersion         Int?
   resultFingerprint      String?
+  executionBackend       RunExecutionBackend @default(local)
+  pipelineGeneration     Int                 @default(1)
   trafficEnrichmentConfig Json?
   trafficEnrichmentSummary Json?
   queryRevision          Int             @default(0)
@@ -136,11 +167,74 @@ model Run {
   processingLeadProfiles ShopLeadProfile[] @relation("ShopLeadProfileProcessingRun")
   processingShopWork     ShopWork[] @relation("ShopWorkProcessingRun")
   userShopDiscoveries    UserShopDiscovery[]
+  pipelineStages         PipelineStage[]
 
   @@index([state])
   @@index([state, leaseExpiresAt])
   @@index([createdAt])
   @@index([ownerId, createdAt])
+}
+
+model PipelineStage {
+  id                        String             @id
+  runId                     String
+  run                       Run                @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stage                     PipelineStageName
+  generation                Int
+  manifestS3Key             String
+  manifestFingerprint       String
+  expectedCount             Int
+  terminalCount             Int                @default(0)
+  succeededCount            Int                @default(0)
+  skippedCount              Int                @default(0)
+  failedCount               Int                @default(0)
+  cancelledCount            Int                @default(0)
+  state                     PipelineStageState @default(collecting)
+  version                   Int                @default(1)
+  aggregationOwner          String?
+  aggregationLeaseToken     String?            @unique
+  aggregationLeaseAcquiredAt DateTime?
+  aggregationLeaseExpiresAt DateTime?
+  aggregationAttempt        Int                @default(0)
+  safeErrorCode             String?
+  safeErrorMessage          String?
+  createdAt                 DateTime            @default(now())
+  updatedAt                 DateTime            @updatedAt
+  completedAt               DateTime?
+  tasks                     PipelineTask[]
+
+  @@unique([runId, stage, generation])
+  @@index([runId, generation])
+  @@index([state, aggregationLeaseExpiresAt])
+}
+
+model PipelineTask {
+  id                  String            @id
+  stageId             String
+  stage               PipelineStage     @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  itemKey             String
+  inputFingerprint    String
+  state               PipelineTaskState @default(pending)
+  attemptCount        Int               @default(0)
+  dispatchCount       Int               @default(0)
+  lastDispatchedAt    DateTime?
+  leaseOwner          String?
+  leaseToken          String?           @unique
+  leaseAcquiredAt     DateTime?
+  leaseExpiresAt      DateTime?
+  leaseAttempt        Int               @default(0)
+  artifactS3Key       String?
+  artifactFingerprint String?
+  terminalAt          DateTime?
+  safeErrorCode       String?
+  safeErrorMessage    String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  @@unique([stageId, itemKey])
+  @@index([stageId, state])
+  @@index([state, leaseExpiresAt])
+  @@index([stageId, lastDispatchedAt])
 }
 
 model RunQuery {
@@ -400,6 +494,7 @@ model DataForSeoRequestLedger {
   safeErrorMessage   String?
   reservationCostUsd Decimal?               @db.Decimal(18, 8)
   providerCostUsd    Decimal?               @db.Decimal(18, 8)
+  resultFingerprint  String?
   leaseOwner         String?
   leaseToken         String?
   leaseAttempt       Int?
