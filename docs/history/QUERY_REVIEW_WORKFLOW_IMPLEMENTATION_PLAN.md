@@ -228,7 +228,7 @@ payload.
 
 ### 1. Split planning from discovery
 
-Refactor [pipeline.js](./src/pipeline.js) into three public operations:
+Refactor [pipeline.js](../../src/pipeline.js) into three public operations:
 
 ```js
 planQueriesForReview(config, status, { categories })

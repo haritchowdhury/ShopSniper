@@ -225,9 +225,10 @@ PostgreSQL through Prisma ORM. The frontend is responsible for accepting manual
 category entries, displaying the JSON results, and generating downloadable CSV
 files.
 
-This specification supersedes both the CSV-download and DynamoDB/S3 result-storage
-portions of `AWS_ASYNC_DEPLOYMENT_DIRECTION.md`. The overall asynchronous job
-architecture in that document remains valid.
+This specification owns the browser-facing JSON and CSV-export contract. The
+current `AWS_ASYNC_DEPLOYMENT_DIRECTION.md` owns asynchronous execution. S3 may
+hold private intermediate worker artifacts, but Neon remains the durable
+application/result authority exposed through this JSON contract.
 
 ## Product decision
 
@@ -258,9 +259,10 @@ The frontend will use:
 - Vercel for hosting and deployment.
 - Client-side CSV generation after JSON results are fetched.
 
-The long-running scraper must not execute inside a Vercel Function. Vercel will
-host the UI and short-lived Next.js Route Handlers only. The scraper remains on
-the separate backend worker described in `AWS_ASYNC_DEPLOYMENT_DIRECTION.md`.
+The scraping pipeline must not execute inside a Vercel Function. Vercel hosts the
+UI and short-lived Next.js Route Handlers only. After confirmed query review, the
+backend dispatches the separate Lambda–SQS–S3 execution pipeline coordinated by
+Neon as described in `AWS_ASYNC_DEPLOYMENT_DIRECTION.md`.
 
 The required deployment boundary is:
 
@@ -275,7 +277,7 @@ Next.js application on Vercel
 Backend run API and Prisma ORM
   |
   v
-Long-running scraper worker and Neon PostgreSQL
+Lambda–SQS–S3 workers coordinated by Neon PostgreSQL
 ```
 
 No Vercel request may remain open while the scraper runs. The start request must
@@ -873,9 +875,11 @@ Required status codes:
 ## Backend data model
 
 Neon PostgreSQL is the durable source of truth for run status and completed lead
-results. Prisma ORM is the only application data-access layer. The HTTP run path
-must not use an in-memory run repository, DynamoDB, S3 result objects, or local CSV
-files as its durable store.
+results. Prisma-backed repository contracts remain the application data-access
+boundary. The HTTP run path must not use an in-memory run repository, DynamoDB,
+S3 artifacts, or local CSV files as the user-visible result authority. The AWS
+execution path may use private versioned S3 intermediate artifacts, but it must
+reconcile them through Neon before results become visible.
 
 The database must contain a `Run` record and child `Lead` records. The Prisma
 schema must model at least:

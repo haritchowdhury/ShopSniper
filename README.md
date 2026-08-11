@@ -1,319 +1,389 @@
-# Email Scraper
+# Email Scraper backend — development record
 
-A Node.js Shopify lead-generation backend that replaces the two n8n workflows.
-The JSON API accepts manually entered shop types, researches and generates
-product-oriented Shopify searches, discovers qualified stores, extracts
-evidence-backed contacts, and durably stores run status and leads in Neon
-PostgreSQL through Prisma. A legacy foreground command still supports CSV input
-and output.
+Last reconciled with the source: **11 August 2026**
 
-## Requirements
+This is the backend's maintained development record and current-state guide. It
+replaces the scattered implementation summaries that are now retained under
+`docs/` as historical evidence. When this document, an old plan, and the source
+disagree, the source and migrations are authoritative.
 
-- Node.js 20 or newer
-- A Neon PostgreSQL database
-- A Google Custom Search API key and Programmable Search Engine ID
-- An OpenAI API key for category research and candidate generation
-- Optional Browserless credentials for pages that require rendering
+The current AWS migration documents are deliberately maintained at the repository
+root and were reconciled separately from this current-code record:
 
-Install the pinned Prisma and Neon dependencies with `npm install`.
+- [`../AWS_ASYNC_DEPLOYMENT_DIRECTION.md`](../AWS_ASYNC_DEPLOYMENT_DIRECTION.md)
+- [`../PRELIMINARY_LAMBDA_SQS_S3_MIGRATION_PLAN.md`](../PRELIMINARY_LAMBDA_SQS_S3_MIGRATION_PLAN.md)
+- [`../TARGET_LAMBDA_SQS_S3_EXECUTION_FLOW.md`](../TARGET_LAMBDA_SQS_S3_EXECUTION_FLOW.md)
+- [`../AWS_BEGINNER_SETUP_GUIDE.md`](../AWS_BEGINNER_SETUP_GUIDE.md)
+- [`../PARENT_AGENT_CHECKLIST_INSTRUCTIONS.md`](../PARENT_AGENT_CHECKLIST_INSTRUCTIONS.md)
 
-## Configure
+## Current state
 
-Copy the example configuration:
+The backend is a Node.js 20+ ESM service that discovers Shopify stores, extracts
+and validates outreach evidence, enriches qualified leads, persists durable run
+state in PostgreSQL through Prisma, and serves a private JSON API to the Next.js
+backend-for-frontend (BFF).
+
+| Area | Implemented state |
+|---|---|
+| Runtime | Node.js HTTP server; no Express or framework dependency |
+| Database | PostgreSQL/Neon through Prisma 6.19.3 and the Neon serverless adapter |
+| Input | JSON category submissions for the HTTP flow; CSV remains supported by `run:once` |
+| Query planning | OpenAI Responses API research/generation, deterministic validation, Google Custom Search probes, exactly 10 accepted queries per category by default |
+| Human review | Durable editable query revisions; scraping starts only after confirmation |
+| Discovery | Google results, Shopify identity resolution, bounded page/sitemap discovery, Browserless fallback when enabled |
+| Evidence | Store-associated email, phone, contact-page, social, category-fit, identity, and discovery provenance |
+| Persistence | Runs, queries, shops, reusable profiles, run leads, user-shop grants, diagnostics, and traffic material |
+| Worker | In-process queue drain with durable database leases, heartbeats, recovery, and stale-worker fencing |
+| Traffic | Optional DataForSEO and CrUX REST/BigQuery adapters; both disabled by default |
+| Scoring | Pipeline v2 with lead scoring v3 for newly finalized progressive runs; missing worldwide DataForSEO traffic produces an explicit unscored v3 state |
+| Ownership | Every user-facing read is owner-scoped; the BFF supplies trusted user identity behind a shared bearer token |
+| Master leads | User-scoped, globally deduplicated current shop/profile/traffic view plus immutable historical run results |
+
+## Repository map
+
+```text
+email_scraper/
+├── prisma/
+│   ├── schema.prisma             PostgreSQL model
+│   └── migrations/               ten forward migrations through user master leads
+├── scripts/
+│   ├── check-secrets.js          repository-wide redacted credential scan
+│   └── traffic-discovery-probe.js
+├── src/
+│   ├── server.js                 private API, admission, queue drain, leases, recovery
+│   ├── pipeline.js               planning, validation, store and lead discovery
+│   ├── prisma-run-repository.js  durable lifecycle and query operations
+│   ├── api-serializer.js         public JSON contracts and traffic aggregation
+│   ├── lead-scorer.js            v2 compatibility and v3 scoring mathematics
+│   ├── lead-state.js             cross-field score-state invariants
+│   ├── *-adapter.js              strict external-provider boundaries
+│   └── run-once.js               legacy foreground CSV workflow
+├── test/                         offline and guarded PostgreSQL integration tests
+├── review-evidence/              implementation-window handoffs and reviews
+└── docs/                         consolidated historical/reference material
+```
+
+## Development history
+
+### 30 July — Node pipeline and dynamic query generation
+
+- Replaced the original workflow concept with a modular Node.js pipeline.
+- Added category normalization, AI-assisted category research, candidate query
+  generation, deterministic validation, Google CSE probing, ranking, repair, and
+  query-audit CSV output.
+- Added Shopify domain resolution, storefront validation, bounded page discovery,
+  contact extraction, AI normalization, lead scoring, and CSV output.
+- Preserved `run:once` as the explicit foreground/CSV command.
+
+### 31 July — durable API, ownership, and pipeline-quality v2
+
+- Added Prisma and the initial Neon-backed run/result schema.
+- Added asynchronous run creation, polling, paginated results, sorting, filtering,
+  durable fixture seeding, and safe error envelopes.
+- Added anonymous run intents, authenticated ownership, owned run history, and a
+  serial queue that accepts multiple queued runs.
+- Implemented pipeline v2 evidence: stronger store identity, candidate-specific
+  category intent, qualification, score v2, query audits, and diagnostics.
+- Added owner-scoped result, audit, and diagnostic access.
+
+### 1 August — corrective reliability and query review
+
+- Hardened contact-route validation, storefront truth, Browserless attribution,
+  bounded streamed response handling, category provenance, and safe presentation
+  contracts.
+- Made terminal persistence idempotent and lease-fenced; added multi-instance
+  worker leases, heartbeat renewal, and expired-work recovery.
+- Split the HTTP lifecycle into query planning, durable query review, validation,
+  and scraping. Revision conflicts fail safely and the exact confirmed query set
+  is consumed.
+- Kept the one-shot CSV path operational and separate from the HTTP review flow.
+- Closed the later G-R7 through G-R11 quality sequence: store-associated contact
+  evidence, broad-store-resistant specialist classification, exact category-intent
+  provenance, one backend/frontend score-state contract, and repository-wide
+  redacted secret/workflow scanning.
+
+### 2 August — strict query quality and optional traffic enrichment
+
+- Enforced exactly `GENERATED_QUERY_COUNT` accepted queries per category or a
+  durable, auditable shortfall; partial plans never reach review.
+- Added `google-probe-v2`, adaptive repair rounds, provider-call ceilings, and
+  product-family diversity.
+- Added strict normalized DataForSEO traffic and CrUX REST/BigQuery adapters,
+  caches, cost reservations, paid-request ledgers, recovery, public serialization,
+  and CSV attribution.
+- Kept both traffic providers disabled by default and production enablement gated
+  by credentials, permission, quota, cost, and attribution checks.
+
+### 3 August — progressive and true-bulk persistence
+
+- Added global `Shop`, reusable `ShopLeadProfile`, `RunStore`, and `ShopWork`
+  records so completed work can be reused safely across runs.
+- Established durable checkpoints: stores before contact discovery, run leads
+  before traffic, and traffic source publication before final completion.
+- Converted store, run-lead, traffic-claim, cache/work-success, and source
+  publication writes to bounded set-based database operations.
+- Preserved sequential lead/contact discovery while batching the durable lead
+  barrier.
+- Added cache-first concurrency, winner-only provider calls, paid ambiguity
+  protection, and resumable progressive stages.
+
+### 4 August — user master leads and score v3
+
+- Added `UserShop` and `UserShopDiscovery`, granting a user access only when one
+  of their owned runs discovers the shop.
+- Added current user master-lead list and traffic-overview endpoints while
+  preserving immutable historical `Lead` snapshots.
+- Added discovery-query filtering shared by results, traffic overviews, pagination,
+  counts, and exports.
+- Added lead scoring v3 with a locked 55-point core/contact allocation, 40-point
+  measured-traffic component, and 5-point CrUX bonus.
+- Made scoring publication atomic with traffic finalization. Qualified leads that
+  lack valid measured worldwide DataForSEO traffic remain qualified but publish
+  no v3 number.
+
+### 11 August — repository state
+
+- The latest backend commit adds only supplied image assets; it does not change
+  backend behavior.
+- All ten migrations are present and the configured application database reports
+  the schema up to date.
+
+## Current request lifecycle
+
+```text
+category submission
+  -> authenticated run, or one-hour anonymous intent
+  -> durable queued run
+  -> leased query-planning worker
+  -> OpenAI generation + deterministic validation + Google probes
+  -> exactly configured query count, or terminal safe shortfall
+  -> durable awaiting_query_confirmation revision
+  -> user edits/replaces the complete revision
+  -> confirmation and revalidation
+  -> bulk store checkpoint
+  -> sequential reusable-profile/contact discovery
+  -> bulk run-lead checkpoint; base results become available
+  -> optional cache-first DataForSEO and CrUX work
+  -> atomic score-v3 and traffic finalization
+  -> completed owned run + current user master grants
+```
+
+Important boundaries:
+
+- Store scraping does not begin before query confirmation.
+- A planning shortfall never publishes a partial editable query set.
+- A successfully committed store or lead checkpoint survives later failure.
+- `resultsAvailable` can be true while optional traffic ends in a safe failed or
+  unavailable state.
+- A stale worker cannot heartbeat, publish, or overwrite a newer lease owner.
+- Historical run leads are snapshots. `/api/leads` uses current reusable profile
+  and current shop traffic material.
+- One process drains runs serially. Multiple processes are coordinated by database
+  claim/lease fencing; the current runtime is not yet decomposed into cloud workers.
+
+## Private API contract
+
+Every backend route requires `Authorization: Bearer <BACKEND_API_TOKEN>`. Owned
+routes also require the trusted `X-User-Id` injected by the server-side BFF. The
+browser must never call this service directly or supply its own user identity.
+
+| Method | Route | Current behavior |
+|---|---|---|
+| `GET` | `/api/health` | Database-backed health check |
+| `POST` | `/api/run-intents` | Validate categories and create an unowned one-hour intent |
+| `POST` | `/api/run-intents/{intentId}/claim` | Atomically claim/replay an intent for the authenticated user |
+| `POST` | `/api/runs` | Create an owned queued run and return `202` |
+| `GET` | `/api/runs` | Paginated owned run history |
+| `GET` | `/api/runs/{runId}` | Owned status, phase, stage, progress, and safe errors |
+| `GET` | `/api/runs/{runId}/queries` | Current durable editable query revision |
+| `PUT` | `/api/runs/{runId}/queries` | Replace the complete revision using optimistic revision control |
+| `POST` | `/api/runs/{runId}/start` | Confirm a revision and queue validated scraping |
+| `GET` | `/api/runs/{runId}/results` | Owner-scoped status/search/query filtered, sorted, paginated results |
+| `GET` | `/api/runs/{runId}/traffic-overview` | Aggregated run traffic without exposing unrelated lead rows |
+| `GET` | `/api/runs/{runId}/query-audits` | Paginated durable query evidence after results are available |
+| `GET` | `/api/runs/{runId}/diagnostics` | Paginated safe run diagnostics after results are available |
+| `GET` | `/api/leads` | Current, deduplicated, user-owned master lead page |
+| `GET` | `/api/leads/traffic-overview` | Current aggregate traffic for the user's accessible shops |
+
+The detailed historical JSON contract is retained at
+[`docs/reference/BACKEND_FRONTEND_JSON_HANDOFF_SPEC.md`](./docs/reference/BACKEND_FRONTEND_JSON_HANDOFF_SPEC.md),
+but this table and the current serializers/routes take precedence where that old
+specification describes an earlier state.
+
+## Persistence model
+
+The ten forward migrations lead to these active groups:
+
+- **Run lifecycle:** `Run`, `RunQuery`, `RunIntent`, `QueryAudit`, and
+  `RunDiagnostic`.
+- **Historical results:** `Lead`, including run-specific evidence, versions,
+  qualification, score state, discovery occurrences, and traffic snapshots.
+- **Reusable shop state:** `Shop`, `RunStore`, `ShopLeadProfile`, and `ShopWork`.
+- **Current user access:** `UserShop` and `UserShopDiscovery`. `UserShop` is the
+  authorization join; discovery membership is idempotent on `(userShopId, runId)`.
+- **Traffic:** `TrafficEnrichmentCache`, `LeadTrafficEnrichment`, and
+  `DataForSeoRequestLedger`.
+
+`Shop.stableKey` is the global deduplication boundary. A global shop/profile does
+not by itself grant visibility: all master reads begin from the authenticated
+user's `UserShop` rows.
+
+## Query, evidence, and scoring contracts
+
+### Query planning
+
+- Default target: 10 accepted queries per category.
+- Default candidate count: 30; maximum four repair rounds and 80 unique Google
+  probes per category.
+- The v2 gate requires minimum result count, unique hosts, relevant results,
+  relevance ratio, and intrinsic score.
+- Provider probe data may be shared for identical normalized query text, but each
+  exact category/qualifier intent retains its own validation and provenance.
+
+### Evidence and qualification
+
+- Contact evidence must be associated with the verified store and an accepted
+  source context. Arbitrary page text, order/SKU numbers, share links, and
+  vendor/theme identities are rejected.
+- Store fit distinguishes mismatch, category seller, and specialist. Brand intent
+  requires specialist-quality evidence; broad marketplaces are not promoted by
+  incidental category phrases.
+- Identity retains observed, resolved, canonical, and MyShopify provenance without
+  allowing cross-domain canonicals to widen the fetch boundary.
+- Rejected and failed outcomes remain durable diagnostic rows and are never given
+  a current v2/v3 score.
+
+### Lead score v3
+
+| Component | Maximum |
+|---|---:|
+| Identity confidence | 11 |
+| Shopify validation | 14 |
+| Category fit | 16 |
+| Contact evidence | 14 |
+| Measured worldwide traffic | 40 |
+| CrUX LCP/INP/CLS bonus | 5 |
+
+The traffic transform is `round(8 * log10(traffic + 1))`, capped at 40 and
+explicitly capped at 40 from 100,000 upward. CrUX is bonus-only. The score is a
+deterministic evidence rank, not a probability.
+
+Supported public score states are:
+
+- historical unversioned `legacy_v1`;
+- scored or `not_scored_v2` for pipeline/scoring pair `2/2`;
+- `traffic_evidence_rank_v3`, `insufficient_traffic_v3`, or `not_scored_v3` for
+  pair `2/3`.
+
+Backend persistence, serializers, shared fixtures, and frontend parsing enforce
+the same cross-field state machine.
+
+## Configuration and local operation
 
 ```bash
+cd email_scraper
+npm install
 cp .env.example .env
-```
-
-At minimum, set:
-
-```env
-DATABASE_URL=your_pooled_neon_runtime_url
-GOOGLE_API_KEY=your_new_key
-GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id
-OPENAI_API_KEY=your_openai_key
-BACKEND_API_TOKEN=one-long-random-service-token
-```
-
-`prisma.config.ts` uses `DATABASE_URL` for Prisma CLI commands as well as
-application runtime. A separate `DIRECT_URL` is optional and should be added only
-if a future migration requires a non-pooled connection.
-
-Apply the reviewed Prisma migration to a non-production branch before starting
-the API:
-
-```bash
-npm run db:migrate:deploy
 npm run db:generate
-```
-
-The Google and Browserless values found in the old n8n exports must be treated as
-exposed and rotated. Do not copy those old values into `.env`.
-
-Browserless is used only when a normal HTML request fails or returns incomplete
-content:
-
-```env
-BROWSERLESS_TOKEN=your_new_token
-BROWSERLESS_FALLBACK_TOKEN=an_optional_second_token
-```
-
-The query planner uses the Responses API with a bounded web-search operation and a
-strict JSON schema. The lead extractor can also use a separate, smaller model to
-normalize only evidence that has already been discovered:
-
-```env
-OPENAI_API_KEY=your_key
-QUERY_GENERATION_MODEL=gpt-5.6-luna
-OPENAI_MODEL=gpt-4.1-mini
-ENABLE_AI_NORMALIZATION=false
-```
-
-All categories use the same AI-researched product vocabulary and validation path.
-There are no category-specific runtime catalogs. If initial category research fails,
-the planner reports that failure rather than substituting canned queries for selected
-example categories.
-
-Lead normalization is disabled by default so adding the query-planning key does not
-silently add one model call per store. Set `ENABLE_AI_NORMALIZATION=true` only when
-that additional cost is intentional.
-
-The service binds to `127.0.0.1` by default. Set `HOST` deliberately if another
-machine must reach it. `BACKEND_API_TOKEN` is mandatory when `NODE_ENV=production`;
-keep the service behind a private network and let only the Next.js BFF send this
-token.
-
-## HTTP input
-
-The API accepts only manually entered categories in JSON:
-
-```json
-{"shopTypes":["clothing","baby food","kitchen utensils"]}
-```
-
-Aliases such as `babyfood` and `utensils` are normalized, duplicate normalized
-categories are collapsed, and blank, malformed, or instruction-like values are
-rejected atomically.
-
-The foreground `npm run run:once` command retains the one-column CSV input and
-CSV outputs. Its paths can be changed only through trusted server environment:
-
-```env
-INPUT_CSV=./data/categories.csv
-OUTPUT_CSV=./data/leads.csv
-GENERATED_QUERIES_CSV=./data/generated-queries.csv
-```
-
-The API does not accept arbitrary filesystem paths.
-
-## Run
-
-Start the server:
-
-```bash
+npm run db:migrate:deploy
 npm start
 ```
 
-For a single foreground batch without starting the HTTP server:
+Required to start a real run:
 
-```bash
-npm run run:once
-```
+- `DATABASE_URL`
+- `BACKEND_API_TOKEN` in production
+- `GOOGLE_API_KEY` and `GOOGLE_SEARCH_ENGINE_ID`
+- `OPENAI_API_KEY`
 
-This legacy foreground command supports only unenriched CSV output. Keep both
-`ENABLE_DATAFORSEO_ENRICHMENT` and `ENABLE_CRUX_ENRICHMENT` set to `false` when
-using it. If either flag is enabled, the command stops before the pipeline or
-output writer runs and directs the operator to the durable server workflow.
+Optional Browserless, DataForSEO, and CrUX settings are documented in
+`.env.example`. DataForSEO and CrUX are independently snapshotted per run and
+disabled by default. Do not enable paid/customer-visible traffic until the
+external permission, pricing, quota, attribution, and credential prerequisites
+in the retained traffic documents have been completed.
 
-In another terminal:
-
-```bash
-curl http://127.0.0.1:3000/api/health
-curl -X POST http://127.0.0.1:3000/api/runs \
-  -H 'Authorization: Bearer your-service-token' \
-  -H 'X-User-Id: user-id-derived-by-the-frontend' \
-  -H 'Content-Type: application/json' \
-  -d '{"shopTypes":["clothing","eyewear"]}'
-curl -H 'Authorization: Bearer your-service-token' \
-  -H 'X-User-Id: user-id-derived-by-the-frontend' \
-  http://127.0.0.1:3000/api/runs/{runId}
-```
-
-`POST /api/runs` returns `202 Accepted` and a durable `runId`, then performs only
-query planning. The selected queries and bounded probe evidence are stored as
-editable PostgreSQL rows. When status reaches
-`awaiting_query_confirmation`, the frontend reads and replaces revisions through
-`GET/PUT /api/runs/{runId}/queries`, then locks the saved revision with
-`POST /api/runs/{runId}/start`. Store discovery and lead extraction begin only
-after that final sanity check passes.
-
-Multiple owned runs may wait in PostgreSQL. Each server process drains work
-sequentially, while database lease and resource claims safely support more than
-one worker process. A run waiting for query review holds no worker lease.
-Status, query, result, and list reads require the same trusted `X-User-Id`;
-foreign and missing run IDs both return `404`. Editable drafts and completed
-result rows have no application expiry.
-
-The HTTP service is a long-running Node worker. Each database claim carries an
-opaque owner/token lease, and progress, heartbeat, failure, and completion writes
-must present that active unexpired lease. Another instance cannot fail or publish
-the run. Workers renew leases during long provider calls. Expired work at a
-progressive checkpoint is requeued and resumes from durable stores or leads;
-legacy work without a checkpoint is marked failed once with a safe interruption
-error. This does not make the complete scraper suitable for a single AWS Lambda
-invocation.
-
-Store and lead publication is progressive. `Shop` identity and completed contact
-profiles are shared globally, while `RunStore` and `Lead` provenance remains
-run-specific. Stores commit before contact discovery, each lead commits before
-traffic starts, and a traffic failure cannot delete or hide base leads. Existing
-completed profiles and traffic cache material are reused without an expiry check
-in this lean version; automated freshness/cron refresh is intentionally deferred.
-
-The private backend contract also provides:
-
-- `POST /api/run-intents` to validate and store an anonymous search for one hour;
-- `POST /api/run-intents/{intentId}/claim` to atomically and idempotently attach
-  that search to the authenticated user and create its queued run;
-- `GET /api/runs?page=1&pageSize=20` to list only the requesting user's runs; and
-- owner-filtered `GET /api/runs/{runId}`, `/queries`, `/results`, `/query-audits`, and
-  `/diagnostics` endpoints.
-
-The browser must never send or choose `X-User-Id`. Only the private Next.js BFF
-derives it from a verified Neon Auth session and forwards it with the service
-token.
-
-If required Google or OpenAI configuration is missing, `POST /run` returns `503`
-and names the missing variables.
-
-## Processing behavior
-
-For each shop type, the application:
-
-1. Performs one bounded, web-assisted research and candidate-generation call.
-2. Validates syntax, product intent, category fit, and duplicates in Node.js.
-3. Probes candidates against the first Google Custom Search result page.
-4. Scores meaningful query coverage and distinct usable Shopify hosts.
-5. Repairs a weak set up to two times and selects approximately ten diverse queries.
-6. Reuses the selected probes, so Google does not fetch those searches twice.
-7. Rejects assets, resolves verified identities, and merges all store occurrences
-   without losing category/query provenance.
-8. Validates active Shopify evidence and category relevance.
-9. Discovers contact pages and uses Browserless only as a fetch fallback.
-10. Extracts deterministic contact evidence and optionally normalizes that evidence.
-11. Applies mandatory store/contactability gates, calculates explainable score v2
-    only for qualified stores, and writes one consolidated record per store.
-
-Individual search results or stores may fail without ending the batch. Qualified,
-rejected, and store-processing failed outcomes remain visible in the lead output.
-Query and unresolved-occurrence failures are separate diagnostics and do not
-inflate lead counts.
-
-## Output and retention
-
-The HTTP path stores leads, query audits, diagnostics, versions, summary, and the
-publication flag in one PostgreSQL transaction. It returns backward-compatible
-snake_case lead fields plus versioned evidence and score breakdowns. Historical
-unversioned rows remain readable as legacy score-v1 records.
-
-With both traffic flags disabled, `npm run run:once` still writes
-`data/generated-queries.csv` and `data/leads.csv`. It does not create traffic
-enrichment and is not permitted to call traffic providers, caches, or the paid
-request ledger. Traffic-enriched runs use the durable HTTP server workflow. The
-frontend builds customer-downloadable CSV from those runs' paginated JSON
-results.
-
-### Optional traffic enrichment
-
-Traffic enrichment is disabled by default and is controlled by the independent
-`ENABLE_DATAFORSEO_ENRICHMENT` and `ENABLE_CRUX_ENRICHMENT` server flags. Their
-values, provider contracts, cache policy, scopes, and cost/byte caps are
-snapshotted when a run is created. Clients cannot choose or change them.
-
-When both sources were disabled, or when reading a historical run without a
-snapshot, result leads retain the legacy shape and omit `traffic_enrichment`.
-An enabled source has an explicit state, but source lists and attribution are
-emitted only when accepted metrics are present. Missing coverage and provider
-failure are not numeric zero. DataForSEO values are labelled estimated Google
-search traffic and must not be presented as total site visits. CrUX popularity
-is a coarse navigation rank, and its device fractions describe observed form
-factors rather than geography.
-
-The versioned `traffic-enrichment-public-v1` object groups current CrUX origin
-metrics and monthly popularity under one `crux` source while keeping their
-states separate. The durable result API contains only normalized metrics. The
-backend CSV formatter can also flatten an already-serialized and validated
-public traffic object for deterministic export, but that formatter capability
-does not make `npm run run:once` an enrichment workflow. Cache entries,
-paid-request ledger details, provider task IDs, raw responses, costs, and
-internal errors are never public lead data. CSV source columns are selected
-dynamically, so a disabled provider contributes no columns.
-
-CrUX-derived API and CSV material includes links to the Chrome UX Report source
-and its CC BY 4.0 license plus a transformation notice. Final attribution
-wording still requires legal review before commercial release. Customer-facing
-DataForSEO display/export must remain operationally disabled until written
-permission for the intended use is recorded.
-
-Before production enablement, also verify current provider pricing and quotas,
-the DataForSEO per-run cost cap, the BigQuery maximum-bytes cap, and an approved
-short-lived AWS-to-Google credential mechanism such as Workload Identity
-Federation. Do not deploy Application Default Credential files or long-lived
-Google service-account JSON keys.
-
-See `FRONTEND_BACKEND_QUICKSTART.md` for proxy routes, TypeScript shapes,
-polling, filters, and fixture seeding.
-
-## Query-planning controls
-
-The defaults favor quality while bounding spend:
-
-```env
-GENERATED_QUERY_COUNT=10
-QUERY_CANDIDATE_COUNT=30
-QUERY_REPAIR_ROUNDS=4
-MAX_QUERY_PROBES_PER_CATEGORY=80
-QUERY_PROBE_CONCURRENCY=3
-MIN_QUERY_RELEVANT_RESULTS=3
-MIN_QUERY_RELEVANCE_RATIO=0.50
-MIN_QUERY_BASE_SCORE=60
-MIN_QUERY_RESULTS=5
-MIN_QUERY_UNIQUE_HOSTS=4
-ENABLE_WEB_RESEARCH=true
-MAX_RESEARCH_SOURCES=8
-RESEARCH_GEOGRAPHY=global English-language market
-```
-
-Query planning now has a hard completion contract: each category produces exactly
-`GENERATED_QUERY_COUNT` passing queries or the run fails with the auditable
-`INSUFFICIENT_HIGH_QUALITY_QUERIES` code. It never publishes a partial query list.
-One category normally uses one OpenAI research call and probes candidates in
-adaptive batches. A weak set may add up to four targeted repair calls, but never
-more than `MAX_QUERY_PROBES_PER_CATEGORY` unique Google requests.
-Probe concurrency limits planning latency; `STORE_CONCURRENCY` controls parallel
-stores and `PAGE_FETCH_CONCURRENCY` (default `2`) bounds evidence-page work within
-one store. Google result-total estimates and next-page availability are recorded
-for audit only and do not drive selection.
-
-## Test
+Useful commands:
 
 ```bash
 npm test
+npm run test:integration
+npm run db:validate
 npm run check:secrets
+npm run run:once
 ```
 
-The suite covers API contract behavior, result serialization, category safety and
-aliases, strict AI request shape, fallback and
-repair behavior, candidate validation, probe scoring and caching, diversity
-selection, CSV behavior, domain resolution, sitemap variants, host restrictions,
-contact extraction, lead scoring, store deduplication, failure isolation, cached
-probe handoff, and server job control.
+`npm run test:integration` runs its database cases only when both
+`ALLOW_DATABASE_TESTS=true` and `TEST_DATABASE_URL` are present. It creates and
+drops isolated schemas; it must never target an irreplaceable database.
 
-Default tests make no Google, Browserless, OpenAI, or database calls. Database
-integration tests require both `ALLOW_DATABASE_TESTS=true` and a dedicated
-`TEST_DATABASE_URL`.
+## Verification snapshot — 11 August 2026
 
-Local n8n workflow exports are deliberately ignored and must not be force-added.
-The redacted secret check scans repository files but reports only a pattern class,
-path, and line number. Credential values must never be copied into test output or
-handoff evidence.
+Verified against the current source:
+
+- `npm test`: **272 tests; 265 pass, 0 fail, 7 guarded database skips**.
+- Frontend-independent backend HTTP tests pass when localhost binding is allowed.
+- Guarded PostgreSQL integration matrix: **6 of 7 pass**. Migration replay,
+  rollback, lease concurrency/fencing, atomic repository persistence, 100-store
+  bulk convergence, traffic ledger/cache recovery, and tenant isolation passed.
+- `npm run db:validate`: pass.
+- `npm run check:secrets`: pass.
+- `npx prisma migrate status`: all **10 migrations applied** on the configured
+  application database.
+- No live Google, Browserless, OpenAI, DataForSEO, or CrUX request was made during
+  this documentation verification.
+
+### Blocking defect
+
+The guarded test
+`progressive checkpoints deduplicate shops and claims while preserving leads after traffic failure`
+fails when it reaches the user-master grant added after the original progressive
+persistence work. `grantRunShopsToOwner()` issues raw SQL against unqualified
+`"Run"`, `"UserShop"`, and `"UserShopDiscovery"` names without first applying
+the repository's selected schema. Prisma model operations correctly use the
+isolated schema, but this raw query falls back to `public` and reports
+`relation "Run" does not exist`.
+
+The configured application database currently uses `public`, so this does not
+prove a live failure there. It is still a release blocker for schema-independent
+persistence and for a completely green database integration matrix. Fix it using
+the same validated schema-selection boundary already used by the bulk raw-SQL
+helpers, then rerun the entire seven-test integration command.
+
+## Quality-plan reconciliation
+
+[`docs/history/FINAL_PIPELINE_QUALITY_GAPS_REMEDIATION_PLAN.md`](./docs/history/FINAL_PIPELINE_QUALITY_GAPS_REMEDIATION_PLAN.md)
+still says G-R7 through G-R11 are ready/blocked because its execution ledger was
+never updated. That header is stale:
+
+- backend handoffs `review-evidence/G-R7_HANDOFF.md` through
+  `review-evidence/G-R9_HANDOFF.md` are complete;
+- frontend `review-evidence/G-R10_HANDOFF.md` is complete across both projects;
+- backend `review-evidence/G-R11_HANDOFF.md` is complete, with provider rotation
+  explicitly left external; and
+- the current source and regression suite contain the corresponding contracts.
+
+No independent final parent-acceptance handoff was found for the combined
+G-R7–G-R11 sequence. Preserve that distinction: implementation is present and
+tested, while the old plan's final administrative acceptance was not recorded.
+
+Credential rotation/revocation for values that existed in the local n8n exports
+also remains externally unverified. The exports are ignored/deleted and the scan
+is clean, but source hygiene cannot prove provider-side rotation.
+
+## Documentation archive
+
+The old files are retained rather than discarded:
+
+- [`docs/history/`](./docs/history/) — completed or superseded implementation
+  plans for the Node pipeline, API handoff, authentication, query review, query
+  quality, scoring v3, traffic enrichment, progressive persistence, and true bulk
+  persistence, including the stale-header final quality plan.
+- [`docs/reference/`](./docs/reference/) — the detailed backend/frontend JSON
+  handoff, quick start, and execution-checklist authoring rules.
+- [`docs/research/`](./docs/research/) — original Shopify discovery research,
+  clothing query research, pipeline audit, provider comparison, and traffic
+  contract discovery.
+- [`review-evidence/`](./review-evidence/) — per-window handoffs and independent
+  review evidence.
+Historical documents retain their original status and wording for traceability;
+they are evidence, not a second current source of truth.

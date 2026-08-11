@@ -75,7 +75,7 @@ test("scope excludes only exact local secrets/workflows and build dependencies",
     assert.equal(isExcludedRepositoryPath(excluded), true, excluded);
   }
   for (const included of [
-    "FINAL_PIPELINE_QUALITY_GAPS_REMEDIATION_PLAN.md",
+    "email_scraper/docs/history/FINAL_PIPELINE_QUALITY_GAPS_REMEDIATION_PLAN.md",
     "contracts/lead-score-state-v2.fixtures.json",
     "email_scraper/.env.example",
     "email_scraper/scripts/check-secrets.js",
