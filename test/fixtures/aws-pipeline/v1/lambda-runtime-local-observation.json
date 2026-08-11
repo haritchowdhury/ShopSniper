@@ -1,0 +1,84 @@
+{
+  "contractVersion": "lambda-runtime-local-observation-v1",
+  "capturedAt": "2026-08-11T09:47:15.243Z",
+  "runtime": {
+    "node": "v24.14.1",
+    "platform": "linux",
+    "architecture": "x64",
+    "packageEngineContract": ">=20",
+    "node24DeterministicSuite": {
+      "total": 272,
+      "passed": 265,
+      "failed": 0,
+      "skipped": 7
+    }
+  },
+  "dependencies": {
+    "direct": {
+      "@neondatabase/serverless": {
+        "version": "1.1.0",
+        "engines": {
+          "node": ">=19.0.0"
+        }
+      },
+      "@prisma/adapter-neon": {
+        "version": "6.19.3",
+        "engines": null
+      },
+      "@prisma/client": {
+        "version": "6.19.3",
+        "engines": {
+          "node": ">=18.18"
+        }
+      },
+      "dotenv": {
+        "version": "17.2.1",
+        "engines": {
+          "node": ">=12"
+        }
+      },
+      "google-auth-library": {
+        "version": "11.0.0",
+        "engines": {
+          "node": ">=22"
+        }
+      },
+      "zod": {
+        "version": "4.4.3",
+        "engines": null
+      }
+    },
+    "productionPackageDirectoryCount": 64,
+    "missingInstalledProductionPackageDirectoryCount": 0
+  },
+  "sizeInventory": {
+    "applicationBytes": 639559,
+    "installedProductionDependencyBytes": 235201730,
+    "combinedUncompressedBytes": 235841289,
+    "caveat": "This is a transitive installed-file inventory, not a tree-shaken or zipped Lambda bundle."
+  },
+  "coldImports": {
+    "pipeline": {
+      "durationMs": 112.5,
+      "rssBytes": 69390336,
+      "heapUsedBytes": 11312776
+    },
+    "trafficOrchestrator": {
+      "durationMs": 214.1,
+      "rssBytes": 85225472,
+      "heapUsedBytes": 18303544
+    },
+    "prismaRepository": {
+      "durationMs": 163.4,
+      "rssBytes": 74932224,
+      "heapUsedBytes": 15790224
+    }
+  },
+  "targetGaps": {
+    "lambdaHandlersExist": false,
+    "perHandlerTreeShakenBundlesExist": false,
+    "productionLambdaColdStartMeasured": false,
+    "productionNeonConnectivityFromLambdaMeasured": false,
+    "googleCredentialMaterialLoadingFromLambdaMeasured": false
+  }
+}

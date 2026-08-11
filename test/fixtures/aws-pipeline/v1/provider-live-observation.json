@@ -1,0 +1,158 @@
+{
+  "contractVersion": "provider-live-observation-v1",
+  "capturedAt": "2026-08-11T09:24:47.457Z",
+  "controls": {
+    "publicDomainCount": 3,
+    "dataForSeoPaidCallLimit": 3,
+    "bigQueryMaximumBytesBilled": 10000000000,
+    "productionFeatureFlagsChanged": false,
+    "productionDatabaseWritten": false
+  },
+  "dataForSeo": {
+    "scopes": {
+      "worldwide": {
+        "httpStatus": 200,
+        "responseStatusCode": 20000,
+        "responseCostUsd": 0.01236,
+        "taskStatusCode": 20000,
+        "taskCostUsd": 0.01236,
+        "taskResultCount": 1,
+        "resultRecordCount": 1
+      },
+      "united_states": {
+        "httpStatus": 200,
+        "responseStatusCode": 20000,
+        "responseCostUsd": 0.01236,
+        "taskStatusCode": 20000,
+        "taskCostUsd": 0.01236,
+        "taskResultCount": 1,
+        "resultRecordCount": 1
+      },
+      "new_zealand": {
+        "httpStatus": 200,
+        "responseStatusCode": 20000,
+        "responseCostUsd": 0.01236,
+        "taskStatusCode": 20000,
+        "taskCostUsd": 0.01236,
+        "taskResultCount": 1,
+        "resultRecordCount": 1
+      }
+    },
+    "paidCalls": 3,
+    "providerReportedCostUsd": 0.03708,
+    "observedLatestRunBulkBaseline": {
+      "domains": 52,
+      "scopesAndTasks": 10,
+      "totalCostUsd": 0.1824
+    },
+    "perDomainAmplificationEstimate": {
+      "tasksIf52DomainsTimes10Scopes": 520,
+      "taskReductionFromBulkPercent": 98.08,
+      "estimatedCostIfEveryTaskMatchedCurrentThreeTargetTaskCostUsd": 6.4272,
+      "note": "Cost estimate is directional because DataForSEO task cost varies with target count; call-count reduction is exact."
+    }
+  },
+  "cruxRest": {
+    "calls": 6,
+    "cases": {
+      "aggregate_success": {
+        "httpStatus": 200,
+        "bodyKeys": [
+          "record"
+        ],
+        "errorCode": null,
+        "hasRecord": true
+      },
+      "phone_metric_subset": {
+        "httpStatus": 200,
+        "bodyKeys": [
+          "record"
+        ],
+        "errorCode": null,
+        "hasRecord": true
+      },
+      "shopify_without_www": {
+        "httpStatus": 200,
+        "bodyKeys": [
+          "record"
+        ],
+        "errorCode": null,
+        "hasRecord": true
+      },
+      "shopify_with_www": {
+        "httpStatus": 200,
+        "bodyKeys": [
+          "record"
+        ],
+        "errorCode": null,
+        "hasRecord": true
+      },
+      "http_normalization": {
+        "httpStatus": 200,
+        "bodyKeys": [
+          "record"
+        ],
+        "errorCode": null,
+        "hasRecord": true
+      },
+      "no_coverage": {
+        "httpStatus": 404,
+        "bodyKeys": [
+          "error"
+        ],
+        "errorCode": 404,
+        "hasRecord": false
+      }
+    }
+  },
+  "cruxBigQuery": {
+    "latestDatasetMonth": "202607",
+    "dryRun": {
+      "httpStatus": 200,
+      "bytesProcessed": "85152488",
+      "jobComplete": true
+    },
+    "liveQuery": {
+      "executed": true,
+      "httpStatus": 200,
+      "bytesProcessed": "85152488",
+      "bytesBilled": "85983232",
+      "cacheHit": false,
+      "jobComplete": true,
+      "rowCount": 3,
+      "schemaFields": [
+        {
+          "name": "origin",
+          "type": "STRING"
+        },
+        {
+          "name": "dataset_month",
+          "type": "STRING"
+        },
+        {
+          "name": "popularity_rank",
+          "type": "INTEGER"
+        },
+        {
+          "name": "phone_density",
+          "type": "FLOAT"
+        },
+        {
+          "name": "desktop_density",
+          "type": "FLOAT"
+        },
+        {
+          "name": "tablet_density",
+          "type": "FLOAT"
+        }
+      ]
+    }
+  },
+  "privacy": {
+    "credentialsRetained": false,
+    "taskOrJobIdsRetained": false,
+    "rawProviderBodiesRetained": false,
+    "domainResultsRetained": false,
+    "sqlRetained": false
+  }
+}

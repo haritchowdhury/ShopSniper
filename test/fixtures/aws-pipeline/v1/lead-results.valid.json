@@ -1,0 +1,362 @@
+{
+  "contractVersion": "lead-result-fixtures-v1",
+  "success": {
+    "runId": "run_fixture_payload_discovery_0001",
+    "generation": 1,
+    "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
+    "runStoreId": "run_store_gZ1Jyq8ONnaelYw2GvPTSnwy",
+    "state": "completed",
+    "profileReusable": false,
+    "profile": {
+      "contractVersion": "shop-lead-profile-v1",
+      "storeName": "Fixture Specialist",
+      "email": "contact@fixture.invalid",
+      "emailSourceUrl": "https://fixture.example/pages/contact",
+      "phone": "+1 555 0100",
+      "phoneSourceUrl": "https://fixture.example/pages/contact",
+      "contactUrl": "https://fixture.example/pages/contact",
+      "socialProfiles": [
+        "https://instagram.com/fixture_probe"
+      ],
+      "contactabilityTier": "direct",
+      "contactEvidence": {
+        "version": "contact-evidence-v1",
+        "method": "synthetic_fixture"
+      },
+      "identityConfidence": 100,
+      "identityEvidence": {
+        "stableHostname": "fixture.myshopify.com",
+        "displayHostname": "fixture.example",
+        "observedHostnames": [
+          "fixture.example",
+          "fixture.myshopify.com"
+        ],
+        "canonical": {
+          "url": "https://fixture.example/products/item-1",
+          "hostname": "fixture.example",
+          "trusted": true,
+          "reason": "canonical_matches_observed_host"
+        },
+        "method": "observed_myshopify_host",
+        "confidence": 100,
+        "mergedOccurrenceCount": 2
+      },
+      "categoryAssessments": [
+        {
+          "intent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": [
+              "fixture product",
+              "specialist fixture"
+            ]
+          },
+          "shopifyConfidence": 100,
+          "relevanceScore": 90,
+          "storeFitState": "specialist",
+          "storeFitEvidence": {
+            "state": "specialist",
+            "reason": "synthetic_fixture"
+          },
+          "accepted": true
+        }
+      ],
+      "pageDiagnostics": {
+        "pagesExamined": 2,
+        "pageErrorTypes": [],
+        "aiErrorType": ""
+      }
+    },
+    "lead": {
+      "original_shop_type": "Fixture specialist stores",
+      "shop_type": "fixture-specialist",
+      "business_qualifier": "brand",
+      "generated_query": "site:myshopify.com/products synthetic fixture model 1",
+      "query_score": 91,
+      "query_generation_reason": "Deterministic payload-discovery fixture",
+      "search_query": "site:myshopify.com/products synthetic fixture model 1",
+      "google_rank": 1,
+      "google_result_url": "https://fixture.myshopify.com/products/item-1",
+      "myshopify_domain": "fixture.myshopify.com",
+      "final_url": "https://fixture.example/products/item-1",
+      "canonical_url": "https://fixture.example/products/item-1",
+      "resolved_domain": "fixture.example",
+      "store_name": "Fixture Specialist",
+      "email": "contact@fixture.invalid",
+      "email_source_url": "https://fixture.example/pages/contact",
+      "phone": "+1 555 0100",
+      "phone_source_url": "https://fixture.example/pages/contact",
+      "contact_url": "https://fixture.example/pages/contact",
+      "social_profiles": [
+        "https://instagram.com/fixture_probe"
+      ],
+      "additional_information": "pages_examined=2; duplicate_results=1",
+      "shopify_confidence": 100,
+      "relevance_score": 90,
+      "lead_score": 97,
+      "pipeline_version": 2,
+      "scoring_version": 2,
+      "store_fit_state": "specialist",
+      "store_fit_evidence": [
+        {
+          "intent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": [
+              "fixture product",
+              "specialist fixture"
+            ]
+          },
+          "accepted": true,
+          "state": "specialist",
+          "reason": "synthetic_fixture"
+        }
+      ],
+      "contactability_tier": "direct",
+      "contact_evidence": {
+        "version": "contact-evidence-v1",
+        "method": "synthetic_fixture"
+      },
+      "identity_confidence": 100,
+      "identity_evidence": {
+        "stableHostname": "fixture.myshopify.com",
+        "displayHostname": "fixture.example",
+        "observedHostnames": [
+          "fixture.example",
+          "fixture.myshopify.com"
+        ],
+        "canonical": {
+          "url": "https://fixture.example/products/item-1",
+          "hostname": "fixture.example",
+          "trusted": true,
+          "reason": "canonical_matches_observed_host"
+        },
+        "method": "observed_myshopify_host",
+        "confidence": 100,
+        "mergedOccurrenceCount": 2
+      },
+      "score_breakdown": {
+        "version": 2,
+        "components": {
+          "identity": 20,
+          "shopifyValidation": 25,
+          "categoryFit": 27,
+          "contactEvidence": 25
+        },
+        "total": 97,
+        "semantics": "deterministic_evidence_rank_not_probability"
+      },
+      "discovery_occurrences": [
+        {
+          "categoryIntent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": []
+          },
+          "originalShopType": "Fixture specialist stores",
+          "shopType": "fixture-specialist",
+          "businessQualifier": "brand",
+          "query": "site:myshopify.com/products synthetic fixture model 1",
+          "queryScore": 91,
+          "queryGenerationReason": "Deterministic payload-discovery fixture",
+          "querySourceUrls": [
+            "https://research.example/fixture"
+          ],
+          "categoryVocabulary": [
+            "fixture product",
+            "specialist fixture"
+          ],
+          "rank": 1,
+          "resultUrl": "https://fixture.myshopify.com/products/item-1",
+          "finalUrl": "https://fixture.example/products/item-1",
+          "resolvedDomain": "fixture.example",
+          "myshopifyDomain": "fixture.myshopify.com"
+        },
+        {
+          "categoryIntent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": []
+          },
+          "originalShopType": "Fixture specialist stores",
+          "shopType": "fixture-specialist",
+          "businessQualifier": "brand",
+          "query": "site:myshopify.com/products synthetic fixture model 2",
+          "queryScore": 88,
+          "queryGenerationReason": "Deterministic payload-discovery fixture",
+          "querySourceUrls": [
+            "https://research.example/fixture"
+          ],
+          "categoryVocabulary": [
+            "fixture product",
+            "specialist fixture"
+          ],
+          "rank": 2,
+          "resultUrl": "https://fixture.myshopify.com/products/item-2",
+          "finalUrl": "https://fixture.example/products/item-2",
+          "resolvedDomain": "fixture.example",
+          "myshopifyDomain": "fixture.myshopify.com"
+        }
+      ],
+      "matched_categories": [
+        {
+          "originalShopType": "Fixture specialist stores",
+          "shopType": "fixture-specialist",
+          "businessQualifier": "brand",
+          "categoryVocabulary": [
+            "fixture product",
+            "specialist fixture"
+          ]
+        }
+      ],
+      "status": "qualified",
+      "rejection_reason": "",
+      "error": ""
+    },
+    "pageDiagnostics": {
+      "selectedPageLimit": 5,
+      "selectedPages": [
+        {
+          "rank": 1,
+          "purpose": "storefront",
+          "disposition": "ordinary"
+        },
+        {
+          "rank": 2,
+          "purpose": "contact",
+          "disposition": "rendered"
+        }
+      ],
+      "earlyStopReason": "sufficient_contact_evidence",
+      "browserlessSessionCeilingMs": 45000
+    }
+  },
+  "failure": {
+    "runId": "run_fixture_payload_discovery_0001",
+    "generation": 1,
+    "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
+    "runStoreId": "run_store_gZ1Jyq8ONnaelYw2GvPTSnwy",
+    "state": "failed",
+    "profileReusable": false,
+    "lead": {
+      "original_shop_type": "Fixture specialist stores",
+      "shop_type": "fixture-specialist",
+      "business_qualifier": "brand",
+      "generated_query": "site:myshopify.com/products synthetic fixture model 1",
+      "query_score": 91,
+      "query_generation_reason": "Deterministic payload-discovery fixture",
+      "search_query": "site:myshopify.com/products synthetic fixture model 1",
+      "google_rank": 1,
+      "google_result_url": "https://fixture.myshopify.com/products/item-1",
+      "myshopify_domain": "fixture.myshopify.com",
+      "final_url": "https://fixture.example/products/item-1",
+      "canonical_url": "https://fixture.example/products/item-1",
+      "resolved_domain": "fixture.example",
+      "store_name": "",
+      "email": "",
+      "email_source_url": "",
+      "phone": "",
+      "phone_source_url": "",
+      "contact_url": "",
+      "social_profiles": [],
+      "additional_information": "",
+      "shopify_confidence": "",
+      "relevance_score": "",
+      "lead_score": "",
+      "pipeline_version": 2,
+      "scoring_version": 2,
+      "store_fit_state": "",
+      "store_fit_evidence": null,
+      "contactability_tier": "",
+      "contact_evidence": null,
+      "identity_confidence": 100,
+      "identity_evidence": {
+        "stableHostname": "fixture.myshopify.com",
+        "displayHostname": "fixture.example",
+        "observedHostnames": [
+          "fixture.example",
+          "fixture.myshopify.com"
+        ],
+        "canonical": {
+          "url": "https://fixture.example/products/item-1",
+          "hostname": "fixture.example",
+          "trusted": true,
+          "reason": "canonical_matches_observed_host"
+        },
+        "method": "observed_myshopify_host",
+        "confidence": 100,
+        "mergedOccurrenceCount": 2
+      },
+      "score_breakdown": null,
+      "discovery_occurrences": [
+        {
+          "categoryIntent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": []
+          },
+          "originalShopType": "Fixture specialist stores",
+          "shopType": "fixture-specialist",
+          "businessQualifier": "brand",
+          "query": "site:myshopify.com/products synthetic fixture model 1",
+          "queryScore": 91,
+          "queryGenerationReason": "Deterministic payload-discovery fixture",
+          "querySourceUrls": [
+            "https://research.example/fixture"
+          ],
+          "categoryVocabulary": [
+            "fixture product",
+            "specialist fixture"
+          ],
+          "rank": 1,
+          "resultUrl": "https://fixture.myshopify.com/products/item-1",
+          "finalUrl": "https://fixture.example/products/item-1",
+          "resolvedDomain": "fixture.example",
+          "myshopifyDomain": "fixture.myshopify.com"
+        },
+        {
+          "categoryIntent": {
+            "originalShopType": "Fixture specialist stores",
+            "shopType": "fixture-specialist",
+            "businessQualifier": "brand",
+            "categoryVocabulary": []
+          },
+          "originalShopType": "Fixture specialist stores",
+          "shopType": "fixture-specialist",
+          "businessQualifier": "brand",
+          "query": "site:myshopify.com/products synthetic fixture model 2",
+          "queryScore": 88,
+          "queryGenerationReason": "Deterministic payload-discovery fixture",
+          "querySourceUrls": [
+            "https://research.example/fixture"
+          ],
+          "categoryVocabulary": [
+            "fixture product",
+            "specialist fixture"
+          ],
+          "rank": 2,
+          "resultUrl": "https://fixture.myshopify.com/products/item-2",
+          "finalUrl": "https://fixture.example/products/item-2",
+          "resolvedDomain": "fixture.example",
+          "myshopifyDomain": "fixture.myshopify.com"
+        }
+      ],
+      "matched_categories": [],
+      "status": "failed",
+      "rejection_reason": "processing_failed",
+      "error": "Store processing failed (TypeError)"
+    },
+    "diagnostic": {
+      "scope": "store",
+      "code": "lead_discovery_failed",
+      "details": {
+        "errorType": "TypeError"
+      }
+    }
+  }
+}

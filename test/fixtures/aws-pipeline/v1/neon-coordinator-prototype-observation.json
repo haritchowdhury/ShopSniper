@@ -1,0 +1,43 @@
+{
+  "contractVersion": "neon-coordinator-prototype-observation-v1",
+  "capturedAt": "2026-08-11T09:43:41.907Z",
+  "productionDatabaseUsed": false,
+  "disposableSchemaDropped": true,
+  "proofs": {
+    "firstTerminal": {
+      "outcome": "first_terminal",
+      "incremented": true
+    },
+    "sameReplay": {
+      "outcome": "idempotent_replay",
+      "incremented": false
+    },
+    "conflictingReplay": {
+      "outcome": "conflict",
+      "incremented": false
+    },
+    "reversedSibling": {
+      "outcome": "first_terminal",
+      "incremented": true
+    },
+    "readyCounts": {
+      "expectedCount": 2,
+      "terminalCount": 2,
+      "succeededCount": 1,
+      "failedCount": 1,
+      "state": "ready"
+    },
+    "aggregationCas": {
+      "firstOwnerWon": true,
+      "secondOwnerWon": false,
+      "staleTokenFinalizeCount": 0,
+      "ownedTokenFinalizeCount": 1
+    },
+    "zeroCountAdvance": {
+      "ownerWon": true,
+      "expectedCount": 0,
+      "terminalCount": 0,
+      "state": "aggregating"
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "contractVersion": "domain-work-plan-v1",
+  "runId": "run_fixture_payload_discovery_0001",
+  "generation": 1,
+  "evaluatedAt": "2026-08-11T09:30:00.000Z",
+  "domainManifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
+  "domains": [
+    {
+      "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
+      "runStoreId": "run_store_gZ1Jyq8ONnaelYw2GvPTSnwy",
+      "candidateKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/candidate.json",
+      "needsLead": true,
+      "needsTraffic": true,
+      "needsCruxRest": true,
+      "needsCruxBigQuery": true,
+      "needsCrux": true,
+      "sourceKeys": {
+        "dataForSeo": [
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "worldwide",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:US:2840",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:GB:2826",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:CA:2124",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:AU:2036",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:NZ:2554",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:DE:2276",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:FR:2250",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:IN:2356",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          },
+          {
+            "source": "dataforseo",
+            "identity": "fixture.example",
+            "scopeKey": "country:AE:2784",
+            "metricSetKey": "featured_snippet,local_pack,organic,paid",
+            "contractVersion": "dataforseo-traffic-v1"
+          }
+        ],
+        "cruxRest": {
+          "source": "crux_rest",
+          "identity": "https://fixture.example",
+          "scopeKey": "current",
+          "metricSetKey": "cumulative_layout_shift,experimental_time_to_first_byte,first_contentful_paint,form_factors,interaction_to_next_paint,largest_contentful_paint",
+          "contractVersion": "crux-origin-metrics-v1"
+        },
+        "cruxBigQuery": {
+          "source": "crux_bigquery",
+          "identity": "https://fixture.example",
+          "scopeKey": "month:202606",
+          "metricSetKey": "desktop_density,phone_density,popularity_rank,tablet_density",
+          "contractVersion": "crux-popularity-v1"
+        }
+      }
+    }
+  ]
+}

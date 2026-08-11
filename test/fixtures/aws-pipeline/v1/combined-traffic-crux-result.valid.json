@@ -1,0 +1,23 @@
+{
+  "contractVersion": "combined-traffic-crux-result-v1",
+  "runId": "run_fixture_payload_discovery_0001",
+  "generation": 1,
+  "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
+  "components": {
+    "dataforseo": {
+      "state": "available",
+      "contractVersion": "dataforseo-traffic-v1",
+      "artifactKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/traffic/dataforseo.json"
+    },
+    "cruxRest": {
+      "state": "no_coverage",
+      "contractVersion": "crux-origin-metrics-v1",
+      "artifactKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/traffic/crux-rest.json"
+    },
+    "cruxBigQuery": {
+      "state": "contract_mismatch",
+      "contractVersion": "crux-popularity-v1",
+      "artifactKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/traffic/crux-bigquery.json"
+    }
+  }
+}

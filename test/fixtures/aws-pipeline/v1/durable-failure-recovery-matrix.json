@@ -1,0 +1,189 @@
+{
+  "contractVersion": "durable-failure-recovery-matrix-v1",
+  "rules": {
+    "completionAuthority": "Neon stage/task state and counts",
+    "artifactAuthority": "validated S3 object referenced by Neon fingerprint",
+    "queueAuthority": "delivery only; queue emptiness never indicates completion",
+    "counterRule": "increment only when a task changes from nonterminal to its first terminal state",
+    "generationFence": "every task, message, object key, and write carries runId plus generation",
+    "publicationRule": "final records and resultsAvailable change in one Neon transaction"
+  },
+  "boundaries": [
+    {
+      "boundary": "before_external_work",
+      "durableState": "task pending or processing under a current lease; no terminal artifact",
+      "safeRetry": "reclaim only after the owner/lease is absent or expired, then repeat bounded work",
+      "deduplicationKey": "runId:generation:stage:itemId",
+      "fence": "task lease token and generation",
+      "externalCallMayRepeat": false,
+      "terminalState": "unchanged",
+      "alarm": "lease age or Lambda error",
+      "futureOwner": "worker and coordinator repository"
+    },
+    {
+      "boundary": "external_success_response_lost",
+      "durableState": "no proven result; paid DataForSEO ledger may be in_flight/ambiguous",
+      "safeRetry": "DataForSEO becomes ambiguous and is not automatically repeated; idempotent/read-only providers may retry within their explicit budget",
+      "deduplicationKey": "provider request fingerprint plus task key",
+      "fence": "paid ledger lease; source-specific work lease",
+      "externalCallMayRepeat": true,
+      "terminalState": "ambiguous or retryable source failure, never synthesized success",
+      "alarm": "provider ambiguity metric",
+      "futureOwner": "source adapter and provider ledger"
+    },
+    {
+      "boundary": "before_s3_write",
+      "durableState": "task is nonterminal and no artifact is authoritative",
+      "safeRetry": "repeat local serialization; repeat external call only under the source-specific ambiguity rule",
+      "deduplicationKey": "deterministic artifact key and fingerprint",
+      "fence": "task lease token and generation",
+      "externalCallMayRepeat": true,
+      "terminalState": "unchanged",
+      "alarm": "worker error before artifact",
+      "futureOwner": "worker"
+    },
+    {
+      "boundary": "during_s3_write_or_lost_write_response",
+      "durableState": "object may or may not exist; Neon task remains nonterminal",
+      "safeRetry": "HEAD/read the deterministic key; accept only the expected fingerprint, otherwise create with If-None-Match or report conflict",
+      "deduplicationKey": "deterministic artifact key",
+      "fence": "S3 precondition plus generation path",
+      "externalCallMayRepeat": false,
+      "terminalState": "unchanged until object reconciliation succeeds",
+      "alarm": "S3 write ambiguity/conflict",
+      "futureOwner": "artifact repository"
+    },
+    {
+      "boundary": "conditional_s3_conflict",
+      "durableState": "an object already occupies the deterministic key",
+      "safeRetry": "same fingerprint is an idempotent replay; a different fingerprint is a terminal invariant conflict",
+      "deduplicationKey": "artifact key plus expected fingerprint",
+      "fence": "If-None-Match and stored fingerprint",
+      "externalCallMayRepeat": false,
+      "terminalState": "reconciled success or conflict failure",
+      "alarm": "artifact fingerprint conflict",
+      "futureOwner": "artifact repository"
+    },
+    {
+      "boundary": "after_s3_before_first_neon_terminal",
+      "durableState": "validated artifact exists; task remains nonterminal",
+      "safeRetry": "reconcile the object fingerprint and commit the first terminal transition without repeating provider work",
+      "deduplicationKey": "task key and artifact fingerprint",
+      "fence": "task state transition and lease token",
+      "externalCallMayRepeat": false,
+      "terminalState": "first terminal commit",
+      "alarm": "artifact without timely terminal task",
+      "futureOwner": "worker repository"
+    },
+    {
+      "boundary": "after_first_neon_terminal_before_aggregation_check_send",
+      "durableState": "task terminal and stage count already incremented once",
+      "safeRetry": "observe the identical terminal record and emit another aggregation-check message",
+      "deduplicationKey": "terminal task primary key",
+      "fence": "first-terminal compare-and-swap",
+      "externalCallMayRepeat": false,
+      "terminalState": "unchanged",
+      "alarm": "ready stage without aggregation activity",
+      "futureOwner": "worker dispatch seam"
+    },
+    {
+      "boundary": "after_aggregation_check_send_before_sqs_ack",
+      "durableState": "task terminal; one or more aggregation checks may exist",
+      "safeRetry": "send/check again; only one aggregator can acquire the Neon aggregation lease",
+      "deduplicationKey": "runId:generation:stage",
+      "fence": "aggregation compare-and-swap token",
+      "externalCallMayRepeat": false,
+      "terminalState": "unchanged",
+      "alarm": "none for harmless duplicate; alarm on stale aggregation lease",
+      "futureOwner": "aggregator"
+    },
+    {
+      "boundary": "duplicate_delayed_or_reversed_delivery",
+      "durableState": "Neon contains the only accepted task state and count",
+      "safeRetry": "validate generation and fingerprint; replay or reject without a second count increment",
+      "deduplicationKey": "runId:generation:stage:itemId",
+      "fence": "generation plus first-terminal transition",
+      "externalCallMayRepeat": false,
+      "terminalState": "unchanged",
+      "alarm": "conflicting replay only",
+      "futureOwner": "all handlers"
+    },
+    {
+      "boundary": "lambda_timeout_or_process_death",
+      "durableState": "last committed task/artifact/ledger state survives; in-memory progress is discarded",
+      "safeRetry": "SQS redelivery plus expired-lease reclaim and artifact/ledger reconciliation",
+      "deduplicationKey": "task key; paid request fingerprint",
+      "fence": "lease expiry and token",
+      "externalCallMayRepeat": true,
+      "terminalState": "unchanged or source-specific ambiguous",
+      "alarm": "Lambda timeout, age of oldest message, lease expiry",
+      "futureOwner": "worker, coordinator recovery, alarms"
+    },
+    {
+      "boundary": "partial_sqs_batch_failure",
+      "durableState": "successful records may be terminal while failed records remain retryable",
+      "safeRetry": "return only failed message identifiers through ReportBatchItemFailures",
+      "deduplicationKey": "per-record task key",
+      "fence": "per-record terminal compare-and-swap",
+      "externalCallMayRepeat": true,
+      "terminalState": "per record",
+      "alarm": "partial failure and DLQ count",
+      "futureOwner": "batch handler"
+    },
+    {
+      "boundary": "zero_expected_tasks_or_all_reused",
+      "durableState": "stage is created with expectedCount=0 and terminalCount=0 in ready state",
+      "safeRetry": "emit/check aggregation normally; do not infer completion from absent messages",
+      "deduplicationKey": "runId:generation:stage",
+      "fence": "stage aggregation lease",
+      "externalCallMayRepeat": false,
+      "terminalState": "explicit zero-count stage",
+      "alarm": "ready zero-count stage not aggregated",
+      "futureOwner": "coordinator"
+    },
+    {
+      "boundary": "cancellation_at_any_stage",
+      "durableState": "run cancellation and generation fence are durable in Neon",
+      "safeRetry": "late workers stop before external calls and cannot commit artifacts/tasks/publication for the cancelled generation",
+      "deduplicationKey": "runId:generation",
+      "fence": "cancelled run state, generation, lease token",
+      "externalCallMayRepeat": false,
+      "terminalState": "cancelled",
+      "alarm": "late-write rejection count",
+      "futureOwner": "every handler and repository mutation"
+    },
+    {
+      "boundary": "dlq_arrival",
+      "durableState": "message retained in DLQ; task/run state remains the source of truth",
+      "safeRetry": "operator inspects safe error and durable state, fixes cause, then redrives a bounded message set",
+      "deduplicationKey": "original task key",
+      "fence": "same generation and normal task claims",
+      "externalCallMayRepeat": true,
+      "terminalState": "failed or awaiting operator decision",
+      "alarm": "DLQ visible message count greater than zero",
+      "futureOwner": "operations runbook"
+    },
+    {
+      "boundary": "final_publication_before_results_available",
+      "durableState": "intermediate leads/traffic may exist, but resultsAvailable remains false",
+      "safeRetry": "aggregation owner retries the single publication transaction under its lease",
+      "deduplicationKey": "runId:generation final manifest fingerprint",
+      "fence": "aggregation token and active run generation",
+      "externalCallMayRepeat": false,
+      "terminalState": "not publicly available",
+      "alarm": "stale final aggregation lease",
+      "futureOwner": "final aggregator repository"
+    },
+    {
+      "boundary": "final_publication_after_results_available",
+      "durableState": "final records, result fingerprint, completed state, and resultsAvailable=true committed atomically",
+      "safeRetry": "same manifest fingerprint is an idempotent replay; a different fingerprint is rejected",
+      "deduplicationKey": "runId:generation result fingerprint",
+      "fence": "terminal run state and final fingerprint",
+      "externalCallMayRepeat": false,
+      "terminalState": "completed and publicly available",
+      "alarm": "conflicting final fingerprint",
+      "futureOwner": "final aggregator repository"
+    }
+  ]
+}

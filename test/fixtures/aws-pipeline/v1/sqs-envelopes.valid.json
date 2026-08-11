@@ -1,0 +1,53 @@
+{
+  "contractVersion": "sqs-envelope-fixtures-v1",
+  "messages": {
+    "discovery": {
+      "version": 1,
+      "type": "discovery.query",
+      "runId": "run_fixture_payload_discovery_0001",
+      "stage": "discovery",
+      "generation": 1,
+      "itemId": "query_fixture_001",
+      "manifestKey": "runs/run_fixture_payload_discovery_0001/queries/manifest.json",
+      "manifestFingerprint": "c94a86075ef3ab1fa27553fab4f4668c71822e60fcf5ba09c6c181adb85b6aed",
+      "attempt": 1
+    },
+    "lead": {
+      "version": 1,
+      "type": "lead.domain",
+      "runId": "run_fixture_payload_discovery_0001",
+      "stage": "lead",
+      "generation": 1,
+      "itemId": "shop_13iOzZDK7joaSKKTmscbk00V",
+      "manifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
+      "manifestFingerprint": "67c898ab710e3c715d0057bf0713a86f93f3888cb1250ff9c7acd8cb850426c6",
+      "attempt": 1
+    },
+    "traffic": {
+      "version": 1,
+      "type": "traffic.domain",
+      "runId": "run_fixture_payload_discovery_0001",
+      "stage": "traffic_crux",
+      "generation": 1,
+      "itemId": "shop_13iOzZDK7joaSKKTmscbk00V",
+      "manifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
+      "manifestFingerprint": "67c898ab710e3c715d0057bf0713a86f93f3888cb1250ff9c7acd8cb850426c6",
+      "attempt": 1
+    },
+    "aggregateCheck": {
+      "version": 1,
+      "type": "aggregation.check",
+      "runId": "run_fixture_payload_discovery_0001",
+      "stage": "traffic",
+      "generation": 1,
+      "reason": "terminal_task_recorded",
+      "attempt": 1
+    }
+  },
+  "encodedBytes": {
+    "discovery": 326,
+    "lead": 329,
+    "traffic": 340,
+    "aggregateCheck": 164
+  }
+}

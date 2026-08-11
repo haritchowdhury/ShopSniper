@@ -1,0 +1,66 @@
+{
+  "contractVersion": "aws-learning-mutation-observation-v1",
+  "capturedAt": "2026-08-11T09:31:00.000Z",
+  "scope": {
+    "bucket": "signalshop-buk",
+    "sourceQueue": "storesignal-dev-learning",
+    "prefix": "learning/",
+    "infrastructureChanged": false,
+    "lambdaCodeChanged": false,
+    "secretsInstalled": false,
+    "deadLetterQueueTouched": false
+  },
+  "conditionalS3Write": {
+    "key": "learning/payload-probe/pd10-20260811/query-manifest.json",
+    "firstCreate": {
+      "succeeded": true,
+      "contentLengthBytes": 389,
+      "contentType": "application/json",
+      "serverSideEncryption": "AES256",
+      "versionIdPresent": true
+    },
+    "identicalSecondCreate": {
+      "succeeded": false,
+      "errorCode": "PreconditionFailed",
+      "expectedConflict": true
+    },
+    "readBack": {
+      "byteIdentical": true,
+      "sha256": "ee8afbbd660a85a28e5af493e77cb67718651512be2ec09b1a7990872c350ba6"
+    }
+  },
+  "sqsLambdaS3": {
+    "messagesSent": 1,
+    "messageBodyBytes": 389,
+    "messageIdRetained": false,
+    "lambdaArtifactKey": "learning/<message-id>.json",
+    "lambdaArtifact": {
+      "observed": true,
+      "contentLengthBytes": 526,
+      "contentType": "application/json",
+      "serverSideEncryption": "AES256",
+      "wrapperKeys": [
+        "messageId",
+        "payload",
+        "receivedAt"
+      ],
+      "messageIdPresent": true,
+      "receivedAtValid": true,
+      "embeddedPayloadMatchesSentMessage": true,
+      "embeddedPayloadCompactBytes": 347
+    }
+  },
+  "retainedEvidence": {
+    "objectsIntentionallyLeftForInspection": [
+      "learning/payload-probe/pd10-20260811/query-manifest.json",
+      "learning/<message-id>.json"
+    ],
+    "recoverability": "Bucket versioning is enabled. Completed learning objects do not currently expire."
+  },
+  "privacy": {
+    "accountIdRetained": false,
+    "messageIdRetained": false,
+    "versionIdsRetained": false,
+    "credentialsRetained": false
+  }
+}

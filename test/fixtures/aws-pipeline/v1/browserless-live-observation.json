@@ -1,0 +1,89 @@
+{
+  "contractVersion": "browserless-live-observation-v1",
+  "capturedAt": "2026-08-11T09:23:50.231Z",
+  "selectedInterface": "function",
+  "selectionReason": [
+    "one REST request owns one automatically closed browser session",
+    "several ranked URLs can be visited sequentially without a local Puppeteer dependency",
+    "the response can be reduced to strict privacy-safe JSON"
+  ],
+  "controls": {
+    "activeConcurrency": 1,
+    "providerSessionTimeoutMs": 45000,
+    "clientTimeoutMs": 48000,
+    "navigationTimeoutMs": 8000,
+    "proxyEnabled": false,
+    "captchaOptionEnabled": false,
+    "allowedHost": "books.toscrape.com",
+    "suppliedUrlCount": 4,
+    "stopAfterSuccesses": 2,
+    "maximumExpectedBrowserTimeUnits": 2
+  },
+  "response": {
+    "httpStatus": 200,
+    "headers": {
+      "content-type": "application/json; charset=UTF-8"
+    },
+    "outerDurationMs": 6790.8,
+    "envelopeShape": "data-and-type",
+    "data": {
+      "contractVersion": "browserless-domain-render-batch-observed-v1",
+      "activeSessionCount": 1,
+      "pageLimit": 4,
+      "successes": 2,
+      "earlyStopReason": "sufficient_evidence",
+      "results": [
+        {
+          "inputIndex": 0,
+          "disposition": "rendered",
+          "status": 200,
+          "finalPath": "/",
+          "durationMs": 687,
+          "titleLength": 40,
+          "textLength": 2029,
+          "linkCount": 94
+        },
+        {
+          "inputIndex": 1,
+          "disposition": "rendered",
+          "status": 200,
+          "finalPath": "/catalogue/page-2.html",
+          "durationMs": 151,
+          "titleLength": 40,
+          "textLength": 2070,
+          "linkCount": 95
+        },
+        {
+          "inputIndex": 2,
+          "disposition": "skipped",
+          "reason": "sufficient_evidence"
+        },
+        {
+          "inputIndex": 3,
+          "disposition": "skipped",
+          "reason": "sufficient_evidence"
+        }
+      ],
+      "durationMs": 838,
+      "cleanup": "automatic_function_api"
+    }
+  },
+  "usage": {
+    "before": {
+      "billingPeriod.start": "2026-08-03T06:06:59.000Z",
+      "billingPeriod.end": "2026-09-03T06:06:59.000Z"
+    },
+    "after": {
+      "billingPeriod.start": "2026-08-03T06:06:59.000Z",
+      "billingPeriod.end": "2026-09-03T06:06:59.000Z"
+    },
+    "numericDelta": {},
+    "note": "Usage API values can update asynchronously; browser time is billed in 30-second increments."
+  },
+  "privacy": {
+    "tokensRetained": false,
+    "pageBodiesRetained": false,
+    "cookiesRetained": false,
+    "screenshotsRetained": false
+  }
+}

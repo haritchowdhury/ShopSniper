@@ -1,0 +1,22 @@
+{
+  "contractVersion": "payload-size-observation-v1",
+  "encoder": "Buffer.byteLength(JSON.stringify(value), utf8)",
+  "observed": {
+    "confirmedQueryManifest": 1785,
+    "perQueryArtifact": 3373,
+    "domainManifest": 4268,
+    "workPlan": 2902,
+    "leadResultFixtures": 9001,
+    "combinedTrafficResult": 764
+  },
+  "configuredBoundary": {
+    "candidateWith1000Occurrences": 722790,
+    "domainWorkRefs1000": 267013
+  },
+  "sqsEnvelopes": {
+    "discovery": 326,
+    "lead": 329,
+    "traffic": 340,
+    "aggregateCheck": 164
+  }
+}

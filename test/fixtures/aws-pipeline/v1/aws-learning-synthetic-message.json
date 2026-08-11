@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "type": "discovery.query",
+  "probeId": "pd10-20260811",
+  "runId": "run_fixture_payload_discovery_0001",
+  "stage": "discovery",
+  "generation": 1,
+  "itemId": "query_fixture_001",
+  "manifestKey": "learning/payload-probe/pd10-20260811/query-manifest.json",
+  "manifestFingerprint": "84315c8b717c49e39122eb0cacdf9c6a8e50972307a6ba4e4da0b245af064ffa",
+  "attempt": 1
+}

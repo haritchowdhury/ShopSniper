@@ -1,0 +1,169 @@
+{
+  "contractVersion": "aws-learning-readonly-observation-v1",
+  "capturedAt": "2026-08-11T09:36:00.000Z",
+  "identity": {
+    "profile": "storesignal-dev",
+    "projectRegion": "ap-south-2",
+    "accountIdRetained": false,
+    "callerType": "identity-center-assumed-role",
+    "callerRoleClass": "AdministratorAccess"
+  },
+  "bucket": {
+    "name": "signalshop-buk",
+    "region": "ap-south-2",
+    "publicAccessBlock": {
+      "blockPublicAcls": true,
+      "ignorePublicAcls": true,
+      "blockPublicPolicy": true,
+      "restrictPublicBuckets": true
+    },
+    "objectOwnership": "BucketOwnerEnforced",
+    "encryption": "AES256",
+    "bucketKeyEnabled": true,
+    "blockedEncryptionTypes": [
+      "SSE-C"
+    ],
+    "versioning": "Enabled",
+    "learningLifecycle": {
+      "ruleId": "delete-learning-artifacts",
+      "prefix": "learning/",
+      "enabled": true,
+      "abortIncompleteMultipartUploadDays": 7,
+      "completedObjectExpirationConfigured": false
+    },
+    "observedLearningObjects": {
+      "count": 1,
+      "objectAliases": [
+        {
+          "key": "learning/<successful-message-id>.json",
+          "sizeBytes": 223,
+          "etagPresent": true
+        }
+      ]
+    }
+  },
+  "queues": {
+    "source": {
+      "name": "storesignal-dev-learning",
+      "type": "standard",
+      "encrypted": true,
+      "encryptionMode": "SQS-managed SSE",
+      "visibilityTimeoutSeconds": 360,
+      "retentionSeconds": 345600,
+      "maximumMessageBytes": 1048576,
+      "longPollingSeconds": 0,
+      "visibleMessages": 0,
+      "inFlightMessages": 0,
+      "redrive": {
+        "target": "storesignal-dev-learning-dlq",
+        "maximumReceiveCount": 5
+      }
+    },
+    "deadLetter": {
+      "name": "storesignal-dev-learning-dlq",
+      "type": "standard",
+      "encrypted": true,
+      "encryptionMode": "SQS-managed SSE",
+      "visibilityTimeoutSeconds": 360,
+      "retentionSeconds": 1209600,
+      "maximumMessageBytes": 1048576,
+      "visibleMessages": 1,
+      "inFlightMessages": 0
+    },
+    "retryEvidence": {
+      "sameMessageAlias": "invalid-json-learning-message",
+      "failedInvocationCount": 5,
+      "intervalSeconds": 360,
+      "sourceQueueEmptyAfterRetries": true,
+      "deadLetterQueueContainsMessage": true,
+      "passed": true
+    }
+  },
+  "lambda": {
+    "name": "storesignal-dev-learning-worker",
+    "runtime": "nodejs26.x",
+    "runtimeLifecycle": "preview-warning-observed-in-cloudwatch",
+    "architecture": "x86_64",
+    "memoryMiB": 256,
+    "timeoutSeconds": 60,
+    "ephemeralStorageMiB": 512,
+    "packageType": "Zip",
+    "handler": "index.handler",
+    "codeSizeBytes": 598,
+    "codeSha256Retained": false,
+    "state": "Active",
+    "lastUpdateStatus": "Successful",
+    "environmentVariableNames": [
+      "ARTIFACT_BUCKET"
+    ],
+    "logFormat": "Text",
+    "logGroup": "/aws/lambda/storesignal-dev-learning-worker",
+    "successfulInvocation": {
+      "durationMs": 487.03,
+      "billedDurationMs": 892,
+      "maximumMemoryUsedMiB": 112,
+      "initializationDurationMs": 404.17
+    }
+  },
+  "eventSourceMapping": {
+    "sourceQueue": "storesignal-dev-learning",
+    "enabled": true,
+    "state": "Enabled",
+    "batchSize": 1,
+    "maximumBatchingWindowSeconds": 0,
+    "functionResponseTypes": [
+      "ReportBatchItemFailures"
+    ],
+    "maximumConcurrency": 2
+  },
+  "executionRole": {
+    "roleName": "storesignal-dev-learning-worker-role-<generated-suffix>",
+    "trustService": "lambda.amazonaws.com",
+    "actions": [
+      {
+        "actions": [
+          "s3:PutObject"
+        ],
+        "resource": "arn:aws:s3:::signalshop-buk/learning/*",
+        "scopeAssessment": "learning-prefix-scoped"
+      },
+      {
+        "actions": [
+          "logs:CreateLogGroup"
+        ],
+        "resource": "arn:aws:logs:ap-south-2:<account>:*",
+        "scopeAssessment": "account-and-region-scoped"
+      },
+      {
+        "actions": [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "resource": "arn:aws:logs:ap-south-2:<account>:log-group:/aws/lambda/storesignal-dev-learning-worker:*",
+        "scopeAssessment": "learning-log-group-scoped"
+      },
+      {
+        "actions": [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "resource": "*",
+        "scopeAssessment": "AWS-managed learning policy; production roles require narrower resource scope"
+      }
+    ]
+  },
+  "privacy": {
+    "accountIdRetained": false,
+    "queueUrlsRetained": false,
+    "resourceUuidsRetained": false,
+    "requestOrMessageIdsRetained": false,
+    "credentialsOrSsoCacheRead": false,
+    "environmentValuesRetained": false,
+    "logMessageBodiesRetained": false,
+    "fullIamDocumentsRetained": false
+  }
+}

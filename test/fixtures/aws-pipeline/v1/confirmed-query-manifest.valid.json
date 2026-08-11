@@ -1,0 +1,78 @@
+{
+  "contractVersion": "confirmed-query-manifest-v1",
+  "runId": "run_fixture_payload_discovery_0001",
+  "generation": 1,
+  "confirmedRevision": 1,
+  "categories": [
+    {
+      "categoryIndex": 0,
+      "originalShopType": "Fixture specialist stores",
+      "shopType": "fixture-specialist",
+      "businessQualifier": "brand",
+      "categoryVocabulary": [
+        "fixture product",
+        "specialist fixture"
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "query_fixture_001",
+      "categoryIndex": 0,
+      "sequence": 0,
+      "query": "site:myshopify.com/products synthetic fixture model 1",
+      "source": "generated",
+      "validationState": "valid",
+      "queryScore": 91,
+      "generationReason": "Deterministic payload-discovery fixture",
+      "sourceUrls": [
+        "https://research.example/fixture"
+      ],
+      "categoryVocabulary": [
+        "fixture product",
+        "specialist fixture"
+      ],
+      "probeContractVersion": "google-probe-v2",
+      "probeFingerprint": "fb74dc71a92e0b959d8b132ebf7e16588447b3122b476c18adf10a05ca4bbc24",
+      "probeResults": [
+        {
+          "query": "site:myshopify.com/products synthetic fixture model 1",
+          "rank": 1,
+          "url": "https://fixture.myshopify.com/products/item-1",
+          "title": "Fixture product 1",
+          "snippet": "Deterministic fixture only",
+          "rejectionReason": ""
+        }
+      ]
+    },
+    {
+      "id": "query_fixture_002",
+      "categoryIndex": 0,
+      "sequence": 1,
+      "query": "site:myshopify.com/products synthetic fixture model 2",
+      "source": "generated",
+      "validationState": "valid",
+      "queryScore": 88,
+      "generationReason": "Deterministic payload-discovery fixture",
+      "sourceUrls": [
+        "https://research.example/fixture"
+      ],
+      "categoryVocabulary": [
+        "fixture product",
+        "specialist fixture"
+      ],
+      "probeContractVersion": "google-probe-v2",
+      "probeFingerprint": "1c7290b3c27abc39e326956216c857f363baa13b5cf2be646121d1b4a089f204",
+      "probeResults": [
+        {
+          "query": "site:myshopify.com/products synthetic fixture model 2",
+          "rank": 2,
+          "url": "https://fixture.myshopify.com/products/item-2",
+          "title": "Fixture product 2",
+          "snippet": "Deterministic fixture only",
+          "rejectionReason": ""
+        }
+      ]
+    }
+  ]
+}

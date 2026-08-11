@@ -1,0 +1,331 @@
+{
+  "contractVersion": "browserless-function-parser-fixtures-v1",
+  "positiveObservedEnvelopeCount": 2,
+  "positiveFingerprints": [
+    "919ec7fa6d91acd73391cf2dd4e8c5b0d0190c948d600b65f6834bb78814b546",
+    "4dc01eb994e32fded587f4dcc5ef1f468868dd5666efc3ca17eeab4df1b6e6cc"
+  ],
+  "negativeCases": [
+    {
+      "name": "unknown_outer_field",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 4,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 1,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/catalogue/page-2.html",
+              "durationMs": 151,
+              "titleLength": 40,
+              "textLength": 2070,
+              "linkCount": 95
+            },
+            {
+              "inputIndex": 2,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            },
+            {
+              "inputIndex": 3,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            }
+          ],
+          "durationMs": 838,
+          "cleanup": "automatic_function_api"
+        },
+        "type": "application/json",
+        "unknown": true
+      },
+      "observedError": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"unknown\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"unknown\\\"\"\n  }\n]"
+    },
+    {
+      "name": "raw_body_field",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 4,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 1,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/catalogue/page-2.html",
+              "durationMs": 151,
+              "titleLength": 40,
+              "textLength": 2070,
+              "linkCount": 95
+            },
+            {
+              "inputIndex": 2,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            },
+            {
+              "inputIndex": 3,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            }
+          ],
+          "durationMs": 838,
+          "cleanup": "automatic_function_api",
+          "body": "<html>forbidden</html>"
+        },
+        "type": "application/json"
+      },
+      "observedError": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"body\"\n    ],\n    \"path\": [\n      \"data\"\n    ],\n    \"message\": \"Unrecognized key: \\\"body\\\"\"\n  }\n]"
+    },
+    {
+      "name": "non_2xx_rendered_success",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 4,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 503,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 1,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/catalogue/page-2.html",
+              "durationMs": 151,
+              "titleLength": 40,
+              "textLength": 2070,
+              "linkCount": 95
+            },
+            {
+              "inputIndex": 2,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            },
+            {
+              "inputIndex": 3,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            }
+          ],
+          "durationMs": 838,
+          "cleanup": "automatic_function_api"
+        },
+        "type": "application/json"
+      },
+      "observedError": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 299,\n    \"inclusive\": true,\n    \"path\": [\n      \"data\",\n      \"results\",\n      0,\n      \"status\"\n    ],\n    \"message\": \"Too big: expected number to be <=299\"\n  }\n]"
+    },
+    {
+      "name": "full_final_url",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 4,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94,
+              "finalUrl": "https://external.example/private"
+            },
+            {
+              "inputIndex": 1,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/catalogue/page-2.html",
+              "durationMs": 151,
+              "titleLength": 40,
+              "textLength": 2070,
+              "linkCount": 95
+            },
+            {
+              "inputIndex": 2,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            },
+            {
+              "inputIndex": 3,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            }
+          ],
+          "durationMs": 838,
+          "cleanup": "automatic_function_api"
+        },
+        "type": "application/json"
+      },
+      "observedError": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"finalUrl\"\n    ],\n    \"path\": [\n      \"data\",\n      \"results\",\n      0\n    ],\n    \"message\": \"Unrecognized key: \\\"finalUrl\\\"\"\n  }\n]"
+    },
+    {
+      "name": "too_many_page_results",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 6,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            }
+          ],
+          "durationMs": 838,
+          "cleanup": "automatic_function_api"
+        },
+        "type": "application/json"
+      },
+      "observedError": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 5,\n    \"inclusive\": true,\n    \"path\": [\n      \"data\",\n      \"pageLimit\"\n    ],\n    \"message\": \"Too big: expected number to be <=5\"\n  },\n  {\n    \"origin\": \"array\",\n    \"code\": \"too_big\",\n    \"maximum\": 5,\n    \"inclusive\": true,\n    \"path\": [\n      \"data\",\n      \"results\"\n    ],\n    \"message\": \"Too big: expected array to have <=5 items\"\n  }\n]"
+    },
+    {
+      "name": "session_over_ceiling",
+      "input": {
+        "data": {
+          "contractVersion": "browserless-domain-render-batch-observed-v1",
+          "activeSessionCount": 1,
+          "pageLimit": 4,
+          "successes": 2,
+          "earlyStopReason": "sufficient_evidence",
+          "results": [
+            {
+              "inputIndex": 0,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/",
+              "durationMs": 687,
+              "titleLength": 40,
+              "textLength": 2029,
+              "linkCount": 94
+            },
+            {
+              "inputIndex": 1,
+              "disposition": "rendered",
+              "status": 200,
+              "finalPath": "/catalogue/page-2.html",
+              "durationMs": 151,
+              "titleLength": 40,
+              "textLength": 2070,
+              "linkCount": 95
+            },
+            {
+              "inputIndex": 2,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            },
+            {
+              "inputIndex": 3,
+              "disposition": "skipped",
+              "reason": "sufficient_evidence"
+            }
+          ],
+          "durationMs": 45001,
+          "cleanup": "automatic_function_api"
+        },
+        "type": "application/json"
+      },
+      "observedError": "[\n  {\n    \"origin\": \"number\",\n    \"code\": \"too_big\",\n    \"maximum\": 45000,\n    \"inclusive\": true,\n    \"path\": [\n      \"data\",\n      \"durationMs\"\n    ],\n    \"message\": \"Too big: expected number to be <=45000\"\n  }\n]"
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "contractVersion": "browserless-live-observation-v1",
+  "capturedAt": "2026-08-11T09:56:01.334Z",
+  "selectedInterface": "function",
+  "selectionReason": [
+    "one REST request owns one automatically closed browser session",
+    "several ranked URLs can be visited sequentially without a local Puppeteer dependency",
+    "the response can be reduced to strict privacy-safe JSON"
+  ],
+  "controls": {
+    "activeConcurrency": 1,
+    "providerSessionTimeoutMs": 45000,
+    "clientTimeoutMs": 48000,
+    "navigationTimeoutMs": 8000,
+    "proxyEnabled": false,
+    "captchaOptionEnabled": false,
+    "allowedHost": "httpbingo.org",
+    "suppliedUrlCount": 2,
+    "stopAfterSuccesses": 1,
+    "maximumExpectedBrowserTimeUnits": 2
+  },
+  "response": {
+    "httpStatus": 200,
+    "headers": {
+      "content-type": "application/json; charset=UTF-8"
+    },
+    "outerDurationMs": 4608,
+    "envelopeShape": "data-and-type",
+    "data": {
+      "contractVersion": "browserless-domain-render-batch-observed-v1",
+      "activeSessionCount": 1,
+      "pageLimit": 2,
+      "successes": 1,
+      "earlyStopReason": "exhausted_ranked_pages",
+      "results": [
+        {
+          "inputIndex": 0,
+          "disposition": "rejected",
+          "reason": "redirect_host_not_allowed",
+          "durationMs": 197
+        },
+        {
+          "inputIndex": 1,
+          "disposition": "rendered",
+          "status": 200,
+          "finalPath": "/html",
+          "durationMs": 82,
+          "titleLength": 0,
+          "textLength": 3595,
+          "linkCount": 0
+        }
+      ],
+      "durationMs": 279,
+      "cleanup": "automatic_function_api"
+    }
+  },
+  "usage": {
+    "before": {
+      "units.included": 1000,
+      "units.used": 292,
+      "units.remaining": 707,
+      "billingPeriod.start": "2026-08-03T06:06:59.000Z",
+      "billingPeriod.end": "2026-09-03T06:06:59.000Z"
+    },
+    "after": {
+      "units.included": 1000,
+      "units.used": 292,
+      "units.remaining": 706,
+      "billingPeriod.start": "2026-08-03T06:06:59.000Z",
+      "billingPeriod.end": "2026-09-03T06:06:59.000Z"
+    },
+    "numericDelta": {
+      "units.included": 0,
+      "units.used": 0,
+      "units.remaining": -1
+    },
+    "note": "Usage API values can update asynchronously; browser time is billed in 30-second increments."
+  },
+  "privacy": {
+    "tokensRetained": false,
+    "pageBodiesRetained": false,
+    "cookiesRetained": false,
+    "screenshotsRetained": false
+  }
+}

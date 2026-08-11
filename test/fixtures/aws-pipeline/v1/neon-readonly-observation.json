@@ -1,0 +1,2668 @@
+{
+  "contractVersion": "payload-discovery-v1",
+  "evaluatedAt": "2026-08-11T09:52:32.910Z",
+  "selectedRun": {
+    "alias": "run_latest_with_traffic",
+    "state": "failed",
+    "phase": "finished",
+    "stage": "failed",
+    "queryRevision": 1,
+    "confirmedQueryRevision": 1,
+    "resultsAvailable": false,
+    "resultFingerprintPresent": false,
+    "createdAt": "2026-08-06T06:21:55.394Z",
+    "completedAt": "2026-08-06T06:39:22.969Z",
+    "counts": {
+      "queries": 10,
+      "leads": 61,
+      "runStores": 61,
+      "trafficRows": 156,
+      "leadsWithAllThreeTrafficSources": 52
+    }
+  },
+  "queryManifestObservation": {
+    "rows": [
+      {
+        "id": "query_fixture_001",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 0,
+        "queryLength": 49,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 111,
+        "generationReasonLength": 75,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_002",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 1,
+        "queryLength": 38,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 105.13,
+        "generationReasonLength": 69,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_003",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 2,
+        "queryLength": 48,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 103,
+        "generationReasonLength": 53,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_004",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 3,
+        "queryLength": 36,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 103,
+        "generationReasonLength": 65,
+        "sourceUrlCount": 2,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_005",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 4,
+        "queryLength": 39,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 103,
+        "generationReasonLength": 68,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_006",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 5,
+        "queryLength": 39,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 94.71,
+        "generationReasonLength": 69,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_007",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 6,
+        "queryLength": 39,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 92.13,
+        "generationReasonLength": 66,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_008",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 7,
+        "queryLength": 49,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 90.5,
+        "generationReasonLength": 58,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_009",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 8,
+        "queryLength": 48,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 90,
+        "generationReasonLength": 76,
+        "sourceUrlCount": 2,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      },
+      {
+        "id": "query_fixture_010",
+        "categoryIndex": 0,
+        "categoryAlias": "category-01",
+        "sequence": 9,
+        "queryLength": 44,
+        "source": "generated",
+        "validationState": "valid",
+        "hasRejectionReason": false,
+        "queryScore": 88.67,
+        "generationReasonLength": 70,
+        "sourceUrlCount": 1,
+        "categoryVocabularyCount": 70,
+        "probeContractVersion": "google-probe-v2",
+        "probeFingerprintPresent": true,
+        "probeResultCount": 10,
+        "probeSummaryKeys": [
+          "accepted",
+          "resultCount"
+        ],
+        "probedAtPresent": true
+      }
+    ],
+    "encodedBytes": 4360,
+    "fingerprint": "84315c8b717c49e39122eb0cacdf9c6a8e50972307a6ba4e4da0b245af064ffa"
+  },
+  "runStores": {
+    "stateCounts": {
+      "completed": 61
+    }
+  },
+  "leads": {
+    "statusCounts": {
+      "qualified": 52,
+      "rejected": 9
+    }
+  },
+  "traffic": {
+    "sourceCounts": {
+      "crux_bigquery": 52,
+      "crux_rest": 52,
+      "dataforseo": 52
+    },
+    "stateCounts": {
+      "available": 121,
+      "contract_mismatch": 1,
+      "no_coverage": 34
+    },
+    "shapes": [
+      {
+        "leadAlias": "lead_fixture_001",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_001",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_001",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_002",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_002",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_002",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_004",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_004",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_004",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_006",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_006",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_006",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_007",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_007",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_007",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_008",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_008",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_008",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_010",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_010",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_010",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_011",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_011",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_011",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_012",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_012",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_012",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_013",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_013",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_013",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_014",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_014",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_014",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_015",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_015",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_015",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_016",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_016",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_016",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_017",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_017",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_017",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_018",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_018",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_018",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_020",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_020",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_020",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_021",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_021",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_021",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_022",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_022",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_022",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_023",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_023",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_023",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_024",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_024",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_024",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_026",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_026",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_026",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_027",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_027",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_027",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_028",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_028",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_028",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_029",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_029",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_029",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_030",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_030",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_030",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_032",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_032",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_032",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_033",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_033",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_033",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_034",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_034",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_034",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_035",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_035",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_035",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_036",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_036",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_036",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_037",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_037",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_037",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_038",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_038",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_038",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_040",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_040",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_040",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_041",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_041",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_041",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_042",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_042",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_042",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_043",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_043",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_043",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_044",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_044",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_044",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_045",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_045",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_045",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_046",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_046",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_046",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_047",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_047",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_047",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_049",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_049",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_049",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_050",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_050",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_050",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_051",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_051",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_051",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_052",
+        "source": "crux_bigquery",
+        "state": "contract_mismatch",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_052",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_052",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_053",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_053",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_053",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_055",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_055",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_055",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_056",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_056",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_056",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_057",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_057",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_057",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_058",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_058",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_058",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_059",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_059",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_059",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_060",
+        "source": "crux_bigquery",
+        "state": "no_coverage",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_060",
+        "source": "crux_rest",
+        "state": "no_coverage",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [],
+        "fetchedAtPresent": false,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_060",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_061",
+        "source": "crux_bigquery",
+        "state": "available",
+        "contractVersion": "crux-popularity-v1",
+        "normalizedPayloadKeys": [
+          "contractVersion",
+          "coverage",
+          "datasetMonth",
+          "deviceFractions",
+          "fetchedAt",
+          "origin",
+          "popularityRank"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      },
+      {
+        "leadAlias": "lead_fixture_061",
+        "source": "crux_rest",
+        "state": "available",
+        "contractVersion": "crux-origin-metrics-v1",
+        "normalizedPayloadKeys": [
+          "collectionPeriod",
+          "contractVersion",
+          "coverage",
+          "fetchedAt",
+          "formFactors",
+          "metrics",
+          "origin"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": true,
+        "coverageEndedAtPresent": true
+      },
+      {
+        "leadAlias": "lead_fixture_061",
+        "source": "dataforseo",
+        "state": "available",
+        "contractVersion": "dataforseo-traffic-v1",
+        "normalizedPayloadKeys": [
+          "records"
+        ],
+        "fetchedAtPresent": true,
+        "coverageStartedAtPresent": false,
+        "coverageEndedAtPresent": false
+      }
+    ],
+    "encodedBytes": 43260,
+    "fingerprint": "a3a72e9b566a0a828b3342e4cd6bd81d3febed6618200d98380f1c7e2d4756d3"
+  },
+  "globalCacheStateCounts": [
+    {
+      "source": "crux_rest",
+      "state": "no_coverage",
+      "count": 36
+    },
+    {
+      "source": "crux_rest",
+      "state": "available",
+      "count": 143
+    },
+    {
+      "source": "crux_bigquery",
+      "state": "available",
+      "count": 118
+    },
+    {
+      "source": "dataforseo",
+      "state": "available",
+      "count": 1990
+    },
+    {
+      "source": "crux_bigquery",
+      "state": "no_coverage",
+      "count": 36
+    }
+  ],
+  "globalShopWorkStateCounts": [
+    {
+      "workType": "crux_bigquery",
+      "state": "failed",
+      "count": 13
+    },
+    {
+      "workType": "lead_discovery",
+      "state": "completed",
+      "count": 186
+    },
+    {
+      "workType": "dataforseo",
+      "state": "completed",
+      "count": 1570
+    },
+    {
+      "workType": "crux_rest",
+      "state": "completed",
+      "count": 157
+    },
+    {
+      "workType": "crux_bigquery",
+      "state": "completed",
+      "count": 154
+    },
+    {
+      "workType": "lead_discovery",
+      "state": "failed",
+      "count": 3
+    }
+  ],
+  "dataForSeoLedger": [
+    {
+      "scopeKey": "country:AE:2784",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:AU:2036",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:CA:2124",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:DE:2276",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:FR:2250",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:GB:2826",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:IN:2356",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:NZ:2554",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "country:US:2840",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    },
+    {
+      "scopeKey": "worldwide",
+      "state": "succeeded",
+      "targetCount": 52,
+      "attempt": 1,
+      "providerCostUsd": 0.01824,
+      "reservationCostUsd": null
+    }
+  ],
+  "fixedTimeReuse": {
+    "evaluatedAt": "2026-08-11T09:52:32.910Z",
+    "latestDatasetMonth": "202607",
+    "eligibleDomains": 52,
+    "counts": {
+      "leadReusable": 52,
+      "dataForSeoReusable": 52,
+      "cruxRestReusable": 0,
+      "cruxBigQueryReusable": 0,
+      "needsLead": 0,
+      "needsTraffic": 0,
+      "needsCruxRest": 52,
+      "needsCruxBigQuery": 52,
+      "needsCrux": 52
+    },
+    "databaseReads": {
+      "strategy": "bounded set-based reads",
+      "profileQueryCount": 1,
+      "cacheQueryCount": 1,
+      "profileRowsRead": 52,
+      "relevantCacheRowsRead": 623
+    },
+    "currentCodeFreshnessDrift": {
+      "orchestratorPrefersMethod": "readReusableTrafficCache",
+      "methodFiltersExpiresAt": false,
+      "latestBigQueryMethodFiltersExpiresAt": false,
+      "olderFallbackFiltersExpiresAt": true,
+      "introducingCommit": "de04287b944fb657687366d152d9a96a0edc2482"
+    }
+  },
+  "privacy": {
+    "productionRunIdRetained": false,
+    "queryTextRetained": false,
+    "domainOrContactDataRetained": false,
+    "normalizedProviderValuesRetained": false,
+    "credentialsRetained": false
+  }
+}
