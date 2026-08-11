@@ -542,7 +542,7 @@ async function localContractsProbe() {
         manifestFingerprint: fingerprint(workPlan), attempt: 1
       },
       aggregateCheck: {
-        version: 1, type: "aggregation.check", runId, stage: "traffic", generation: 1,
+        version: 1, type: "aggregation.check", runId, stage: "traffic_crux", generation: 1,
         reason: "terminal_task_recorded", attempt: 1
       }
     }

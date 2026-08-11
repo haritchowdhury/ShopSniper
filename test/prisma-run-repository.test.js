@@ -708,6 +708,237 @@ test("fresh cache reads are exact and tenant-neutral", async () => {
   assert.equal(cacheRead, false);
 });
 
+test("reusable cache reads enforce fixed-time freshness and exact reuse keys", async () => {
+  const reuseMatrix = JSON.parse(await fs.readFile(new URL(
+    "./fixtures/aws-pipeline/v1/reuse-matrix.json",
+    import.meta.url
+  ), "utf8"));
+  const evaluatedAt = new Date(reuseMatrix.evaluatedAt);
+  const exactKeys = [
+    reuseMatrix.exactCacheKeys.dataForSeo[0],
+    reuseMatrix.exactCacheKeys.dataForSeo[1],
+    reuseMatrix.exactCacheKeys.cruxRest,
+    reuseMatrix.exactCacheKeys.cruxBigQuery
+  ];
+  const freshExpiry = new Date(evaluatedAt.getTime() + 60_000);
+  const cacheRows = [{
+    id: "fresh_available",
+    ...exactKeys[0],
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "fresh_no_coverage",
+    ...exactKeys[1],
+    state: "no_coverage",
+    expiresAt: freshExpiry
+  }, {
+    id: "equal_expiry",
+    ...exactKeys[2],
+    state: "no_coverage",
+    expiresAt: evaluatedAt
+  }, {
+    id: "older_expiry",
+    ...exactKeys[3],
+    state: "available",
+    expiresAt: new Date(evaluatedAt.getTime() - 1)
+  }, {
+    id: "identity_mismatch",
+    ...exactKeys[0],
+    identity: "other.example",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "scope_mismatch",
+    ...exactKeys[0],
+    scopeKey: "country:XX:0000",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "metric_mismatch",
+    ...exactKeys[0],
+    metricSetKey: "other_metrics",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "contract_mismatch",
+    ...exactKeys[0],
+    contractVersion: "dataforseo-traffic-v0",
+    state: "available",
+    expiresAt: freshExpiry
+  }];
+  let query;
+  let transactionCount = 0;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => {
+      transactionCount += 1;
+      return callback({
+        run: { updateMany: async () => ({ count: 1 }) },
+        trafficEnrichmentCache: {
+          findMany: async (arguments_) => {
+            query = arguments_;
+            const fields = [
+              "source", "identity", "scopeKey", "metricSetKey", "contractVersion"
+            ];
+            return cacheRows.filter((row) =>
+              row.expiresAt > arguments_.where.expiresAt.gt &&
+              arguments_.where.OR.some((key) => fields.every((field) =>
+                row[field] === key[field]
+              ))
+            );
+          }
+        }
+      });
+    }
+  });
+
+  const rows = await repository.readReusableTrafficCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    exactKeys,
+    evaluatedAt
+  );
+
+  assert.deepEqual(query.where, {
+    expiresAt: { gt: evaluatedAt },
+    OR: exactKeys
+  });
+  assert.deepEqual(rows.map(({ id, state }) => ({ id, state })), [{
+    id: "fresh_available",
+    state: "available"
+  }, {
+    id: "fresh_no_coverage",
+    state: "no_coverage"
+  }]);
+  assert.equal("ownerId" in query.where.OR[0], false);
+
+  await assert.rejects(repository.readReusableTrafficCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    [{ ...exactKeys[0], contractVersion: "" }],
+    evaluatedAt
+  ), /lookup key is invalid/u);
+  assert.equal(transactionCount, 1);
+});
+
+test("reusable latest CrUX month excludes stale and inexact origins", async () => {
+  const reuseMatrix = JSON.parse(await fs.readFile(new URL(
+    "./fixtures/aws-pipeline/v1/reuse-matrix.json",
+    import.meta.url
+  ), "utf8"));
+  const evaluatedAt = new Date(reuseMatrix.evaluatedAt);
+  const firstOrigin = reuseMatrix.exactCacheKeys.cruxBigQuery.identity;
+  const secondOrigin = "https://second.example";
+  const freshExpiry = new Date(evaluatedAt.getTime() + 60_000);
+  const cacheRows = [{
+    id: "equal_newer_first",
+    source: "crux_bigquery",
+    identity: firstOrigin,
+    scopeKey: "month:202607",
+    state: "available",
+    expiresAt: evaluatedAt
+  }, {
+    id: "fresh_first",
+    source: "crux_bigquery",
+    identity: firstOrigin,
+    scopeKey: "month:202606",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "older_newer_second",
+    source: "crux_bigquery",
+    identity: secondOrigin,
+    scopeKey: "month:202608",
+    state: "available",
+    expiresAt: new Date(evaluatedAt.getTime() - 1)
+  }, {
+    id: "fresh_second",
+    source: "crux_bigquery",
+    identity: secondOrigin,
+    scopeKey: "month:202606",
+    state: "no_coverage",
+    expiresAt: freshExpiry
+  }, {
+    id: "foreign_origin",
+    source: "crux_bigquery",
+    identity: "https://foreign.example",
+    scopeKey: "month:202609",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "wrong_scope",
+    source: "crux_bigquery",
+    identity: firstOrigin,
+    scopeKey: "current",
+    state: "available",
+    expiresAt: freshExpiry
+  }, {
+    id: "wrong_source",
+    source: "crux_rest",
+    identity: firstOrigin,
+    scopeKey: "month:202609",
+    state: "available",
+    expiresAt: freshExpiry
+  }];
+  let query;
+  let transactionCount = 0;
+  const repository = new PrismaRunRepository({
+    $transaction: async (callback) => {
+      transactionCount += 1;
+      return callback({
+        run: { updateMany: async () => ({ count: 1 }) },
+        trafficEnrichmentCache: {
+          findMany: async (arguments_) => {
+            query = arguments_;
+            return cacheRows.filter((row) =>
+              row.source === arguments_.where.source &&
+              arguments_.where.identity.in.includes(row.identity) &&
+              row.scopeKey.startsWith(arguments_.where.scopeKey.startsWith) &&
+              row.expiresAt > arguments_.where.expiresAt.gt
+            ).sort((left, right) =>
+              right.scopeKey.localeCompare(left.scopeKey) ||
+              left.identity.localeCompare(right.identity)
+            );
+          }
+        }
+      });
+    }
+  });
+
+  const rows = await repository.readReusableLatestCruxBigQueryCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    [secondOrigin, firstOrigin, secondOrigin],
+    evaluatedAt
+  );
+
+  assert.deepEqual(query, {
+    where: {
+      source: "crux_bigquery",
+      identity: { in: [secondOrigin, firstOrigin] },
+      scopeKey: { startsWith: "month:" },
+      expiresAt: { gt: evaluatedAt }
+    },
+    orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
+  });
+  assert.deepEqual(rows.map(({ id, scopeKey, state }) => ({ id, scopeKey, state })), [{
+    id: "fresh_first",
+    scopeKey: "month:202606",
+    state: "available"
+  }, {
+    id: "fresh_second",
+    scopeKey: "month:202606",
+    state: "no_coverage"
+  }]);
+
+  await assert.rejects(repository.readReusableLatestCruxBigQueryCache(
+    "run_abcdefghijklmnop",
+    LEASE,
+    [firstOrigin, ""],
+    evaluatedAt
+  ), /cache identities are invalid/u);
+  assert.equal(transactionCount, 1);
+});
+
 test("paid request claim commits in-flight before granting network permission", async () => {
   let ledger;
   const calls = [];

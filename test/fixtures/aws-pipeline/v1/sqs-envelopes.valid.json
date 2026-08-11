@@ -38,7 +38,7 @@
       "version": 1,
       "type": "aggregation.check",
       "runId": "run_fixture_payload_discovery_0001",
-      "stage": "traffic",
+      "stage": "traffic_crux",
       "generation": 1,
       "reason": "terminal_task_recorded",
       "attempt": 1
@@ -48,6 +48,6 @@
     "discovery": 326,
     "lead": 329,
     "traffic": 340,
-    "aggregateCheck": 164
+    "aggregateCheck": 169
   }
 }

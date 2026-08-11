@@ -2462,7 +2462,9 @@ export class PrismaRunRepository {
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }
       }));
-      return transaction.trafficEnrichmentCache.findMany({ where: { OR } });
+      return transaction.trafficEnrichmentCache.findMany({
+        where: { expiresAt: { gt: now }, OR }
+      });
     });
   }
 
@@ -2473,6 +2475,9 @@ export class PrismaRunRepository {
     now = new Date()
   ) {
     if (!Array.isArray(identities) || identities.length === 0) return [];
+    if (identities.some((identity) => typeof identity !== "string" || !identity)) {
+      throw new Error("CrUX BigQuery cache identities are invalid");
+    }
     return this.prisma.$transaction(async (transaction) => {
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
@@ -2482,7 +2487,8 @@ export class PrismaRunRepository {
         where: {
           source: "crux_bigquery",
           identity: { in: [...new Set(identities)] },
-          scopeKey: { startsWith: "month:" }
+          scopeKey: { startsWith: "month:" },
+          expiresAt: { gt: now }
         },
         orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
       });

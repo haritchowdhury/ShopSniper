@@ -278,7 +278,7 @@ All sizes below are UTF-8 bytes from the actual JSON encoder.
 | combined traffic/CrUX result | 764 |
 | 1,000-occurrence boundary candidate | 722,790 |
 | 1,000 domain-work references | 267,013 |
-| SQS reference envelopes | 164–340 |
+| SQS reference envelopes | 169–340 |
 
 The traffic envelope is one `traffic.domain` message with one `itemId`. Lambda
 event-source batching groups these logical per-domain records at consumption
