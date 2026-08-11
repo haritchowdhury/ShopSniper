@@ -2152,6 +2152,7 @@ export class PrismaRunRepository {
     now
   ) {
     return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }
@@ -2299,6 +2300,7 @@ export class PrismaRunRepository {
     now = new Date()
   ) {
     return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
       requireLeaseMutation(await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { lastHeartbeatAt: now }

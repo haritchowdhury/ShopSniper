@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createPrismaClient } from "../src/prisma-client.js";
-import { materializeLeadFromProfile } from "../src/pipeline.js";
+import { failedLeadForRunStore, materializeLeadFromProfile } from "../src/pipeline.js";
 import { PrismaRunRepository, stableLeadId } from "../src/prisma-run-repository.js";
 import {
   runStoreCandidateFromDiscovery,
@@ -312,12 +312,28 @@ test(
       const winnerStore = await repository.claimRunStore(
         first.id, firstClaim.lease, firstStores[0].id
       );
-      await repository.saveDiscoveredLead(
+      const discoveredLead = await repository.saveDiscoveredLead(
         first.id,
         firstClaim.lease,
         winnerStore.runStore.id,
         { profile: store.profile, lead: store.lead }
       );
+      const discoveredReplay = await repository.saveDiscoveredLead(
+        first.id,
+        firstClaim.lease,
+        winnerStore.runStore.id,
+        { profile: store.profile, lead: store.lead }
+      );
+      assert.equal(discoveredReplay.id, discoveredLead.id);
+      const firstGrant = await prisma.userShop.findUnique({
+        where: { userId_shopId: { userId: "owner_a", shopId } }
+      });
+      assert.equal(firstGrant?.firstDiscoveredRunId, first.id);
+      assert.equal(firstGrant?.lastDiscoveredRunId, first.id);
+      assert.deepEqual(await prisma.userShopDiscovery.findMany({
+        where: { userShopId: firstGrant.id },
+        select: { runId: true, leadId: true }
+      }), [{ runId: first.id, leadId: discoveredLead.id }]);
       const firstSummary = await repository.completeLeadDiscovery(first.id, firstClaim.lease);
       assert.equal(firstSummary.qualified, 1);
       await repository.completeTrafficEnrichment(
@@ -361,12 +377,19 @@ test(
       const reusedStore = await repository.claimRunStore(
         second.id, secondClaim.lease, secondStores[0].id
       );
-      await repository.saveReusedLead(
+      const reusedLead = await repository.saveReusedLead(
         second.id,
         secondClaim.lease,
         reusedStore.runStore.id,
         materializeLeadFromProfile(store.candidatePayload, reusable.profilePayload)
       );
+      const reusedReplay = await repository.saveReusedLead(
+        second.id,
+        secondClaim.lease,
+        reusedStore.runStore.id,
+        materializeLeadFromProfile(store.candidatePayload, reusable.profilePayload)
+      );
+      assert.equal(reusedReplay.id, reusedLead.id);
       const secondSummary = await repository.completeLeadDiscovery(second.id, secondClaim.lease);
       assert.equal(secondSummary.qualified, 1);
       assert.equal(await prisma.lead.count(), 2);
@@ -388,6 +411,78 @@ test(
           leaseExpiresAt: expiresAt
         }
       })));
+      const thirdStores = await repository.saveDiscoveredStores(
+        third.id,
+        concurrentLeases[0],
+        [store],
+        [],
+        null
+      );
+      const failedStore = await repository.claimRunStore(
+        third.id,
+        concurrentLeases[0],
+        thirdStores[0].id
+      );
+      const failedLead = failedLeadForRunStore(
+        store.candidatePayload,
+        new Error("fixture lead failure")
+      );
+      const persistedFailedLead = await repository.saveFailedLead(
+        third.id,
+        concurrentLeases[0],
+        failedStore.runStore.id,
+        failedLead,
+        {
+          scope: "store",
+          code: "lead_discovery_failed",
+          result_url: store.candidatePayload.representative.resultUrl,
+          details: { errorType: "Error", shopId }
+        }
+      );
+      assert.equal(persistedFailedLead.id, stableLeadId(third.id, failedLead, 0));
+      assert.equal((await prisma.runStore.findUnique({
+        where: { id: failedStore.runStore.id }
+      }))?.state, "failed");
+
+      assert.deepEqual(await prisma.userShop.findMany({
+        where: { shopId },
+        orderBy: { userId: "asc" },
+        select: {
+          userId: true,
+          firstDiscoveredRunId: true,
+          lastDiscoveredRunId: true
+        }
+      }), [
+        {
+          userId: "owner_a",
+          firstDiscoveredRunId: first.id,
+          lastDiscoveredRunId: first.id
+        },
+        {
+          userId: "owner_b",
+          firstDiscoveredRunId: second.id,
+          lastDiscoveredRunId: second.id
+        },
+        {
+          userId: "owner_c",
+          firstDiscoveredRunId: third.id,
+          lastDiscoveredRunId: third.id
+        }
+      ]);
+      const ownerDiscoveries = await prisma.userShopDiscovery.findMany({
+        where: { runId: { in: [first.id, second.id, third.id] } },
+        select: {
+          runId: true,
+          leadId: true,
+          userShop: { select: { userId: true } }
+        }
+      });
+      assert.deepEqual(ownerDiscoveries.sort((left, right) =>
+        left.userShop.userId.localeCompare(right.userShop.userId)), [
+        { runId: first.id, leadId: discoveredLead.id, userShop: { userId: "owner_a" } },
+        { runId: second.id, leadId: reusedLead.id, userShop: { userId: "owner_b" } },
+        { runId: third.id, leadId: persistedFailedLead.id, userShop: { userId: "owner_c" } }
+      ]);
       const competingTrafficClaims = await Promise.all([third, fourth].map(
         (run, index) => repository.claimShopWork(
           run.id,
