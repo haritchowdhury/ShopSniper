@@ -192,6 +192,36 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     requestTimeoutMs: integer("REQUEST_TIMEOUT_MS", 20000, {
       min: 1000,
       max: 120000
+    }),
+    runExecutionBackend: process.env.RUN_EXECUTION_BACKEND || "local",
+    awsPipelineEnabled: strictBoolean("AWS_PIPELINE_ENABLED", false),
+    awsRegion: process.env.AWS_REGION || "ap-south-2",
+    awsPipelineBucket: process.env.AWS_PIPELINE_BUCKET || "",
+    awsPipelineDiscoveryQueueUrl: process.env.AWS_PIPELINE_DISCOVERY_QUEUE_URL || "",
+    awsPipelineDomainAggregationQueueUrl:
+      process.env.AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL || "",
+    awsPipelineLeadQueueUrl: process.env.AWS_PIPELINE_LEAD_QUEUE_URL || "",
+    awsPipelineLeadAggregationQueueUrl:
+      process.env.AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL || "",
+    awsPipelineTrafficQueueUrl: process.env.AWS_PIPELINE_TRAFFIC_QUEUE_URL || "",
+    awsPipelineFinalAggregationQueueUrl:
+      process.env.AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL || "",
+    awsPipelineSecretId: process.env.AWS_PIPELINE_SECRET_ID || "",
+    awsPipelineTaskLeaseMs: integer("AWS_PIPELINE_TASK_LEASE_MS", 60000, {
+      min: 60000,
+      max: 60000
+    }),
+    awsPipelineAggregatorLeaseMs: integer("AWS_PIPELINE_AGGREGATOR_LEASE_MS", 120000, {
+      min: 120000,
+      max: 120000
+    }),
+    awsPipelineRecoveryAgeMs: integer("AWS_PIPELINE_RECOVERY_AGE_MS", 300000, {
+      min: 300000,
+      max: 300000
+    }),
+    awsPipelineMaxArtifactBytes: integer("AWS_PIPELINE_MAX_ARTIFACT_BYTES", 5000000, {
+      min: 5000000,
+      max: 5000000
     })
   };
 
@@ -215,6 +245,9 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
   }
   if (!["low", "medium", "high"].includes(config.webSearchContextSize)) {
     throw new Error("WEB_SEARCH_CONTEXT_SIZE must be low, medium, or high");
+  }
+  if (!["local", "aws"].includes(config.runExecutionBackend)) {
+    throw new Error("RUN_EXECUTION_BACKEND must be local or aws");
   }
   return Object.freeze(config);
 }
