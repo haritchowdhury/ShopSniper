@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,39 +9,13 @@ import { serializeLead } from "../src/api-serializer.js";
 import { LeadStateInvariantError } from "../src/lead-state.js";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
+import { assertMigrationStayedInSchema, createIsolatedTestSchema,
+  deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
 const enabled =
   process.env.ALLOW_DATABASE_TESTS === "true" &&
   Boolean(process.env.TEST_DATABASE_URL);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-
-function scopedDatabaseUrl(connectionString, schema) {
-  const url = new URL(connectionString);
-  url.searchParams.set("schema", schema);
-  return url.toString();
-}
-
-function deploy(databaseUrl, configPath) {
-  const result = spawnSync(
-    "npx",
-    ["prisma", "migrate", "deploy", "--config", configPath],
-    {
-      cwd: projectRoot,
-      env: {
-        ...process.env,
-        DATABASE_URL: databaseUrl,
-        DIRECT_URL: "",
-        PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
-      },
-      encoding: "utf8"
-    }
-  );
-  assert.equal(
-    result.status,
-    0,
-    `migration deploy failed: ${result.stderr || result.stdout}`
-  );
-}
 
 async function baselineMigrationConfig() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "email-scraper-gr4-"));
@@ -139,14 +112,13 @@ test(
   { skip: !enabled, timeout: 120_000 },
   async () => {
     const schema = `gr4_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     const baseline = await baselineMigrationConfig();
     let prisma;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, baseline.configPath);
+      deployPrismaMigrations(scopedUrl, baseline.configPath);
       prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
 
       await prisma.$executeRawUnsafe(`
         INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "pipelineVersion", "scoringVersion")
@@ -167,8 +139,8 @@ test(
       await prisma.$disconnect();
       prisma = undefined;
 
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prisma = createPrismaClient(scopedUrl);
 
       const migratedColumns = await base.$queryRawUnsafe(`

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { requestText } from "./http-client.js";
 import { normalizeEmail, normalizePhone } from "./contact-extractor.js";
 import { validateContactPageUrl, validateSocialProfile } from "./contact-evidence.js";
+import { fingerprintJson } from "./aws-pipeline/core/canonical.js";
 
 export const AI_NORMALIZATION_CONTRACT_VERSION = "openai-chat-completions-shopify-lead-v1";
 
@@ -56,6 +57,23 @@ function contractError(code, message) {
 export function validateAiResult(value) {
   const parsed = aiLeadSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+export function buildAiNormalizationInput(candidate, evidence, config) {
+  return {
+    contractVersion: AI_NORMALIZATION_CONTRACT_VERSION,
+    model: config.openaiModel,
+    candidateStableIdentity: candidate.stableIdentity || candidate.resolvedDomain,
+    suppliedEvidence: {
+      store_url: `https://${candidate.resolvedDomain}/`,
+      possible_store_name: evidence.storeName,
+      emails: evidence.allEmails,
+      phones: evidence.allPhones,
+      contact_url: evidence.contactUrl,
+      social_profiles: evidence.socialProfiles,
+      page_excerpts: evidence.snippets.slice(0, 5)
+    }
+  };
 }
 
 export function parseAiNormalizationResponse(body) {
@@ -119,7 +137,7 @@ export async function normalizeWithAi(
   candidate,
   evidence,
   config,
-  { request = requestText } = {}
+  { request = requestText, beforeDispatch = async () => "dispatch" } = {}
 ) {
   if (!config.openaiApiKey || !config.enableAiNormalization) return null;
 
@@ -137,21 +155,20 @@ export async function normalizeWithAi(
       additional_information: { type: "string" }
     }
   };
-  const suppliedEvidence = {
-    store_url: `https://${candidate.resolvedDomain}/`,
-    possible_store_name: evidence.storeName,
-    emails: evidence.allEmails,
-    phones: evidence.allPhones,
-    contact_url: evidence.contactUrl,
-    social_profiles: evidence.socialProfiles,
-    page_excerpts: evidence.snippets.slice(0, 5)
-  };
+  const input = buildAiNormalizationInput(candidate, evidence, config);
+  const inputFingerprint = fingerprintJson(input);
+  const clientRequestId = `openai-${inputFingerprint.slice(0, 32)}`;
+  const decision = await beforeDispatch({ input, inputFingerprint, clientRequestId });
+  if (decision === "skip") return null;
+  if (decision !== "dispatch") throw new Error("AI dispatch decision is invalid");
+  const suppliedEvidence = input.suppliedEvidence;
 
   const response = await request("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       authorization: `Bearer ${config.openaiApiKey}`,
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "X-Client-Request-Id": clientRequestId
     },
     body: JSON.stringify({
       model: config.openaiModel,

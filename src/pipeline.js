@@ -114,7 +114,7 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function processStore(candidate, config, dependencies) {
+async function buildLeadFromDocuments(candidate, documents, config, dependencies) {
   let validation = dependencies.validate(candidate, config, { final: false });
   if (!validation.valid) {
     return recordFromCandidate(candidate, {
@@ -141,45 +141,21 @@ async function processStore(candidate, config, dependencies) {
     });
   }
 
-  let pageUrls;
-  try {
-    pageUrls = await dependencies.discoverPages(candidate, config);
-  } catch {
-    pageUrls = [candidate.finalUrl];
-  }
-
   const pages = [];
   const evidencePages = [];
   const pageErrors = [];
-  const fetched = await mapWithConcurrency(
-    pageUrls,
-    config.pageFetchConcurrency || 2,
-    async (pageUrl) => {
+  const fetched = await mapWithConcurrency(documents, config.pageFetchConcurrency || 2,
+    async (document) => {
+    const pageUrl = document.requestedUrl || document.url;
     try {
-      let html;
-      let evidenceUrl = pageUrl;
-      let fetchAssessment = null;
-      let rendered = false;
-      let responseStatus = 200;
-      if (pageUrl === candidate.finalUrl || pageUrl === candidate.url) {
-        html = candidate.html;
-        fetchAssessment = candidate.initialFetch?.assessment || null;
-        rendered = Boolean(candidate.initialFetch?.rendered);
-      } else {
-        const purpose = new URL(pageUrl).pathname === "/" ? "storefront" : "evidence";
-        const response = await dependencies.fetchPage(pageUrl, config, {
-          purpose,
-          allowedHostnames: candidate.allowedHostnames
-        });
-        if (!sameAllowedHostname(response.finalUrl, candidate.allowedHostnames)) {
-          throw new Error("Page redirected outside the verified store hostnames");
-        }
-        html = response.body;
-        evidenceUrl = response.finalUrl;
-        fetchAssessment = response.fetchAssessment || null;
-        rendered = Boolean(response.rendered);
-        responseStatus = response.status ?? 200;
-      }
+      if (document.error) throw document.error;
+      const html = document.body ?? document.html;
+      const evidenceUrl = document.finalUrl || document.url;
+      const fetchAssessment = document.fetchAssessment || document.assessment || null;
+      const rendered = Boolean(document.rendered);
+      const responseStatus = document.status ?? 200;
+      if (!sameAllowedHostname(evidenceUrl, candidate.allowedHostnames))
+        throw new Error("Page redirected outside the verified store hostnames");
       return {
         page: dependencies.extractEvidence({
           html,
@@ -361,6 +337,39 @@ async function processStore(candidate, config, dependencies) {
     rejection_reason: rejectionReason,
     error: aiError ? `AI normalization failed; deterministic evidence retained (${aiError})` : ""
   });
+}
+
+async function legacyFetchDomainPages(candidate, config, dependencies, refetch = true) {
+  const fetchedCandidate = refetch ? await refetchCandidate(candidate, config, dependencies) : candidate;
+  let pageUrls;
+  try { pageUrls = await dependencies.discoverPages(fetchedCandidate, config); }
+  catch { pageUrls = [fetchedCandidate.finalUrl]; }
+  const fetched = await mapWithConcurrency(pageUrls, config.pageFetchConcurrency || 2,
+    async (pageUrl) => {
+      try {
+        if (pageUrl === fetchedCandidate.finalUrl || pageUrl === fetchedCandidate.url) {
+          return { requestedUrl: pageUrl, finalUrl: fetchedCandidate.finalUrl,
+            body: fetchedCandidate.html, status: 200,
+            fetchAssessment: fetchedCandidate.initialFetch?.assessment || null,
+            rendered: Boolean(fetchedCandidate.initialFetch?.rendered) };
+        }
+        const purpose = new URL(pageUrl).pathname === "/" ? "storefront" : "evidence";
+        const response = await dependencies.fetchPage(pageUrl, config, { purpose,
+          allowedHostnames: fetchedCandidate.allowedHostnames });
+        return { requestedUrl: pageUrl, finalUrl: response.finalUrl, body: response.body,
+          status: response.status ?? 200, fetchAssessment: response.fetchAssessment || null,
+          rendered: Boolean(response.rendered) };
+      } catch (error) {
+        return { requestedUrl: pageUrl, finalUrl: pageUrl, error };
+      }
+    });
+  return { candidate: fetchedCandidate, documents: fetched,
+    diagnostics: fetched.flatMap((item) => item.error ? [safeErrorType(item.error)] : []) };
+}
+
+async function processStore(candidate, config, dependencies) {
+  const fetched = await legacyFetchDomainPages(candidate, config, dependencies, false);
+  return buildLeadFromDocuments(fetched.candidate, fetched.documents, config, dependencies);
 }
 
 const DEFAULT_DEPENDENCIES = {
@@ -836,12 +845,18 @@ export async function discoverLeadForRunStore(
   dependencyOverrides = {}
 ) {
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
-  const candidate = await refetchCandidate(
-    candidateFromRunStorePayload(runStore.candidatePayload),
-    config,
-    dependencies
-  );
-  const lead = await processStore(candidate, config, dependencies);
+  return discoverLeadForRunStoreWithFetcher(config, runStore,
+    (input) => legacyFetchDomainPages(input.candidate, config, dependencies), dependencies);
+}
+
+export async function discoverLeadForRunStoreWithFetcher(
+  config, runStore, fetchDomainPages, dependencyOverrides = {}
+) {
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencyOverrides };
+  const original = candidateFromRunStorePayload(runStore.candidatePayload);
+  const fetched = await fetchDomainPages({ candidate: original, config });
+  const candidate = fetched.candidate || original;
+  const lead = await buildLeadFromDocuments(candidate, fetched.documents, config, dependencies);
   return { lead, profile: profileFromLead(candidate, lead) };
 }
 

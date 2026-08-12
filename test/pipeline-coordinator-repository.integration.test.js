@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,25 +8,12 @@ import { createPrismaClient } from "../src/prisma-client.js";
 import { PipelineCoordinatorRepository, assertCompleteAggregatorInTransaction,
   completeAggregatorInTransaction, registerStageInTransaction
 } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
+import { assertMigrationStayedInSchema, createIsolatedTestSchema,
+  deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const fp = (character) => character.repeat(64);
-
-function scopedDatabaseUrl(connectionString, schema) {
-  const url = new URL(connectionString);
-  url.searchParams.set("schema", schema);
-  return url.toString();
-}
-
-function deploy(databaseUrl, configPath) {
-  const result = spawnSync("npx", ["prisma", "migrate", "deploy", "--config", configPath], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl, DIRECT_URL: "", PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1" },
-    encoding: "utf8"
-  });
-  assert.equal(result.status, 0, `migration deploy failed: ${result.stderr || result.stdout}`);
-}
 
 async function preG5MigrationConfig() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "email-scraper-g5-"));
@@ -78,13 +64,11 @@ function registration(runId, stage, tasks, manifestProducedAt = new Date("2026-0
 test("G5 migration replays and preserves pre-migration rows",
   { skip: !enabled, timeout: 120_000 }, async () => {
     const schema = `g5_migration_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     const baseline = await preG5MigrationConfig();
     let prisma;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, baseline.configPath);
+      deployPrismaMigrations(scopedUrl, baseline.configPath);
       prisma = createPrismaClient(scopedUrl);
       await prisma.$executeRawUnsafe(`
         INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
@@ -97,9 +81,10 @@ test("G5 migration replays and preserves pre-migration rows",
       `);
       await prisma.$disconnect();
       prisma = undefined;
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
       const legacy = await prisma.run.findUnique({ where: { id: "run_legacy_g5_fixture_0001" } });
       assert.equal(legacy.executionBackend, "local");
       assert.equal(legacy.pipelineGeneration, 1);
@@ -117,13 +102,11 @@ test("G5 migration replays and preserves pre-migration rows",
 test("G-R3 migration backfills stage timestamps and preserves nullable provider configuration",
   { skip: !enabled, timeout: 180_000 }, async () => {
     const schema = `gr3_migration_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     const baseline = await preGR3MigrationConfig();
     let prisma;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, baseline.configPath);
+      deployPrismaMigrations(scopedUrl, baseline.configPath);
       const createdAt = new Date("2026-08-11T12:34:56.789Z");
       prisma = createPrismaClient(scopedUrl);
       await prisma.$executeRawUnsafe(`
@@ -141,8 +124,9 @@ test("G-R3 migration backfills stage timestamps and preserves nullable provider 
       `);
       await prisma.$disconnect();
       prisma = undefined;
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
       const [run, stage, indexRows] = await Promise.all([
         prisma.run.findUnique({ where: { id: "run_gr3_legacy_stage_0001" } }),
         prisma.pipelineStage.findUnique({ where: { id: "stage_gr3_legacy_0001" } }),
@@ -163,14 +147,13 @@ test("G-R3 migration backfills stage timestamps and preserves nullable provider 
 test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
   { skip: !enabled, timeout: 180_000 }, async () => {
     const schema = `g5_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     let prismaA;
     let prismaB;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prismaA = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prismaA, schema);
       prismaB = createPrismaClient(scopedUrl);
       const repositoryA = new PipelineCoordinatorRepository(prismaA);
       const repositoryB = new PipelineCoordinatorRepository(prismaB);
@@ -298,14 +281,13 @@ test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
 test("G5 expired leases, cancellation, and recovery remain fenced and bounded",
   { skip: !enabled, timeout: 180_000 }, async () => {
     const schema = `g5_recovery_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     let prismaA;
     let prismaB;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prismaA = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prismaA, schema);
       prismaB = createPrismaClient(scopedUrl);
       const repositoryA = new PipelineCoordinatorRepository(prismaA);
       const repositoryB = new PipelineCoordinatorRepository(prismaB);

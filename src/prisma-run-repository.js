@@ -335,13 +335,15 @@ async function bulkClaimShopWorkRows(
         "scopeKey" text,
         "expectedState" text,
         "expectedRunId" text,
-        "expectedLeaseToken" text
+        "expectedLeaseToken" text,
+        "expectedPipelineTaskId" text
       )
     )
     UPDATE "ShopWork" AS work SET
       "state" = 'processing'::"ShopWorkState",
       "processingRunId" = ${runIdentifier},
       "processingLeaseToken" = ${lease.token},
+      "processingPipelineTaskId" = NULL,
       "safeErrorCode" = NULL,
       "safeErrorMessage" = NULL,
       "startedAt" = ${now},
@@ -355,6 +357,7 @@ async function bulkClaimShopWorkRows(
       AND work."state" = input."expectedState"::"ShopWorkState"
       AND work."processingRunId" IS NOT DISTINCT FROM input."expectedRunId"
       AND work."processingLeaseToken" IS NOT DISTINCT FROM input."expectedLeaseToken"
+      AND work."processingPipelineTaskId" IS NOT DISTINCT FROM input."expectedPipelineTaskId"
       AND NOT (
         work."workType" = 'dataforseo'::"ShopWorkType"
         AND EXISTS (
@@ -1731,6 +1734,68 @@ export class PrismaRunRepository {
     });
   }
 
+  async claimAwsLeadWork(
+    { runId: runIdentifier, generation, taskId, taskToken, shopId },
+    now = new Date()
+  ) {
+    if (typeof shopId !== "string" || !/^shop_[A-Za-z0-9_-]{16,80}$/u.test(shopId))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const task = await transaction.pipelineTask.findUnique({ where: { id: taskId },
+        include: { stage: { include: { run: true } } } });
+      if (!task || task.leaseToken !== taskToken || task.itemKey !== shopId ||
+          task.state !== "processing" || task.stage.stage !== "lead" ||
+          task.stage.runId !== runIdentifier || task.stage.generation !== generation)
+        throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
+      if (task.stage.run.state !== "running")
+        return { outcome: task.stage.run.state === "cancelled" ? "cancelled" : "busy" };
+      const key = { shopId_workType_scopeKey: { shopId, workType: "lead_discovery", scopeKey: "current" } };
+      let work = await transaction.shopWork.findUnique({ where: key });
+      if (!work) {
+        work = await transaction.shopWork.create({ data: { id: shopWorkId(shopId, "lead_discovery", "current"),
+          shopId, workType: "lead_discovery", scopeKey: "current", state: "processing",
+          processingRunId: runIdentifier, processingLeaseToken: null,
+          processingPipelineTaskId: taskId, startedAt: now } });
+        return { outcome: "owned" };
+      }
+      if (work.state === "completed") {
+        const profile = await transaction.shopLeadProfile.findUnique({ where: { shopId } });
+        if (!profile || profile.state !== "completed" || profile.profilePayload == null) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+        const parsed = parseShopLeadProfile(profile.profilePayload);
+        const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { stableKey: true } });
+        if (!shop) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        assertProfileMatchesShop(parsed, shop.stableKey);
+        return { outcome: "completed", profile: parsed };
+      }
+      if (work.state === "ambiguous") return { outcome: "ambiguous", safeErrorCode: work.safeErrorCode };
+      if (work.state === "failed" && work.processingRunId === runIdentifier)
+        return { outcome: "failed", safeErrorCode: work.safeErrorCode };
+      let active = false;
+      if (work.state === "processing" && work.processingPipelineTaskId) {
+        const ownerTask = await transaction.pipelineTask.findUnique({ where: { id: work.processingPipelineTaskId },
+          include: { stage: { include: { run: { select: { state: true } } } } } });
+        active = ownerTask?.stage?.run?.state === "running" && ownerTask.state !== "cancelled";
+      } else if (work.state === "processing" && work.processingRunId) {
+        const owner = await transaction.run.findUnique({ where: { id: work.processingRunId },
+          select: { state: true, leaseToken: true, leaseExpiresAt: true } });
+        active = owner?.state === "running" && owner.leaseToken === work.processingLeaseToken &&
+          owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
+      }
+      if (active) return { outcome: "busy" };
+      const replaced = await transaction.shopWork.updateMany({ where: { id: work.id,
+        state: work.state, processingRunId: work.processingRunId,
+        processingLeaseToken: work.processingLeaseToken,
+        processingPipelineTaskId: work.processingPipelineTaskId }, data: { state: "processing",
+        processingRunId: runIdentifier, processingLeaseToken: null,
+        processingPipelineTaskId: taskId, safeErrorCode: null, safeErrorMessage: null,
+        startedAt: now, completedAt: null } });
+      return { outcome: replaced.count === 1 ? "owned" : "busy" };
+    });
+  }
+
   async claimShopWork(
     runIdentifier,
     lease,
@@ -1788,13 +1853,18 @@ export class PrismaRunRepository {
           return { outcome: "ambiguous", networkAllowed: false, work: current };
         }
         if (current.state === "processing") {
-          const owner = current.processingRunId
+          const taskOwner = current.processingPipelineTaskId
+            ? await transaction.pipelineTask.findUnique({ where: { id: current.processingPipelineTaskId },
+                include: { stage: { include: { run: { select: { state: true } } } } } }) : null;
+          const owner = !current.processingPipelineTaskId && current.processingRunId
             ? await transaction.run.findUnique({
                 where: { id: current.processingRunId },
                 select: { state: true, leaseToken: true, leaseExpiresAt: true }
               })
             : null;
-          const activeOwner = owner?.state === "running" &&
+          const activeOwner = current.processingPipelineTaskId
+            ? taskOwner?.stage?.run?.state === "running" && taskOwner.state !== "cancelled"
+            : owner?.state === "running" &&
             owner.leaseToken === current.processingLeaseToken &&
             owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
           if (activeOwner) {
@@ -1815,6 +1885,7 @@ export class PrismaRunRepository {
             state: "processing",
             processingRunId: runIdentifier,
             processingLeaseToken: lease.token,
+            processingPipelineTaskId: null,
             safeErrorCode: null,
             safeErrorMessage: null,
             startedAt: now,
@@ -1898,10 +1969,21 @@ export class PrismaRunRepository {
       if (currentRows.length !== normalized.length) {
         throw new Error("Shop work batch did not materialize every requested key");
       }
+      const pipelineOwnerIds = [...new Set(currentRows.map((row) => row.processingPipelineTaskId).filter(Boolean))];
+      const pipelineOwners = pipelineOwnerIds.length ? await transaction.pipelineTask.findMany({
+        where: { id: { in: pipelineOwnerIds } },
+        include: { stage: { include: { run: { select: { state: true } } } } }
+      }) : [];
+      const pipelineOwnerById = new Map(pipelineOwners.map((row) => [row.id, row]));
       const eligible = currentRows.flatMap((work) => {
         if (work.state === "pending") return [work];
         if (work.state === "failed" && work.processingRunId !== runIdentifier) return [work];
         if (work.state !== "processing") return [];
+        if (work.processingPipelineTaskId) {
+          const taskOwner = pipelineOwnerById.get(work.processingPipelineTaskId);
+          const activeTaskOwner = taskOwner?.stage?.run?.state === "running" && taskOwner.state !== "cancelled";
+          return activeTaskOwner ? [] : [work];
+        }
         const owner = work.processingRun;
         const activeOwner = owner?.state === "running" &&
           owner.leaseToken === work.processingLeaseToken &&
@@ -1914,7 +1996,8 @@ export class PrismaRunRepository {
         scopeKey: work.scopeKey,
         expectedState: work.state,
         expectedRunId: work.processingRunId,
-        expectedLeaseToken: work.processingLeaseToken
+        expectedLeaseToken: work.processingLeaseToken,
+        expectedPipelineTaskId: work.processingPipelineTaskId
       }));
       const wonRows = await bulkClaimShopWorkRows(
         transaction, eligible, runIdentifier, lease, now

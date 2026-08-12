@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { PipelineCoordinatorRepository } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
@@ -11,25 +9,11 @@ import { parseRunStoreCandidate, runStoreId, shopIdForStableKey,
   stableShopIdentity } from "../src/shop-persistence-contract.js";
 import candidateFixture from "./fixtures/aws-pipeline/v1/per-query-discovery.valid.json" with { type: "json" };
 import providerFixture from "./fixtures/aws-pipeline/v1/aws-provider-config.valid.json" with { type: "json" };
+import { assertMigrationStayedInSchema, createIsolatedTestSchema,
+  deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
-const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const fp = (value) => value.repeat(64);
-
-function scopedDatabaseUrl(connectionString, schema) {
-  const url = new URL(connectionString);
-  url.searchParams.set("schema", schema);
-  return url.toString();
-}
-
-function deploy(databaseUrl) {
-  const result = spawnSync("npx", ["prisma", "migrate", "deploy", "--config", "prisma.config.ts"], {
-    cwd: projectRoot,
-    env: { ...process.env, DATABASE_URL: databaseUrl, DIRECT_URL: "", PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1" },
-    encoding: "utf8"
-  });
-  assert.equal(result.status, 0, `migration deploy failed: ${result.stderr || result.stdout}`);
-}
 
 function domainFor(runId) {
   const candidatePayload = parseRunStoreCandidate(candidateFixture.stores[0].candidatePayload);
@@ -62,13 +46,12 @@ async function createClaimedDiscovery(prisma, coordinator, runId, now) {
 test("G8 atomically checkpoints domains, preserves audits, fences visibility, and rolls back conflicts",
   { skip: !enabled, timeout: 120_000 }, async () => {
     const schema = `g8_domain_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     let prisma;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl);
+      deployPrismaMigrations(scopedUrl);
       prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
       const coordinator = new PipelineCoordinatorRepository(prisma);
       const repository = new PrismaRunRepository(prisma);
       const now = new Date("2026-08-12T10:00:00.000Z");

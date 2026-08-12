@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,39 +10,13 @@ import {
   stableLeadId
 } from "../src/prisma-run-repository.js";
 import { recoverInterruptedWork } from "../src/server.js";
+import { assertMigrationStayedInSchema, createIsolatedTestSchema,
+  deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
 const enabled =
   process.env.ALLOW_DATABASE_TESTS === "true" &&
   Boolean(process.env.TEST_DATABASE_URL);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-
-function scopedDatabaseUrl(connectionString, schema) {
-  const url = new URL(connectionString);
-  url.searchParams.set("schema", schema);
-  return url.toString();
-}
-
-function deploy(databaseUrl, configPath) {
-  const result = spawnSync(
-    "npx",
-    ["prisma", "migrate", "deploy", "--config", configPath],
-    {
-      cwd: projectRoot,
-      env: {
-        ...process.env,
-        DATABASE_URL: databaseUrl,
-        DIRECT_URL: "",
-        PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
-      },
-      encoding: "utf8"
-    }
-  );
-  assert.equal(
-    result.status,
-    0,
-    `migration deploy failed: ${result.stderr || result.stdout}`
-  );
-}
 
 async function migrationConfigBefore({ includeTe3 = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "email-scraper-te3-"));
@@ -161,14 +134,12 @@ test(
   { skip: !enabled, timeout: 180_000 },
   async () => {
     const schema = `te3_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
       const baseline = await migrationConfigBefore();
     let prismaA;
     let prismaB;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, baseline.configPath);
+      deployPrismaMigrations(scopedUrl, baseline.configPath);
       const preMigration = createPrismaClient(scopedUrl);
       await preMigration.$executeRawUnsafe(`
         INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable")
@@ -180,9 +151,10 @@ test(
       `);
       await preMigration.$disconnect();
 
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prismaA = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prismaA, schema);
       prismaB = createPrismaClient(scopedUrl);
       const config = {
         dataForSeoEnrichmentEnabled: true,
@@ -814,13 +786,11 @@ test(
   { skip: !enabled, timeout: 120_000 },
   async () => {
     const schema = `ter2_migration_${Date.now()}_${process.pid}`;
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
     const baseline = await migrationConfigBefore({ includeTe3: true });
     let prisma;
     try {
-      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      deploy(scopedUrl, baseline.configPath);
+      deployPrismaMigrations(scopedUrl, baseline.configPath);
       const before = createPrismaClient(scopedUrl);
       await before.$executeRawUnsafe(`
         INSERT INTO "${schema}"."Run" ("id", "ownerId", "state", "phase", "stage", "normalizedShopTypes", "progress", "resultsAvailable", "trafficEnrichmentConfig")
@@ -838,8 +808,9 @@ test(
       `);
       await before.$disconnect();
 
-      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
       prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
       const row = await prisma.dataForSeoRequestLedger.findUnique({
         where: { requestFingerprint: "a".repeat(64) }
       });

@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { failedLeadForRunStore, materializeLeadFromProfile } from "../src/pipeline.js";
 import { PrismaRunRepository, stableLeadId } from "../src/prisma-run-repository.js";
@@ -9,6 +7,8 @@ import {
   runStoreCandidateFromDiscovery,
   stableShopIdentity
 } from "../src/shop-persistence-contract.js";
+import { assertMigrationStayedInSchema, createIsolatedTestSchema,
+  deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" &&
   Boolean(process.env.TEST_DATABASE_URL);
@@ -236,36 +236,11 @@ test(
   "progressive checkpoints deduplicate shops and claims while preserving leads after traffic failure",
   { skip: !enabled, timeout: 120_000 },
   async () => {
-    const projectRoot = fileURLToPath(new URL("..", import.meta.url));
     const schema = `progressive_${Date.now()}_${process.pid}`;
-    const scopedUrl = new URL(process.env.TEST_DATABASE_URL);
-    scopedUrl.searchParams.set("schema", schema);
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-    const migration = spawnSync(
-      "npx",
-      ["prisma", "migrate", "deploy", "--config", "prisma.config.ts"],
-      {
-        cwd: projectRoot,
-        env: {
-          ...process.env,
-          DATABASE_URL: scopedUrl.toString(),
-          DIRECT_URL: "",
-          PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
-        },
-        encoding: "utf8"
-      }
-    );
-    if (migration.status !== 0) {
-      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-      await base.$disconnect();
-    }
-    assert.equal(
-      migration.status,
-      0,
-      `progressive migration failed: ${migration.stderr || migration.stdout}`
-    );
-    const prisma = createPrismaClient(scopedUrl.toString());
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    deployPrismaMigrations(scopedUrl);
+    const prisma = createPrismaClient(scopedUrl);
+    await assertMigrationStayedInSchema(prisma, schema);
     const repository = new PrismaRunRepository(prisma);
     try {
       const first = await repository.createRun("owner_a", [{ shopType: "eyewear" }]);
@@ -508,32 +483,11 @@ test(
   "100-store checkpoints stay within the default transaction timeout and concurrent batches converge",
   { skip: !enabled, timeout: 120_000 },
   async () => {
-    const projectRoot = fileURLToPath(new URL("..", import.meta.url));
     const schema = `bulk_store_${Date.now()}_${process.pid}`;
-    const scopedUrl = new URL(process.env.TEST_DATABASE_URL);
-    scopedUrl.searchParams.set("schema", schema);
-    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
-    await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-    const migration = spawnSync(
-      "npx",
-      ["prisma", "migrate", "deploy", "--config", "prisma.config.ts"],
-      {
-        cwd: projectRoot,
-        env: {
-          ...process.env,
-          DATABASE_URL: scopedUrl.toString(),
-          DIRECT_URL: "",
-          PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "1"
-        },
-        encoding: "utf8"
-      }
-    );
-    if (migration.status !== 0) {
-      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-      await base.$disconnect();
-    }
-    assert.equal(migration.status, 0, migration.stderr || migration.stdout);
-    const prisma = createPrismaClient(scopedUrl.toString());
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    deployPrismaMigrations(scopedUrl);
+    const prisma = createPrismaClient(scopedUrl);
+    await assertMigrationStayedInSchema(prisma, schema);
     const repository = new PrismaRunRepository(prisma);
     try {
       const runs = await Promise.all([
