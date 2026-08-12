@@ -1960,6 +1960,350 @@ export class PrismaRunRepository {
     });
   }
 
+  async claimAwsRunLease(
+    { runId: runIdentifier, generation, owner, token, leaseDurationMs },
+    now = new Date()
+  ) {
+    if (!Number.isInteger(generation) || generation < 1 ||
+        typeof owner !== "string" || !owner || typeof token !== "string" || !token ||
+        leaseDurationMs !== 60000) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const run = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      if (!run || run.executionBackend !== "aws" || run.pipelineGeneration !== generation)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (run.state !== "running") return { outcome: "cancelled" };
+      if (run.leaseToken === token && run.leaseExpiresAt instanceof Date && run.leaseExpiresAt > now)
+        return { outcome: "owned", lease: { owner: run.leaseOwner, token, attempt: run.leaseAttempt,
+          expiresAt: run.leaseExpiresAt } };
+      if (run.leaseToken && run.leaseExpiresAt instanceof Date && run.leaseExpiresAt > now)
+        return { outcome: "busy" };
+      const expiresAt = new Date(now.getTime() + leaseDurationMs);
+      const claimed = await transaction.run.updateMany({ where: { id: runIdentifier,
+        state: "running", pipelineGeneration: generation, leaseToken: run.leaseToken,
+        leaseExpiresAt: run.leaseExpiresAt }, data: { leaseOwner: owner, leaseToken: token,
+        leaseAcquiredAt: now, leaseExpiresAt: expiresAt, lastHeartbeatAt: now,
+        leaseAttempt: { increment: 1 } } });
+      if (claimed.count !== 1) return { outcome: "busy" };
+      const durable = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      return { outcome: "owned", lease: { owner, token, attempt: durable.leaseAttempt, expiresAt } };
+    });
+  }
+
+  async renewAwsRunLease(
+    { runId: runIdentifier, generation, token, leaseDurationMs }, now = new Date()
+  ) {
+    if (leaseDurationMs !== 60000) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const expiresAt = new Date(now.getTime() + leaseDurationMs);
+    const updated = await this.prisma.run.updateMany({ where: { id: runIdentifier,
+      executionBackend: "aws", pipelineGeneration: generation, state: "running", leaseToken: token,
+      leaseExpiresAt: { gt: now } }, data: { leaseExpiresAt: expiresAt, lastHeartbeatAt: now } });
+    if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
+    return { expiresAt };
+  }
+
+  async releaseAwsRunLease({ runId: runIdentifier, generation, token }, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const updated = await transaction.run.updateMany({ where: { id: runIdentifier,
+        executionBackend: "aws", pipelineGeneration: generation, state: "running", leaseToken: token },
+      data: { leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null,
+        lastHeartbeatAt: now } });
+      if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
+      return { run: await transaction.run.findUnique({ where: { id: runIdentifier } }) };
+    });
+  }
+
+  async loadAwsTrafficStage({ runId: runIdentifier, generation, runLease }, now = new Date()) {
+    const loaded = await this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const run = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      if (!run || run.executionBackend !== "aws" || run.pipelineGeneration !== generation ||
+          run.state !== "running" || run.leaseToken !== runLease?.token ||
+          !(run.leaseExpiresAt instanceof Date) || run.leaseExpiresAt <= now)
+        throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
+      const stage = await transaction.pipelineStage.findUnique({ where: {
+        runId_stage_generation: { runId: runIdentifier, stage: "traffic_crux", generation } } });
+      if (!stage || stage.state !== "collecting") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const tasks = await transaction.pipelineTask.findMany({ where: { stageId: stage.id }, orderBy: { itemKey: "asc" } });
+      if (tasks.length !== stage.expectedCount) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const leads = await transaction.lead.findMany({ where: { runId: runIdentifier, status: "qualified" },
+        orderBy: [{ shopId: "asc" }, { id: "asc" }] });
+      return { run, stage, tasks, leads };
+    });
+    return { ...loaded, run: { ...loaded.run,
+      trafficEnrichmentConfig: parseTrafficRunConfig(loaded.run.trafficEnrichmentConfig),
+      awsProviderConfig: parseAwsProviderConfig(loaded.run.awsProviderConfig) } };
+  }
+
+  async claimAwsTrafficWorkBatch(
+    { runId: runIdentifier, generation, runLease, claims }, now = new Date()
+  ) {
+    const normalized = requireBoundedBatch("AWS traffic work claims", claims, DATAFORSEO_TARGET_LIMIT)
+      .map((claim) => {
+        const selection = claim?.selection;
+        const source = selection?.source;
+        const workType = source === "dataforseo" ? "dataforseo" :
+          source === "crux_rest" ? "crux_rest" : source === "crux_bigquery" ? "crux_bigquery" : null;
+        if (!workType || selection.reuse != null || typeof claim?.shopId !== "string" ||
+            typeof claim?.pipelineTaskId !== "string" || typeof selection.identity !== "string" ||
+            typeof selection.scopeKey !== "string" || typeof selection.metricSetKey !== "string" ||
+            typeof selection.contractVersion !== "string")
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        return { ...claim, workType, scopeKey: selection.scopeKey,
+          id: shopWorkId(claim.shopId, workType, selection.scopeKey) };
+      });
+    requireUniqueBatchKeys("AWS traffic work claims", normalized, (value) => value.id);
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const run = await transaction.run.findUnique({ where: { id: runIdentifier } });
+      if (!run || run.executionBackend !== "aws" || run.pipelineGeneration !== generation ||
+          run.state !== "running" || run.leaseToken !== runLease?.token ||
+          !(run.leaseExpiresAt instanceof Date) || run.leaseExpiresAt <= now)
+        throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
+      const stage = await transaction.pipelineStage.findUnique({ where: {
+        runId_stage_generation: { runId: runIdentifier, stage: "traffic_crux", generation } } });
+      if (!stage) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const taskIds = normalized.map(({ pipelineTaskId }) => pipelineTaskId);
+      const tasks = await transaction.pipelineTask.findMany({ where: { id: { in: taskIds }, stageId: stage.id } });
+      const taskById = new Map(tasks.map((task) => [task.id, task]));
+      if (tasks.length !== normalized.length || normalized.some((claim) =>
+        taskById.get(claim.pipelineTaskId)?.itemKey !== claim.shopId))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      await transaction.shopWork.createMany({ data: normalized.map((claim) => ({ id: claim.id,
+        shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey, state: "pending" })),
+      skipDuplicates: true });
+      const rows = await transaction.shopWork.findMany({ where: { id: { in: normalized.map(({ id }) => id) } } });
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      const output = [];
+      for (const claim of normalized) {
+        let work = byId.get(claim.id);
+        if (!work) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        if (work.state === "completed") {
+          const key = claim.selection;
+          const cacheRows = await transaction.trafficEnrichmentCache.findMany({ where: { source: key.source,
+            identity: key.identity, scopeKey: key.scopeKey, metricSetKey: key.metricSetKey,
+            contractVersion: key.contractVersion } });
+          if (cacheRows.length !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          const row = cacheRows[0];
+          if (!(row.fetchedAt instanceof Date) || row.fetchedAt > now ||
+              !(row.expiresAt instanceof Date)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          if (row.expiresAt > now) { output.push({ shopId: claim.shopId, workType: claim.workType,
+            scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "completed",
+            cacheRows: [row] }); continue; }
+        }
+        if (work.state === "ambiguous") { output.push({ shopId: claim.shopId, workType: claim.workType,
+          scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "ambiguous" }); continue; }
+        if (work.state === "processing" && work.processingPipelineTaskId === claim.pipelineTaskId) {
+          output.push({ shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey,
+            pipelineTaskId: claim.pipelineTaskId, outcome: "owned" }); continue;
+        }
+        let active = false;
+        if (work.state === "processing" && work.processingPipelineTaskId) {
+          const ownerTask = await transaction.pipelineTask.findUnique({ where: { id: work.processingPipelineTaskId },
+            include: { stage: { include: { run: { select: { state: true } } } } } });
+          active = ownerTask?.stage?.run?.state === "running" && ownerTask.state !== "cancelled";
+        } else if (work.state === "processing" && work.processingRunId) {
+          const owner = await transaction.run.findUnique({ where: { id: work.processingRunId } });
+          active = owner?.state === "running" && owner.leaseToken === work.processingLeaseToken &&
+            owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
+        }
+        if (active) { output.push({ shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey,
+          pipelineTaskId: claim.pipelineTaskId, outcome: "busy" }); continue; }
+        const won = await transaction.shopWork.updateMany({ where: { id: work.id, state: work.state,
+          processingRunId: work.processingRunId, processingLeaseToken: work.processingLeaseToken,
+          processingPipelineTaskId: work.processingPipelineTaskId }, data: { state: "processing",
+          processingRunId: runIdentifier, processingLeaseToken: null,
+          processingPipelineTaskId: claim.pipelineTaskId, safeErrorCode: null, safeErrorMessage: null,
+          startedAt: now, completedAt: null } });
+        output.push({ shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey,
+          pipelineTaskId: claim.pipelineTaskId, outcome: won.count === 1 ? "owned" : "busy" });
+      }
+      return output;
+    });
+  }
+
+  async recordAwsDataForSeoOutcome(runIdentifier, runLease, outcome, now = new Date()) {
+    if (!outcome || !["succeeded", "failed", "ambiguous"].includes(outcome.outcome))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      requireLeaseMutation(await transaction.run.updateMany({ where: activeLeaseWhere(
+        runIdentifier, runLease, now), data: { lastHeartbeatAt: now } }));
+      const ledger = await transaction.dataForSeoRequestLedger.findUnique({ where: {
+        requestFingerprint: outcome.requestFingerprint } });
+      if (!ledger || ledger.runId !== runIdentifier || ledger.targetCount !== outcome.targetCount ||
+          ledger.scopeKey !== outcome.scopeKey) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (ledger.state === outcome.outcome) {
+        if (outcome.outcome === "succeeded" && (ledger.resultFingerprint !== outcome.resultFingerprint ||
+            Number(ledger.providerCostUsd) !== outcome.providerCostUsd))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        return { ledger };
+      }
+      if (ledger.state !== "in_flight") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (outcome.outcome === "succeeded" && (!/^[a-f0-9]{64}$/u.test(outcome.resultFingerprint) ||
+          !Number.isFinite(outcome.providerCostUsd) || outcome.providerCostUsd < 0))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (outcome.outcome === "failed" && !["DATAFORSEO_NOT_DISPATCHED", "DATAFORSEO_ZERO_COST_REJECTION"]
+        .includes(outcome.safeErrorCode)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const updated = await transaction.dataForSeoRequestLedger.update({ where: {
+        requestFingerprint: outcome.requestFingerprint }, data: { state: outcome.outcome,
+        providerCostUsd: outcome.outcome === "succeeded" ? outcome.providerCostUsd : null,
+        resultFingerprint: outcome.outcome === "succeeded" ? outcome.resultFingerprint : null,
+        safeErrorCode: outcome.safeErrorCode ?? null, reservationCostUsd: null,
+        ambiguousAfter: null, completedAt: now } });
+      return { ledger: updated };
+    });
+  }
+
+  async readAwsFinalReuseRows(input) {
+    if (!(input.evaluatedAt instanceof Date) || !Array.isArray(input.selections))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+      const selections = [...input.selections].sort((a, b) => a.cacheId.localeCompare(b.cacheId));
+      requireUniqueBatchKeys("AWS final reuse selections", selections, ({ cacheId }) => cacheId);
+      const trafficRows = selections.length ? await transaction.trafficEnrichmentCache.findMany({
+        where: { id: { in: selections.map(({ cacheId }) => cacheId) } }, orderBy: { id: "asc" } }) : [];
+      if (trafficRows.length !== selections.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const byId = new Map(selections.map((selection) => [selection.cacheId, selection]));
+      for (const row of trafficRows) {
+        const selection = byId.get(row.id);
+        const parsed = trafficCacheRecordToUpsert(row.id, row);
+        if (!selection || row.source !== selection.source || row.identity !== selection.identity ||
+            row.scopeKey !== selection.scopeKey || row.metricSetKey !== selection.metricSetKey ||
+            row.contractVersion !== selection.contractVersion || row.fetchedAt > input.evaluatedAt ||
+            row.expiresAt <= input.evaluatedAt || fingerprintJson(parsed) !== selection.cacheFingerprint)
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const leadStage = await transaction.pipelineStage.findUnique({ where: { runId_stage_generation: {
+        runId: input.runId, stage: "lead", generation: input.generation } } });
+      if (!leadStage || leadStage.state !== "completed") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const leadTasks = await transaction.pipelineTask.findMany({ where: { stageId: leadStage.id },
+        orderBy: [{ itemKey: "asc" }, { id: "asc" }] });
+      if (leadTasks.length !== leadStage.expectedCount || leadTasks.some(({ state }) =>
+        !["succeeded", "failed", "skipped"].includes(state))) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return { trafficRows, leadStage, leadTasks };
+    });
+  }
+
+  async publishAwsFinalResults(input, now = new Date()) {
+    const cacheRows = input.cacheRows.map((row) => trafficCacheRecordToUpsert(cacheId(row), row));
+    const trafficRows = input.leadTrafficRows.map((row) => leadTrafficEnrichmentRecordToCreate(
+      childId("lead_traffic", input.runId, `${row.leadId}:${row.source}`), input.runId, row.leadId, row));
+    requireUniqueBatchKeys("AWS final cache rows", cacheRows,
+      (row) => `${row.source}:${row.identity}:${row.scopeKey}:${row.metricSetKey}:${row.contractVersion}`);
+    requireUniqueBatchKeys("AWS final traffic rows", trafficRows, (row) => `${row.leadId}:${row.source}`);
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
+      if (owned.run.resultsAvailable) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const writtenCache = await bulkUpsertTrafficCache(transaction, cacheRows, now);
+      if (writtenCache.length !== cacheRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const writtenTraffic = await bulkUpsertLeadTraffic(transaction, trafficRows);
+      if (writtenTraffic.length !== trafficRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      for (const outcome of input.workOutcomes || []) {
+        const targetState = ["available", "no_coverage"].includes(outcome.state) ? "completed" :
+          outcome.state === "ambiguous" ? "ambiguous" : outcome.state === "reused" ? "reused" : "failed";
+        const work = await transaction.shopWork.findUnique({ where: { shopId_workType_scopeKey: {
+          shopId: outcome.shopId, workType: outcome.workType, scopeKey: outcome.scopeKey } } });
+        if (!work) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        if (targetState === "reused") {
+          if (work.state !== "completed") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          continue;
+        }
+        if (work.state === targetState) continue;
+        if (work.state !== "processing" || work.processingRunId !== input.runId ||
+            work.processingPipelineTaskId !== outcome.pipelineTaskId)
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        const updatedWork = await transaction.shopWork.updateMany({ where: { id: work.id, state: "processing",
+          processingRunId: input.runId, processingPipelineTaskId: outcome.pipelineTaskId }, data: {
+          state: targetState, completedAt: now, safeErrorCode: targetState === "completed" ? null :
+            targetState === "ambiguous" ? "WORK_OUTCOME_AMBIGUOUS" : "PIPELINE_PROVIDER_UNAVAILABLE",
+          safeErrorMessage: targetState === "completed" ? null : targetState === "ambiguous"
+            ? "WORK_OUTCOME_AMBIGUOUS" : "PIPELINE_PROVIDER_UNAVAILABLE" } });
+        if (updatedWork.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      for (const outcome of input.leadProfileOutcomes) {
+        if (outcome.state === "new") {
+          const profile = parseShopLeadProfile(outcome.profile);
+          if (fingerprintJson(profile) !== outcome.profileFingerprint)
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          const work = await transaction.shopWork.findUnique({ where: { shopId_workType_scopeKey: {
+            shopId: outcome.shopId, workType: "lead_discovery", scopeKey: "current" } } });
+          if (!work || work.state !== "processing" || work.processingRunId !== input.runId ||
+              work.processingPipelineTaskId !== outcome.sourceTaskId)
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          const existingProfile = await transaction.shopLeadProfile.findUnique({ where: { shopId: outcome.shopId } });
+          if (existingProfile && (existingProfile.state !== "completed" ||
+              fingerprintJson(parseShopLeadProfile(existingProfile.profilePayload)) !== outcome.profileFingerprint))
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          if (!existingProfile) await transaction.shopLeadProfile.create({ data: { shopId: outcome.shopId,
+            state: "completed", profilePayload: profile, processingRunId: null,
+            safeErrorCode: null, safeErrorMessage: null } });
+          await transaction.lead.updateMany({ where: { runId: input.runId, shopId: outcome.shopId },
+            data: { shopLeadProfileId: outcome.shopId } });
+          if ((await transaction.shopWork.updateMany({ where: { id: work.id, state: "processing",
+            processingPipelineTaskId: outcome.sourceTaskId }, data: { state: "completed", completedAt: now,
+            safeErrorCode: null, safeErrorMessage: null } })).count !== 1)
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        } else if (outcome.state === "existing") {
+          const profile = await transaction.shopLeadProfile.findUnique({ where: { shopId: outcome.shopId } });
+          if (!profile || profile.state !== "completed" ||
+              fingerprintJson(parseShopLeadProfile(profile.profilePayload)) !== outcome.profileFingerprint)
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          await transaction.lead.updateMany({ where: { runId: input.runId, shopId: outcome.shopId },
+            data: { shopLeadProfileId: outcome.shopId } });
+        } else if (outcome.state === "failed") {
+          const work = await transaction.shopWork.findUnique({ where: { shopId_workType_scopeKey: {
+            shopId: outcome.shopId, workType: "lead_discovery", scopeKey: "current" } } });
+          if (!work || (work.state === "processing" && (work.processingRunId !== input.runId ||
+              work.processingPipelineTaskId !== outcome.sourceTaskId)))
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          if (work.state === "processing" && (await transaction.shopWork.updateMany({ where: { id: work.id,
+            state: "processing", processingPipelineTaskId: outcome.sourceTaskId }, data: { state: "failed",
+            completedAt: now, safeErrorCode: "LEAD_DISCOVERY_FAILED",
+            safeErrorMessage: "LEAD_DISCOVERY_FAILED" } })).count !== 1)
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+      }
+      const diagnosticRows = (input.diagnostics || []).map(({ value }, index) => diagnosticRecordToCreate(
+        input.runId, childId("diag", input.runId, `aws-traffic:${2_000_000 + index}`), 2_000_000 + index, value));
+      if ((await bulkUpsertDiagnostics(transaction, diagnosticRows)).length !== diagnosticRows.length)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const scoringVersion = await finalizePersistedLeadScoresV3(transaction, input.runId, owned.run);
+      const leads = await transaction.lead.findMany({ where: { runId: input.runId }, orderBy: { id: "asc" } });
+      const leadSummary = leads.reduce((summary, lead) => { summary.total += 1;
+        if (lead.status in summary) summary[lead.status] += 1; return summary; },
+      { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      await grantRunShopsToOwner(transaction, input.runId, leads, now);
+      const audits = await transaction.queryAudit.findMany({ where: { runId: input.runId },
+        orderBy: [{ sequence: "asc" }, { id: "asc" }] });
+      const diagnostics = await transaction.runDiagnostic.findMany({ where: { runId: input.runId },
+        orderBy: [{ sequence: "asc" }, { id: "asc" }] });
+      const durableTraffic = await transaction.leadTrafficEnrichment.findMany({ where: { runId: input.runId },
+        orderBy: [{ leadId: "asc" }, { source: "asc" }] });
+      const resultFingerprint = fingerprintJson({ contractVersion: "aws-final-publication-v1",
+        runId: input.runId, generation: input.generation, leads, trafficEnrichments: durableTraffic,
+        queryAudits: audits, diagnostics, leadSummary,
+        trafficSummary: input.trafficSummary, pipelineVersion: 2, scoringVersion });
+      await completeAggregatorInTransaction(transaction, { stageId: input.stageId,
+        token: input.aggregationToken, state: "completed" }, now);
+      const updated = await transaction.run.updateMany({ where: { id: input.runId, state: "running",
+        executionBackend: "aws", pipelineGeneration: input.generation, resultsAvailable: false }, data: {
+        state: "completed", phase: "finished", stage: "completed", completedAt: now,
+        resultsAvailable: true, leadSummary, trafficEnrichmentSummary: input.trafficSummary, pipelineVersion: 2,
+        scoringVersion, resultFingerprint, safeErrorCode: null, safeErrorMessage: null,
+        leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null, lastHeartbeatAt: null } });
+      if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return { run: await transaction.run.findUnique({ where: { id: input.runId } }),
+        stage: await transaction.pipelineStage.findUnique({ where: { id: input.stageId } }), resultFingerprint };
+    });
+  }
+
   async claimShopWork(
     runIdentifier,
     lease,

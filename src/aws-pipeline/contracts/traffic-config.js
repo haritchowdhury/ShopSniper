@@ -10,10 +10,13 @@ import {
   CRUX_BIGQUERY_ORIGIN_LIMIT, CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION, CRUX_POPULARITY_CONTRACT_VERSION
 } from "../../enrichment/crux/bigquery-request.js";
 import { PipelineInvariantError } from "./errors.js";
+import { canonicalJson } from "../core/canonical.js";
 
 const metricKey = (values) => [...values].sort().join(",");
 const exactJson = (expected) => z.unknown().superRefine((value, context) => {
-  if (JSON.stringify(value) !== JSON.stringify(expected)) context.addIssue({ code: "custom", message: "constant drift" });
+  try {
+    if (canonicalJson(value) !== canonicalJson(expected)) context.addIssue({ code: "custom", message: "constant drift" });
+  } catch { context.addIssue({ code: "custom", message: "constant drift" }); }
 }).transform(() => structuredClone(expected));
 const expectedScopes = ["worldwide", ...Object.entries(DATAFORSEO_COUNTRY_LOCATION_CODES)
   .map(([countryIsoCode, locationCode]) => ({ countryIsoCode, locationCode }))];

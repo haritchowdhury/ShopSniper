@@ -19,6 +19,7 @@ import {
   buildCruxBigQueryLiveRequest,
   buildCruxTableListRequest
 } from "./bigquery-request.js";
+import { fingerprintJson } from "../../aws-pipeline/core/canonical.js";
 
 function fetchedAtFrom(now, contractVersion) {
   const value = now();
@@ -128,7 +129,7 @@ export async function dryRunCruxPopularity(
 }
 
 export async function fetchCruxPopularityForMonth(
-  { origins, datasetMonth, config, dryRun },
+  { origins, datasetMonth, config, dryRun, requestId },
   { request, tokenProvider, now = () => new Date() } = {}
 ) {
   if (dryRun?.datasetMonth !== datasetMonth ||
@@ -147,9 +148,17 @@ export async function fetchCruxPopularityForMonth(
     projectId: config.cruxBigQueryProjectId,
     location: config.cruxBigQueryLocation
   };
+  const stableRequestId = requestId ?? `crux-${fingerprintJson({
+    contractVersion: "crux-local-request-v1",
+    origins: [...origins].sort(),
+    datasetMonth,
+    location: config.cruxBigQueryLocation,
+    maximumBytesBilled: config.cruxBigQueryMaxBytesBilled
+  }).slice(0, 31)}`;
   const liveDescriptor = buildCruxBigQueryLiveRequest({
     ...common,
-    maximumBytesBilled: config.cruxBigQueryMaxBytesBilled
+    maximumBytesBilled: config.cruxBigQueryMaxBytesBilled,
+    requestId: stableRequestId
   });
   const parsed = parseCruxBigQueryResponse(await execute(liveDescriptor), liveDescriptor);
   const fetchedAt = fetchedAtFrom(now, CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION);

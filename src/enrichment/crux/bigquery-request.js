@@ -1,5 +1,6 @@
 import { ENRICHMENT_ERROR_CODES, cruxError } from "../errors.js";
 import { normalizeCruxOrigin } from "./api-request.js";
+import { fingerprintJson } from "../../aws-pipeline/core/canonical.js";
 
 export const CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION =
   "crux-bigquery-json-row-v1";
@@ -99,6 +100,13 @@ function baseQuery({ origins, month, projectId, location }) {
   };
 }
 
+function validateRequestId(requestId) {
+  if (typeof requestId !== "string" || !/^crux-[a-f0-9]{31}$/u.test(requestId)) {
+    invalidRequest("CrUX BigQuery request ID is invalid");
+  }
+  return requestId;
+}
+
 export function buildCruxBigQueryDryRunRequest(options) {
   const descriptor = baseQuery(options);
   return Object.freeze({
@@ -114,11 +122,19 @@ export function buildCruxBigQueryLiveRequest(options) {
     invalidRequest("CrUX BigQuery maximum bytes billed is invalid");
   }
   const descriptor = baseQuery(options);
+  const requestId = validateRequestId(options.requestId ?? `crux-${fingerprintJson({
+    contractVersion: "crux-local-request-v1",
+    origins: [...options.origins].sort(),
+    datasetMonth: options.month,
+    location: options.location,
+    maximumBytesBilled
+  }).slice(0, 31)}`);
   return Object.freeze({
     ...descriptor,
     kind: "live",
     body: Object.freeze({
       ...descriptor.body,
+      requestId,
       maximumBytesBilled: String(maximumBytesBilled),
       useQueryCache: true,
       timeoutMs: 60000

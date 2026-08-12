@@ -139,9 +139,10 @@ export async function assertCompleteAggregatorInTransaction(transaction, { runId
   const stageId = pipelineStageId(runId, stage, generation);
   const stageRow = await lockedStage(transaction, stageId);
   const run = await lockedRun(transaction, runId);
+  if (trafficRunLeaseIsLive(run, stage, now)) conflict("PIPELINE_NOT_READY");
   if (stageRow.state !== "aggregating" || stageRow.aggregationLeaseToken !== token ||
       !stageRow.aggregationLeaseExpiresAt || stageRow.aggregationLeaseExpiresAt <= now ||
-      !activeAwsRun(run, generation) || trafficRunLeaseIsLive(run, stage, now)) conflict("PIPELINE_LEASE_LOST");
+      !activeAwsRun(run, generation)) conflict("PIPELINE_LEASE_LOST");
   const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
   if (tasks.length !== stageRow.expectedCount || stageRow.terminalCount !== stageRow.expectedCount ||
       tasks.some((task) => !TERMINAL_STATES.has(task.state))) conflict("PIPELINE_NOT_READY");
@@ -400,7 +401,9 @@ export class PipelineCoordinatorRepository {
         WHERE "runId" = ${runId} AND "generation" = ${generation}
         ORDER BY "id" FOR UPDATE
       `;
-      await lockedRun(transaction, runId);
+      const run = await lockedRun(transaction, runId);
+      if (run.executionBackend !== "aws" || run.pipelineGeneration !== generation)
+        conflict("PIPELINE_INPUT_CONFLICT");
       if (stageLocks.length === 0 && taskLocks.length === 0) conflict();
       const stagesBefore = await transaction.pipelineStage.findMany({ where: { runId, generation }, orderBy: { id: "asc" } });
       for (const stage of stagesBefore) {
@@ -418,7 +421,14 @@ export class PipelineCoordinatorRepository {
       }
       const stages = await transaction.pipelineStage.findMany({ where: { runId, generation }, orderBy: { id: "asc" } });
       const tasks = await transaction.pipelineTask.findMany({ where: { stage: { runId, generation } }, orderBy: { id: "asc" } });
-      return { stages, tasks };
+      const updated = await transaction.run.updateMany({ where: { id: runId, executionBackend: "aws",
+        pipelineGeneration: generation, state: "running" }, data: { state: "cancelled", phase: "finished",
+        stage: "cancelled", completedAt: now, resultsAvailable: false,
+        safeErrorCode: "PIPELINE_CANCELLED", safeErrorMessage: "PIPELINE_CANCELLED",
+        leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null,
+        lastHeartbeatAt: null } });
+      if (updated.count !== 1) conflict("PIPELINE_CANCELLED");
+      return { run: await transaction.run.findUnique({ where: { id: runId } }), stages, tasks };
     });
   }
 }

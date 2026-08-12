@@ -8,9 +8,10 @@ function safeError(code, message, options = {}) {
   return cruxError(code, message, CRUX_BIGQUERY_RESPONSE_CONTRACT_VERSION, options);
 }
 
-export async function defaultCruxTokenProvider() {
+export async function defaultCruxTokenProvider(credentials) {
   const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/bigquery"]
+    scopes: ["https://www.googleapis.com/auth/bigquery"],
+    ...(credentials && { credentials })
   });
   const client = await auth.getClient();
   const result = await client.getAccessToken();
@@ -35,7 +36,7 @@ export async function executeCruxBigQueryRequest(
 
   let token;
   try {
-    token = await tokenProvider();
+    token = await tokenProvider(config.googleApplicationCredentials);
     if (typeof token !== "string" || !token) throw new Error("missing token");
   } catch {
     throw safeError(

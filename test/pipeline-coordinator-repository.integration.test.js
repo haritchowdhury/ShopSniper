@@ -359,7 +359,7 @@ test("G5 expired leases, cancellation, and recovery remain fenced and bounded",
         await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
         await assertCompleteAggregatorInTransaction(transaction, { runId: trafficRun, stage: "traffic_crux",
           generation: 1, token: trafficClaim.stage.aggregationLeaseToken }, new Date(now.getTime() + 70_000));
-      }), (error) => error.code === "PIPELINE_LEASE_LOST");
+      }), (error) => error.code === "PIPELINE_NOT_READY");
       await prismaA.run.update({ where: { id: trafficRun }, data: { leaseExpiresAt: null, leaseToken: null } });
       const permittedTraffic = await prismaA.$transaction(async (transaction) => {
         await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;

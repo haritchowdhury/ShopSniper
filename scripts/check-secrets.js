@@ -61,6 +61,7 @@ export function scanText(text, file = "<memory>") {
 
 const EXCLUDED_PATH_SEGMENTS = new Set([
   ".git",
+  ".lambda-build",
   ".next",
   "build",
   "coverage",

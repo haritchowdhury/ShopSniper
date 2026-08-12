@@ -106,7 +106,9 @@ function sourceSummary(states, extra = {}) {
   return { ...counts, ...extra };
 }
 
-function eligibleIdentities(runId, leads, dependencies) {
+export function eligibleTrafficIdentities(runId, leads, dependencies = {
+  stableLeadId, normalizeDataForSeoHostname, normalizeCruxOrigin
+}) {
   const byDataForSeo = new Map();
   const byOrigin = new Map();
   const dataForSeoShopIds = new Map();
@@ -262,7 +264,7 @@ function workClaimsForIdentities(shopIds, identities, workType, scope) {
   });
 }
 
-async function enrichDataForSeo(context, eligible, dependencies) {
+export async function enrichDataForSeoSource(context, eligible, dependencies) {
   const policy = context.runSnapshot.dataForSeo;
   const identities = [...eligible.keys()].sort();
   const results = new Map(identities.map((identity) => [identity, new Map()]));
@@ -511,7 +513,7 @@ async function enrichDataForSeo(context, eligible, dependencies) {
   };
 }
 
-async function enrichCruxRest(context, eligible, dependencies) {
+export async function enrichCruxRestSource(context, eligible, dependencies) {
   const policy = context.runSnapshot.crux.rest;
   const identities = [...eligible.keys()].sort();
   const keys = identities.map((identity) => cacheKey("crux_rest", identity, "current", policy));
@@ -680,7 +682,7 @@ function latestCommonMonth(rows, identities) {
   return scopes.size === 1 ? [...scopes][0].slice("month:".length) : null;
 }
 
-async function enrichCruxBigQuery(context, eligible, dependencies) {
+export async function enrichCruxBigQuerySource(context, eligible, dependencies) {
   const policy = context.runSnapshot.crux.bigQuery;
   const identities = [...eligible.keys()].sort();
   if (identities.length === 0) {
@@ -984,14 +986,14 @@ export async function enrichTraffic({
     onBatchTelemetry,
     diagnostics
   };
-  const eligible = eligibleIdentities(runId, leads, dependencies);
+  const eligible = eligibleTrafficIdentities(runId, leads, dependencies);
   context.dataForSeoShopIds = eligible.dataForSeoShopIds;
   context.originShopIds = eligible.originShopIds;
   const trafficEnrichments = [];
   const trafficEnrichmentSummary = { version: "traffic-enrichment-summary-v1" };
 
   if (runSnapshot.dataForSeo.enabled) {
-    const output = await enrichDataForSeo(context, eligible.byDataForSeo, dependencies);
+    const output = await enrichDataForSeoSource(context, eligible.byDataForSeo, dependencies);
     trafficEnrichments.push(...output.published);
     trafficEnrichmentSummary.dataforseo = output.summary;
     await onSourceComplete({
@@ -1002,7 +1004,7 @@ export async function enrichTraffic({
     });
   }
   if (runSnapshot.crux.enabled) {
-    const rest = await enrichCruxRest(context, eligible.byOrigin, dependencies);
+    const rest = await enrichCruxRestSource(context, eligible.byOrigin, dependencies);
     trafficEnrichments.push(...rest.published);
     trafficEnrichmentSummary.cruxRest = rest.summary;
     await onSourceComplete({
@@ -1011,7 +1013,7 @@ export async function enrichTraffic({
       summary: rest.summary,
       diagnostics: diagnostics.filter(({ code }) => code.startsWith("crux_rest_"))
     });
-    const bigQuery = await enrichCruxBigQuery(context, eligible.byOrigin, dependencies);
+    const bigQuery = await enrichCruxBigQuerySource(context, eligible.byOrigin, dependencies);
     trafficEnrichments.push(...bigQuery.published);
     trafficEnrichmentSummary.cruxBigQuery = bigQuery.summary;
     await onSourceComplete({

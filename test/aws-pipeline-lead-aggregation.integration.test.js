@@ -27,7 +27,7 @@ test("G10 atomically materializes a private reused Lead and a zero traffic stage
       const manifest = await load("domain-manifest.valid.json");
       const fixture = await load("lead-results.valid.json");
       const domain = manifest.domains[0];
-      const now = new Date("2026-08-12T12:00:00.000Z");
+      const now = new Date();
       step = "fixture writes";
       await prisma.run.create({ data: { id: manifest.runId, ownerId: "g10_owner", state: "running",
         phase: "scraping", stage: "aws_lead", normalizedShopTypes: [], progress: {}, executionBackend: "aws",

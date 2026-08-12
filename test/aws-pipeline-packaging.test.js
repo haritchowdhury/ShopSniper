@@ -74,9 +74,10 @@ for (const handlerName of LAMBDA_HANDLERS) {
         env: { PATH: process.env.PATH }
       });
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), ["discovery-worker", "domain-aggregator", "lead-worker", "lead-aggregator"].includes(handlerName)
-        ? { imported: true, invoked: "resolved" }
-        : { imported: true, invoked: "PIPELINE_HANDLER_NOT_IMPLEMENTED" });
+      assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")),
+        ["discovery-worker", "domain-aggregator", "lead-worker", "lead-aggregator", "traffic-worker", "final-aggregator"].includes(handlerName)
+          ? { imported: true, invoked: "resolved" }
+          : { imported: true, invoked: "PIPELINE_INPUT_CONFLICT" });
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }

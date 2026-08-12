@@ -74,6 +74,7 @@ test("scope excludes only exact local secrets/workflows and build dependencies",
     assert.equal(files.includes(excluded), false, excluded);
     assert.equal(isExcludedRepositoryPath(excluded), true, excluded);
   }
+  assert.equal(isExcludedRepositoryPath("email_scraper/.lambda-build/traffic-worker/index.mjs"), true);
   for (const included of [
     "email_scraper/docs/history/FINAL_PIPELINE_QUALITY_GAPS_REMEDIATION_PLAN.md",
     "contracts/lead-score-state-v2.fixtures.json",
