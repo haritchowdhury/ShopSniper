@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, NoSuchKey, PutObjectCommand } from "@aws-sdk/client-s3";
 import { TextDecoder } from "node:util";
 import { PipelineContractError } from "../contracts/errors.js";
 import { canonicalJson, sha256Hex } from "../core/canonical.js";
@@ -95,11 +95,12 @@ export class S3ArtifactStore {
     return { key: input.key, contentFingerprint, bytes };
   }
 
-  async #read(key) {
+  async #read(key, { allowMissing = false } = {}) {
     let response;
     try {
       response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
-    } catch {
+    } catch (error) {
+      if (allowMissing && error instanceof NoSuchKey) return null;
       artifactError();
     }
     return {
@@ -108,8 +109,7 @@ export class S3ArtifactStore {
     };
   }
 
-  async getValidated({ key, expected, schema }) {
-    const stored = await this.#read(key);
+  #validateStored(stored, expected, schema) {
     let text;
     let raw;
     try {
@@ -128,5 +128,16 @@ export class S3ArtifactStore {
       artifactError("PIPELINE_ARTIFACT_CONFLICT");
     }
     return { value, contentFingerprint, bytes: stored.body.byteLength };
+  }
+
+  async getValidated({ key, expected, schema }) {
+    const stored = await this.#read(key);
+    return this.#validateStored(stored, expected, schema);
+  }
+
+  async getOptionalValidated({ key, expected, schema }) {
+    const stored = await this.#read(key, { allowMissing: true });
+    if (stored === null) return { outcome: "missing" };
+    return { outcome: "found", ...this.#validateStored(stored, expected, schema) };
   }
 }

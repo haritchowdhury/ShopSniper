@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { z } from "zod";
+import { NoSuchKey } from "@aws-sdk/client-s3";
 import { S3ArtifactStore } from "../src/aws-pipeline/adapters/artifact-store.js";
 import { SqsDispatcher } from "../src/aws-pipeline/adapters/queue-dispatcher.js";
 import { handleSqsBatch } from "../src/aws-pipeline/adapters/sqs-batch.js";
@@ -109,6 +110,90 @@ test("S3 validated reads enforce metadata, canonical bytes, schema, and streamin
   client.response = { Body: stream("123456", "789"), Metadata: writer.input.Metadata };
   const tiny = new S3ArtifactStore({ client, bucket: "fixture-bucket", maxBytes: 8 });
   await assert.rejects(tiny.getValidated({ key: "runs/a.json", expected: identity, schema: valueSchema }));
+});
+
+test("optional S3 validated reads distinguish only modeled NoSuchKey from invalid or conflicting artifacts", async () => {
+  const writer = { async send(command) { this.input = command.input; return {}; } };
+  const writingStore = new S3ArtifactStore({ client: writer, bucket: "fixture-bucket", maxBytes: 1000 });
+  const written = await writingStore.putImmutable({
+    ...identity, key: "runs/a.json", value: { value: "ok" }, schema: valueSchema
+  });
+  const expected = { ...identity, contentFingerprint: written.contentFingerprint };
+  let result = stored(writer.input.Body, writer.input.Metadata);
+  const commands = [];
+  const client = { async send(command) {
+    commands.push(command.constructor.name);
+    if (result instanceof Error) throw result;
+    return result;
+  } };
+  const store = new S3ArtifactStore({ client, bucket: "fixture-bucket", maxBytes: 1000 });
+
+  const validated = await store.getValidated({ key: "runs/a.json", expected, schema: valueSchema });
+  assert.deepEqual(await store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }), {
+    outcome: "found", ...validated
+  });
+
+  result = new NoSuchKey({ $metadata: { httpStatusCode: 404 }, message: "fixture missing" });
+  assert.deepEqual(await store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }), {
+    outcome: "missing"
+  });
+
+  const invalidErrors = [
+    Object.assign(new Error("fixture look-alike"), { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } }),
+    Object.assign(new Error("fixture generic 404"), { $metadata: { httpStatusCode: 404 } }),
+    Object.assign(new Error("fixture denied"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }),
+    Object.assign(new Error("fixture network"), { name: "TimeoutError" })
+  ];
+  for (const error of invalidErrors) {
+    result = error;
+    await assert.rejects(
+      store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+      (caught) => caught.code === "PIPELINE_ARTIFACT_INVALID"
+    );
+  }
+
+  for (const body of ["not-json", '{"value": "ok"}', '{"value":1}']) {
+    result = stored(body, writer.input.Metadata);
+    await assert.rejects(
+      store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+      (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+    );
+  }
+  result = { Metadata: writer.input.Metadata };
+  await assert.rejects(
+    store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+  );
+  result = { Body: { async *[Symbol.asyncIterator]() { throw new Error("fixture stream failure"); } },
+    Metadata: writer.input.Metadata };
+  await assert.rejects(
+    store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+  );
+
+  result = stored(writer.input.Body, { ...writer.input.Metadata, stage: "lead" });
+  await assert.rejects(
+    store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_CONFLICT"
+  );
+  result = stored(writer.input.Body, writer.input.Metadata);
+  await assert.rejects(
+    store.getOptionalValidated({ key: "runs/a.json", expected: { ...expected, contentFingerprint: fp("f") }, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_CONFLICT"
+  );
+
+  const tiny = new S3ArtifactStore({ client, bucket: "fixture-bucket", maxBytes: 8 });
+  result = stored("{}", writer.input.Metadata, 9);
+  await assert.rejects(
+    tiny.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+  );
+  result = { Body: stream("123456", "789"), Metadata: writer.input.Metadata };
+  await assert.rejects(
+    tiny.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+  );
+  assert.ok(commands.every((name) => name === "GetObjectCommand"));
 });
 
 function work(index) {
