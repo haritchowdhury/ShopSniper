@@ -1359,6 +1359,41 @@ export class PrismaRunRepository {
     });
   }
 
+  async readAwsReusableProfiles(input) {
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      await assertCompleteAggregatorInTransaction(transaction, {
+        runId: input.runId, stage: "lead", generation: input.generation,
+        token: input.aggregationToken
+      }, new Date());
+      if (!(input.evaluatedAt instanceof Date) || !Array.isArray(input.selections)) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const selections = [...input.selections].sort((left, right) => left.shopId.localeCompare(right.shopId));
+      requireUniqueBatchKeys("Reusable lead selections", selections, ({ shopId }) => shopId);
+      if (selections.some((selection) => selection.profileShopId !== selection.shopId ||
+          typeof selection.profileFingerprint !== "string")) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const profiles = selections.length ? await transaction.shopLeadProfile.findMany({
+        where: { shopId: { in: selections.map(({ profileShopId }) => profileShopId) },
+          state: "completed", updatedAt: { lte: input.evaluatedAt } },
+        orderBy: { shopId: "asc" }
+      }) : [];
+      if (profiles.length !== selections.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const selectionByShop = new Map(selections.map((selection) => [selection.shopId, selection]));
+      for (const row of profiles) {
+        const selection = selectionByShop.get(row.shopId);
+        const profile = parseShopLeadProfile(row.profilePayload);
+        if (!selection || fingerprintJson(profile) !== selection.profileFingerprint) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+        assertProfileMatchesShop(profile, selection.stableIdentity);
+      }
+      return { profiles };
+    });
+  }
+
   async publishAwsDomainCheckpoint(input, now = new Date()) {
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
@@ -1411,6 +1446,135 @@ export class PrismaRunRepository {
       }, now);
       return { stage: completed.stage, leadStage: lead.stage,
         dispatchItems: lead.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
+    });
+  }
+
+  async publishAwsLeadCheckpoint(input, now = new Date()) {
+    const normalized = requireBoundedBatch("AWS lead outcomes", input.outcomes, 1000)
+      .map((outcome) => {
+        if (!outcome || typeof outcome.shopId !== "string" || typeof outcome.runStoreId !== "string" ||
+            !["completed", "failed"].includes(outcome.state) || typeof outcome.profileReusable !== "boolean") {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+        if (outcome.state === "failed" && outcome.profileReusable) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+        const profile = outcome.profile == null ? null : parseShopLeadProfile(outcome.profile);
+        const leadRow = { ...leadRecordToCreate(input.runId,
+          stableLeadId(input.runId, outcome.lead, 0), outcome.lead), shopId: outcome.shopId,
+          shopLeadProfileId: outcome.profileReusable ? outcome.shopId : null };
+        const diagnostic = outcome.diagnostic == null ? null : diagnosticRecordToCreate(input.runId,
+          childId("diag", input.runId, `lead:${outcome.runStoreId}`), 0, outcome.diagnostic);
+        return { ...outcome, profile, leadRow, diagnostic };
+      }).sort((left, right) => left.shopId.localeCompare(right.shopId));
+    requireUniqueBatchKeys("AWS lead outcomes", normalized, ({ shopId }) => shopId);
+    requireUniqueBatchKeys("AWS lead run stores", normalized, ({ runStoreId }) => runStoreId);
+    const trafficDomains = requireBoundedBatch("AWS traffic domains", input.trafficDomains, 1000)
+      .slice().sort((left, right) => left.shopId.localeCompare(right.shopId));
+    requireUniqueBatchKeys("AWS traffic domains", trafficDomains, ({ shopId }) => shopId);
+    const progress = input.status ? progressFromStatus(input.status) : null;
+
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, {
+        runId: input.runId, stage: "lead", generation: input.generation,
+        token: input.aggregationToken
+      }, now);
+      const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
+      if (normalized.some((outcome) => outcome.sourceTaskId == null
+        ? taskByShop.has(outcome.shopId)
+        : taskByShop.get(outcome.shopId)?.id !== outcome.sourceTaskId)) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const runStores = normalized.length ? await transaction.runStore.findMany({
+        where: { runId: input.runId, id: { in: normalized.map(({ runStoreId }) => runStoreId) } },
+        include: { shop: true }, orderBy: { shopId: "asc" }
+      }) : [];
+      if (runStores.length !== normalized.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const runStoreById = new Map(runStores.map((row) => [row.id, row]));
+      for (const outcome of normalized) {
+        const store = runStoreById.get(outcome.runStoreId);
+        if (!store || store.shopId !== outcome.shopId || !["processing", outcome.state].includes(store.state))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        assertLeadMatchesShop(outcome.lead, store.shop.stableKey);
+        if (outcome.profile) assertProfileMatchesShop(outcome.profile, store.shop.stableKey);
+      }
+      const reusable = normalized.filter(({ profileReusable }) => profileReusable);
+      const profiles = reusable.length ? await transaction.shopLeadProfile.findMany({
+        where: { shopId: { in: reusable.map(({ shopId }) => shopId) }, state: "completed" },
+        orderBy: { shopId: "asc" }
+      }) : [];
+      if (profiles.length !== reusable.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const outcomeByShop = new Map(normalized.map((outcome) => [outcome.shopId, outcome]));
+      for (const profileRow of profiles) {
+        const profile = parseShopLeadProfile(profileRow.profilePayload);
+        const expected = outcomeByShop.get(profileRow.shopId);
+        assertProfileMatchesShop(profile, runStoreById.get(expected.runStoreId).shop.stableKey);
+        if (expected.profile && fingerprintJson(profile) !== fingerprintJson(expected.profile))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const existing = normalized.length ? await transaction.lead.findMany({
+        where: { runId: input.runId, shopId: { in: normalized.map(({ shopId }) => shopId) } }
+      }) : [];
+      const expectedByShop = new Map(normalized.map((outcome) => [outcome.shopId, outcome.leadRow]));
+      for (const row of existing) for (const [key, value] of Object.entries(expectedByShop.get(row.shopId))) {
+        if (value !== undefined && canonicalJson(row[key]) !== canonicalJson(value))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const existingShops = new Set(existing.map(({ shopId }) => shopId));
+      const missing = normalized.filter(({ shopId }) => !existingShops.has(shopId)).map(({ leadRow }) => leadRow);
+      if (missing.length) await transaction.lead.createMany({ data: missing });
+      for (const state of ["completed", "failed"]) {
+        const ids = normalized.filter((outcome) => outcome.state === state &&
+          runStoreById.get(outcome.runStoreId).state === "processing").map(({ runStoreId }) => runStoreId);
+        if (ids.length) {
+          const result = await transaction.runStore.updateMany({ where: { runId: input.runId,
+            id: { in: ids }, state: "processing" }, data: state === "completed"
+            ? { state, safeErrorCode: null, safeErrorMessage: null }
+            : { state, safeErrorCode: "LEAD_DISCOVERY_FAILED",
+              safeErrorMessage: "Lead discovery failed safely for this store." } });
+          if (result.count !== ids.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+      }
+      const diagnostics = normalized.filter(({ diagnostic }) => diagnostic).map(({ diagnostic }, index) => ({
+        ...diagnostic, sequence: 1_000_000 + index
+      }));
+      if ((await bulkUpsertDiagnostics(transaction, diagnostics)).length !== diagnostics.length)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const durableLeads = await transaction.lead.findMany({ where: { runId: input.runId }, orderBy: { shopId: "asc" } });
+      if (durableLeads.length !== normalized.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const summary = durableLeads.reduce((counts, row) => { counts.total += 1; counts[row.status] += 1; return counts; },
+        { total: 0, qualified: 0, rejected: 0, failed: 0 });
+      const trafficByShop = new Map(trafficDomains.map((entry) => [entry.shopId, entry]));
+      const trafficTasks = durableLeads.filter((lead) => trafficByShop.has(lead.shopId)).map((lead) => {
+        const selection = trafficByShop.get(lead.shopId);
+        if (lead.status !== "qualified" || selection.runStoreId !== runStoreById.get(
+          outcomeByShop.get(lead.shopId).runStoreId).id ||
+          ![selection.needsTraffic, selection.needsCruxRest, selection.needsCruxBigQuery].some(Boolean))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        const leadFingerprint = fingerprintJson(leadRecordToCreate(input.runId, lead.id, serializeLead(lead)));
+        return { itemKey: lead.shopId, inputFingerprint: fingerprintJson({
+          contractVersion: "traffic-domain-input-v1", runId: input.runId, generation: input.generation,
+          manifestFingerprint: input.domainStageManifestFingerprint, shopId: lead.shopId, leadFingerprint,
+          needsTraffic: selection.needsTraffic, needsCruxRest: selection.needsCruxRest,
+          needsCruxBigQuery: selection.needsCruxBigQuery, sourceKeys: selection.sourceKeys
+        }) };
+      });
+      if (trafficTasks.length !== trafficDomains.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const traffic = await registerStageInTransaction(transaction, { runId: input.runId,
+        stage: "traffic_crux", generation: input.generation,
+        manifestS3Key: input.domainStageManifestKey,
+        manifestFingerprint: input.domainStageManifestFingerprint,
+        manifestProducedAt: input.manifestProducedAt, tasks: trafficTasks }, now);
+      const updated = await transaction.run.updateMany({ where: { id: input.runId, executionBackend: "aws",
+        pipelineGeneration: input.generation, state: "running" }, data: { stage: "aws_traffic_crux",
+        leadSummary: summary, pipelineVersion: 2, scoringVersion: 2, resultsAvailable: false,
+        ...(progress ? { progress: { ...progress, outputRows: summary.total, storesProcessed: summary.total } } : {}) } });
+      requireLeaseMutation(updated);
+      const completed = await completeAggregatorInTransaction(transaction, { stageId: input.stageId,
+        token: input.aggregationToken, state: "completed" }, now);
+      return { stage: completed.stage, trafficStage: traffic.stage, summary,
+        dispatchItems: traffic.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
     });
   }
 
