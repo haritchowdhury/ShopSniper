@@ -6,7 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createPrismaClient } from "../src/prisma-client.js";
-import { PipelineCoordinatorRepository } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
+import { PipelineCoordinatorRepository, assertCompleteAggregatorInTransaction,
+  completeAggregatorInTransaction, registerStageInTransaction
+} from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
 
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -34,7 +36,24 @@ async function preG5MigrationConfig() {
   await fs.copyFile(path.join(projectRoot, "prisma", "schema.prisma"), path.join(directory, "schema.prisma"));
   await fs.copyFile(path.join(projectRoot, "prisma", "migrations", "migration_lock.toml"), path.join(migrationRoot, "migration_lock.toml"));
   const names = await fs.readdir(path.join(projectRoot, "prisma", "migrations"));
-  for (const name of names.filter((name) => /^\d/u.test(name) && name !== "20260811120000_aws_pipeline_coordinator").sort()) {
+  for (const name of names.filter((name) => /^\d/u.test(name) && name < "20260811120000_aws_pipeline_coordinator").sort()) {
+    await fs.cp(path.join(projectRoot, "prisma", "migrations", name), path.join(migrationRoot, name), { recursive: true });
+  }
+  const configPath = path.join(directory, "prisma.config.ts");
+  await fs.writeFile(configPath,
+    `import { defineConfig } from ${JSON.stringify(pathToFileURL(path.join(projectRoot, "node_modules", "prisma", "config.js")).href)};\nexport default defineConfig({ schema: ${JSON.stringify(path.join(directory, "schema.prisma"))}, migrations: { path: ${JSON.stringify(migrationRoot)} }, datasource: { url: process.env.DATABASE_URL } });\n`,
+    "utf8");
+  return { directory, configPath };
+}
+
+async function preGR3MigrationConfig() {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "email-scraper-gr3-"));
+  const migrationRoot = path.join(directory, "migrations");
+  await fs.mkdir(migrationRoot);
+  await fs.copyFile(path.join(projectRoot, "prisma", "schema.prisma"), path.join(directory, "schema.prisma"));
+  await fs.copyFile(path.join(projectRoot, "prisma", "migrations", "migration_lock.toml"), path.join(migrationRoot, "migration_lock.toml"));
+  const names = await fs.readdir(path.join(projectRoot, "prisma", "migrations"));
+  for (const name of names.filter((name) => /^\d/u.test(name) && name < "20260812120000_aws_pipeline_remainder_foundations").sort()) {
     await fs.cp(path.join(projectRoot, "prisma", "migrations", name), path.join(migrationRoot, name), { recursive: true });
   }
   const configPath = path.join(directory, "prisma.config.ts");
@@ -51,9 +70,9 @@ async function createAwsRun(prisma, id) {
   } });
 }
 
-function registration(runId, stage, tasks) {
+function registration(runId, stage, tasks, manifestProducedAt = new Date("2026-08-12T00:00:00.000Z")) {
   return { runId, stage, generation: 1, manifestS3Key: `runs/${runId}/${stage}-manifest.json`,
-    manifestFingerprint: fp("a"), tasks };
+    manifestFingerprint: fp("a"), manifestProducedAt, tasks };
 }
 
 test("G5 migration replays and preserves pre-migration rows",
@@ -95,6 +114,52 @@ test("G5 migration replays and preserves pre-migration rows",
     }
   });
 
+test("G-R3 migration backfills stage timestamps and preserves nullable provider configuration",
+  { skip: !enabled, timeout: 180_000 }, async () => {
+    const schema = `gr3_migration_${Date.now()}_${process.pid}`;
+    const base = createPrismaClient(process.env.TEST_DATABASE_URL);
+    const scopedUrl = scopedDatabaseUrl(process.env.TEST_DATABASE_URL, schema);
+    const baseline = await preGR3MigrationConfig();
+    let prisma;
+    try {
+      await base.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+      deploy(scopedUrl, baseline.configPath);
+      const createdAt = new Date("2026-08-11T12:34:56.789Z");
+      prisma = createPrismaClient(scopedUrl);
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "${schema}"."Run"
+          ("id","ownerId","state","phase","stage","normalizedShopTypes","progress","resultsAvailable",
+           "executionBackend","pipelineGeneration","queryRevision")
+        VALUES ('run_gr3_legacy_stage_0001','g5_owner','running','scraping','aws_discovery','[]'::jsonb,'{}'::jsonb,
+          false,'aws',1,0)
+      `);
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "${schema}"."PipelineStage"
+          ("id","runId","stage","generation","manifestS3Key","manifestFingerprint","expectedCount","createdAt","updatedAt")
+        VALUES ('stage_gr3_legacy_0001','run_gr3_legacy_stage_0001','discovery',1,'runs/legacy.json','${fp("a")}',0,
+          '${createdAt.toISOString()}'::timestamptz,'${createdAt.toISOString()}'::timestamptz)
+      `);
+      await prisma.$disconnect();
+      prisma = undefined;
+      deploy(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      prisma = createPrismaClient(scopedUrl);
+      const [run, stage, indexRows] = await Promise.all([
+        prisma.run.findUnique({ where: { id: "run_gr3_legacy_stage_0001" } }),
+        prisma.pipelineStage.findUnique({ where: { id: "stage_gr3_legacy_0001" } }),
+        prisma.$queryRaw`SELECT indexdef FROM pg_indexes WHERE schemaname = ${schema} AND indexname = 'ShopWork_processingPipelineTaskId_idx'`
+      ]);
+      assert.equal(run.awsProviderConfig, null);
+      assert.equal(stage.manifestProducedAt.toISOString(), createdAt.toISOString());
+      assert.equal(indexRows.length, 1);
+      assert.doesNotMatch(indexRows[0].indexdef, /UNIQUE/u);
+    } finally {
+      await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+      await fs.rm(baseline.directory, { recursive: true, force: true });
+    }
+  });
+
 test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
   { skip: !enabled, timeout: 180_000 }, async () => {
     const schema = `g5_${Date.now()}_${process.pid}`;
@@ -123,6 +188,9 @@ test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
       assert.deepEqual(registrations.map(({ outcome }) => outcome).sort(), ["created", "replayed"]);
       await assert.rejects(repositoryA.registerStage({ ...registeredInput, manifestFingerprint: fp("b") }, now),
         (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+      await assert.rejects(repositoryA.registerStage({ ...registeredInput,
+        manifestProducedAt: new Date(registeredInput.manifestProducedAt.getTime() + 1) }, now),
+      (error) => error.code === "PIPELINE_INPUT_CONFLICT");
       await assert.rejects(repositoryA.registerStage({ ...registeredInput, tasks: [registeredInput.tasks[0]] }, now),
         (error) => error.code === "PIPELINE_INPUT_CONFLICT");
       const stageId = registrations[0].stage.id;
@@ -193,6 +261,31 @@ test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
       (error) => error.code === "PIPELINE_LEASE_LOST");
       await repositoryB.completeAggregator({ stageId: zero.stage.id,
         token: zeroReclaimed.stage.aggregationLeaseToken, state: "completed" }, new Date(now.getTime() + 120002));
+
+      const rollbackRun = "run_gr3_outer_rollback_0001";
+      await createAwsRun(prismaA, rollbackRun);
+      const rollbackRegistration = registration(rollbackRun, "lead", []);
+      await assert.rejects(prismaA.$transaction(async (transaction) => {
+        await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
+        await registerStageInTransaction(transaction, rollbackRegistration, now);
+        throw new Error("INJECT_AFTER_REGISTRATION");
+      }), /INJECT_AFTER_REGISTRATION/u);
+      assert.equal(await prismaA.pipelineStage.count({ where: { runId: rollbackRun } }), 0);
+
+      const composable = await repositoryA.registerStage(rollbackRegistration, now);
+      const composableClaim = await repositoryA.claimAggregator({ runId: rollbackRun, stage: "lead", generation: 1,
+        owner: "outer_transaction", token: "21000000-0000-4000-8000-000000000001", leaseDurationMs: 120000 }, now);
+      await assert.rejects(prismaA.$transaction(async (transaction) => {
+        await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
+        const asserted = await assertCompleteAggregatorInTransaction(transaction, {
+          runId: rollbackRun, stage: "lead", generation: 1, token: composableClaim.stage.aggregationLeaseToken
+        }, new Date(now.getTime() + 1));
+        assert.equal(asserted.run.id, rollbackRun);
+        await completeAggregatorInTransaction(transaction, { stageId: composable.stage.id,
+          token: composableClaim.stage.aggregationLeaseToken, state: "completed" }, new Date(now.getTime() + 2));
+        throw new Error("INJECT_AFTER_COMPLETION");
+      }), /INJECT_AFTER_COMPLETION/u);
+      assert.equal((await prismaA.pipelineStage.findUnique({ where: { id: composable.stage.id } })).state, "aggregating");
 
     } finally {
       await prismaA?.$disconnect();
@@ -265,6 +358,44 @@ test("G5 expired leases, cancellation, and recovery remain fenced and bounded",
         token: publicationClaim.stage.aggregationLeaseToken, state: "completed" }, new Date(now.getTime() + 2)),
       (error) => error.code === "PIPELINE_CANCELLED");
 
+      const trafficRun = "run_gr3_traffic_lease_0001";
+      await createAwsRun(prismaA, trafficRun);
+      const trafficStage = await repositoryA.registerStage(registration(trafficRun, "traffic_crux", []), now);
+      await prismaA.run.update({ where: { id: trafficRun }, data: {
+        leaseToken: "60000000-0000-4000-8000-000000000001", leaseExpiresAt: new Date(now.getTime() + 60_000)
+      } });
+      const blockedTraffic = await repositoryA.claimAggregator({ runId: trafficRun, stage: "traffic_crux", generation: 1,
+        owner: "blocked", token: "60000000-0000-4000-8000-000000000002", leaseDurationMs: 120000 }, now);
+      assert.equal(blockedTraffic.outcome, "busy");
+      assert.equal((await prismaA.pipelineStage.findUnique({ where: { id: trafficStage.stage.id } })).state, "ready");
+      const trafficClaim = await repositoryA.claimAggregator({ runId: trafficRun, stage: "traffic_crux", generation: 1,
+        owner: "allowed", token: "60000000-0000-4000-8000-000000000003", leaseDurationMs: 120000 },
+      new Date(now.getTime() + 60_001));
+      assert.equal(trafficClaim.outcome, "owned");
+      await prismaA.run.update({ where: { id: trafficRun }, data: { leaseExpiresAt: new Date(now.getTime() + 90_000) } });
+      await assert.rejects(prismaA.$transaction(async (transaction) => {
+        await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
+        await assertCompleteAggregatorInTransaction(transaction, { runId: trafficRun, stage: "traffic_crux",
+          generation: 1, token: trafficClaim.stage.aggregationLeaseToken }, new Date(now.getTime() + 70_000));
+      }), (error) => error.code === "PIPELINE_LEASE_LOST");
+      await prismaA.run.update({ where: { id: trafficRun }, data: { leaseExpiresAt: null, leaseToken: null } });
+      const permittedTraffic = await prismaA.$transaction(async (transaction) => {
+        await transaction.$queryRaw`SELECT set_config('search_path', ${schema}, true)`;
+        return assertCompleteAggregatorInTransaction(transaction, { runId: trafficRun, stage: "traffic_crux",
+          generation: 1, token: trafficClaim.stage.aggregationLeaseToken }, new Date(now.getTime() + 70_001));
+      });
+      assert.equal(permittedTraffic.stage.id, trafficStage.stage.id);
+
+      const sharedShop = await prismaA.shop.create({ data: { id: "shop_gr3_shared_task_0001", stableKey: "domain:gr3.example" } });
+      const sharedTaskId = cancelStage.tasks[0].id;
+      await prismaA.shopWork.createMany({ data: [
+        { id: "work_gr3_shared_task_0001", shopId: sharedShop.id, workType: "dataforseo", scopeKey: "one",
+          processingPipelineTaskId: sharedTaskId },
+        { id: "work_gr3_shared_task_0002", shopId: sharedShop.id, workType: "dataforseo", scopeKey: "two",
+          processingPipelineTaskId: sharedTaskId }
+      ] });
+      assert.equal(await prismaA.shopWork.count({ where: { processingPipelineTaskId: sharedTaskId } }), 2);
+
       const recoveryRun = "run_g5_recovery_bound_0001";
       await createAwsRun(prismaA, recoveryRun);
       const recoveryTasks = Array.from({ length: 105 }, (_, index) => ({
@@ -274,7 +405,9 @@ test("G5 expired leases, cancellation, and recovery remain fenced and bounded",
       const recovery = await repositoryA.listRecoverable({ olderThan: new Date(now.getTime() + 300000), limit: 100 },
         new Date(now.getTime() + 300001));
       assert.equal(recovery.tasks.length + recovery.stages.length, 100);
-      assert.ok(recovery.tasks.every(({ stageId: id }) => id === recoveryStage.stage.id));
+      assert.ok(recovery.tasks.every(({ task, stage }) => task.stageId === recoveryStage.stage.id &&
+        stage.id === recoveryStage.stage.id && stage.manifestProducedAt.getTime() ===
+        recoveryStage.stage.manifestProducedAt.getTime()));
       assert.equal(await prismaA.pipelineTask.count({ where: { stageId: recoveryStage.stage.id } }), 105);
       assert.equal(cancelStage.tasks.length, 2);
     } finally {

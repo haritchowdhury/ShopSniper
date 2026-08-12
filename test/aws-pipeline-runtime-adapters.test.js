@@ -199,7 +199,8 @@ test("optional S3 validated reads distinguish only modeled NoSuchKey from invali
 function work(index) {
   return { version: 1, type: "discovery.query", runId: "run_runtime_adapter_0001",
     stage: "discovery", generation: 1, itemId: `query_${index}`,
-    manifestKey: "runs/manifest.json", manifestFingerprint: fp("b"), attempt: 1 };
+    manifestKey: "runs/manifest.json", manifestFingerprint: fp("b"),
+    manifestProducedAt: "2026-08-11T00:00:00.000Z", attempt: 1 };
 }
 
 test("SQS dispatcher chunks ten with deterministic IDs and retains partial recovery", async () => {

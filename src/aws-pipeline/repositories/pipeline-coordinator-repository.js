@@ -17,6 +17,10 @@ function requireNow(now) {
   return now;
 }
 
+function requireProducedAt(value) {
+  return requireNow(value);
+}
+
 function requireLease(value, expected) {
   if (value !== expected) conflict();
 }
@@ -43,6 +47,10 @@ function sameNullable(left, right) {
 
 function taskRegistrationMatches(task, expected) {
   return task.itemKey === expected.itemKey && task.inputFingerprint === expected.inputFingerprint;
+}
+
+function sameInstant(left, right) {
+  return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
 }
 
 function terminalMatches(task, input) {
@@ -83,6 +91,84 @@ function activeAwsRun(run, generation) {
   return run.executionBackend === "aws" && run.pipelineGeneration === generation && run.state === "running";
 }
 
+function trafficRunLeaseIsLive(run, stage, now) {
+  return stage === "traffic_crux" && run.leaseExpiresAt instanceof Date && run.leaseExpiresAt > now;
+}
+
+export async function registerStageInTransaction(transaction, input, now) {
+  requireNow(now);
+  requireProducedAt(input?.manifestProducedAt);
+  requireNonempty(input?.manifestS3Key);
+  requireFingerprint(input?.manifestFingerprint);
+  if (!Array.isArray(input?.tasks)) conflict();
+  const orderedTasks = [...input.tasks].sort((left, right) => left.itemKey.localeCompare(right.itemKey));
+  if (new Set(orderedTasks.map(({ itemKey }) => itemKey)).size !== orderedTasks.length) conflict();
+  for (const task of orderedTasks) {
+    requireNonempty(task.itemKey);
+    requireFingerprint(task.inputFingerprint);
+  }
+  const stageId = pipelineStageId(input.runId, input.stage, input.generation);
+  const taskRows = orderedTasks.map((task) => ({
+    id: pipelineTaskId(stageId, task.itemKey), stageId, itemKey: task.itemKey,
+    inputFingerprint: task.inputFingerprint, createdAt: now, updatedAt: now
+  }));
+  const created = await transaction.pipelineStage.createMany({ data: [{
+    id: stageId, runId: input.runId, stage: input.stage, generation: input.generation,
+    manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
+    manifestProducedAt: input.manifestProducedAt,
+    expectedCount: taskRows.length, state: taskRows.length === 0 ? "ready" : "collecting",
+    createdAt: now, updatedAt: now
+  }], skipDuplicates: true });
+  const stage = await transaction.pipelineStage.findUnique({ where: { id: stageId } });
+  if (!stage || stage.runId !== input.runId || stage.stage !== input.stage ||
+      stage.generation !== input.generation || stage.manifestS3Key !== input.manifestS3Key ||
+      stage.manifestFingerprint !== input.manifestFingerprint ||
+      !sameInstant(stage.manifestProducedAt, input.manifestProducedAt) ||
+      stage.expectedCount !== taskRows.length) conflict();
+  if (created.count === 1 && taskRows.length) {
+    await transaction.pipelineTask.createMany({ data: taskRows });
+  }
+  const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
+  if (tasks.length !== orderedTasks.length || tasks.some((task, index) => !taskRegistrationMatches(task, orderedTasks[index]))) conflict();
+  return { outcome: created.count === 1 ? "created" : "replayed", stage, tasks };
+}
+
+export async function assertCompleteAggregatorInTransaction(transaction, { runId, stage, generation, token }, now) {
+  requireNow(now);
+  requireToken(token);
+  const stageId = pipelineStageId(runId, stage, generation);
+  const stageRow = await lockedStage(transaction, stageId);
+  const run = await lockedRun(transaction, runId);
+  if (stageRow.state !== "aggregating" || stageRow.aggregationLeaseToken !== token ||
+      !stageRow.aggregationLeaseExpiresAt || stageRow.aggregationLeaseExpiresAt <= now ||
+      !activeAwsRun(run, generation) || trafficRunLeaseIsLive(run, stage, now)) conflict("PIPELINE_LEASE_LOST");
+  const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
+  if (tasks.length !== stageRow.expectedCount || stageRow.terminalCount !== stageRow.expectedCount ||
+      tasks.some((task) => !TERMINAL_STATES.has(task.state))) conflict("PIPELINE_NOT_READY");
+  const counts = Object.fromEntries([...TERMINAL_STATES].map((state) => [state, tasks.filter((task) => task.state === state).length]));
+  if (counts.succeeded !== stageRow.succeededCount || counts.skipped !== stageRow.skippedCount ||
+      counts.failed !== stageRow.failedCount || counts.cancelled !== stageRow.cancelledCount) conflict();
+  return { run, stage: stageRow, tasks };
+}
+
+export async function completeAggregatorInTransaction(transaction, input, now) {
+  requireNow(now);
+  requireToken(input?.token);
+  if (!FINISHED_STAGE_STATES.has(input?.state)) conflict();
+  const current = await lockedStage(transaction, input.stageId);
+  const run = await lockedRun(transaction, current.runId);
+  if (current.state !== "aggregating" || current.aggregationLeaseToken !== input.token ||
+      !current.aggregationLeaseExpiresAt || current.aggregationLeaseExpiresAt <= now ||
+      !activeAwsRun(run, current.generation) || trafficRunLeaseIsLive(run, current.stage, now)) {
+    conflict(current.state === "cancelled" || run.state === "cancelled" ? "PIPELINE_CANCELLED" : "PIPELINE_LEASE_LOST");
+  }
+  const stage = await transaction.pipelineStage.update({ where: { id: input.stageId }, data: {
+    state: input.state, safeErrorCode: input.safeErrorCode ?? null,
+    safeErrorMessage: input.safeErrorMessage ?? null, completedAt: now
+  } });
+  return { stage };
+}
+
 export class PipelineCoordinatorRepository {
   constructor(prisma) {
     if (!prisma) conflict();
@@ -93,38 +179,10 @@ export class PipelineCoordinatorRepository {
 
   async registerStage(input, now) {
     requireNow(now);
-    requireNonempty(input?.manifestS3Key);
-    requireFingerprint(input?.manifestFingerprint);
-    if (!Array.isArray(input?.tasks)) conflict();
-    const orderedTasks = [...input.tasks].sort((left, right) => left.itemKey.localeCompare(right.itemKey));
-    if (new Set(orderedTasks.map(({ itemKey }) => itemKey)).size !== orderedTasks.length) conflict();
-    for (const task of orderedTasks) {
-      requireNonempty(task.itemKey);
-      requireFingerprint(task.inputFingerprint);
-    }
-    const stageId = pipelineStageId(input.runId, input.stage, input.generation);
-    const taskRows = orderedTasks.map((task) => ({
-      id: pipelineTaskId(stageId, task.itemKey), stageId, itemKey: task.itemKey,
-      inputFingerprint: task.inputFingerprint, createdAt: now, updatedAt: now
-    }));
+    requireProducedAt(input?.manifestProducedAt);
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      const created = await transaction.pipelineStage.createMany({ data: [{
-        id: stageId, runId: input.runId, stage: input.stage, generation: input.generation,
-        manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
-        expectedCount: taskRows.length, state: taskRows.length === 0 ? "ready" : "collecting",
-        createdAt: now, updatedAt: now
-      }], skipDuplicates: true });
-      const stage = await transaction.pipelineStage.findUnique({ where: { id: stageId } });
-      if (!stage || stage.runId !== input.runId || stage.stage !== input.stage ||
-          stage.generation !== input.generation || stage.manifestS3Key !== input.manifestS3Key ||
-          stage.manifestFingerprint !== input.manifestFingerprint || stage.expectedCount !== taskRows.length) conflict();
-      if (created.count === 1 && taskRows.length) {
-        await transaction.pipelineTask.createMany({ data: taskRows });
-      }
-      const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
-      if (tasks.length !== orderedTasks.length || tasks.some((task, index) => !taskRegistrationMatches(task, orderedTasks[index]))) conflict();
-      return { outcome: created.count === 1 ? "created" : "replayed", stage, tasks };
+      return registerStageInTransaction(transaction, input, now);
     });
   }
 
@@ -253,6 +311,7 @@ export class PipelineCoordinatorRepository {
         return { outcome: "cancelled", stage };
       }
       if (FINISHED_STAGE_STATES.has(stage.state)) return { outcome: "terminal", stage };
+      if (trafficRunLeaseIsLive(run, stage.stage, now)) return { outcome: "busy", stage };
       if (stage.terminalCount !== stage.expectedCount) return { outcome: "not_ready", stage };
       if (stage.state === "aggregating" && stage.aggregationLeaseExpiresAt && stage.aggregationLeaseExpiresAt > now) {
         return { outcome: "busy", stage };
@@ -286,23 +345,10 @@ export class PipelineCoordinatorRepository {
     });
   }
 
-  async getCompleteStage({ runId, stage, generation, token }) {
-    requireToken(token);
-    const stageId = pipelineStageId(runId, stage, generation);
+  async getCompleteStage(input) {
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      const stageRow = await lockedStage(transaction, stageId);
-      const run = await lockedRun(transaction, runId);
-      if (stageRow.state !== "aggregating" || stageRow.aggregationLeaseToken !== token ||
-          !stageRow.aggregationLeaseExpiresAt || stageRow.aggregationLeaseExpiresAt <= new Date() ||
-          !activeAwsRun(run, generation)) conflict("PIPELINE_LEASE_LOST");
-      const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
-      if (tasks.length !== stageRow.expectedCount || stageRow.terminalCount !== stageRow.expectedCount ||
-          tasks.some((task) => !TERMINAL_STATES.has(task.state))) conflict("PIPELINE_NOT_READY");
-      const counts = Object.fromEntries([...TERMINAL_STATES].map((state) => [state, tasks.filter((task) => task.state === state).length]));
-      if (counts.succeeded !== stageRow.succeededCount || counts.skipped !== stageRow.skippedCount ||
-          counts.failed !== stageRow.failedCount || counts.cancelled !== stageRow.cancelledCount) conflict();
-      return { stage: stageRow, tasks };
+      return assertCompleteAggregatorInTransaction(transaction, input, new Date());
     });
   }
 
@@ -312,18 +358,7 @@ export class PipelineCoordinatorRepository {
     if (!FINISHED_STAGE_STATES.has(input?.state)) conflict();
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      const current = await lockedStage(transaction, input.stageId);
-      const run = await lockedRun(transaction, current.runId);
-      if (current.state !== "aggregating" || current.aggregationLeaseToken !== input.token ||
-          !current.aggregationLeaseExpiresAt || current.aggregationLeaseExpiresAt <= now ||
-          !activeAwsRun(run, current.generation)) {
-        conflict(current.state === "cancelled" || run.state === "cancelled" ? "PIPELINE_CANCELLED" : "PIPELINE_LEASE_LOST");
-      }
-      const stage = await transaction.pipelineStage.update({ where: { id: input.stageId }, data: {
-        state: input.state, safeErrorCode: input.safeErrorCode ?? null,
-        safeErrorMessage: input.safeErrorMessage ?? null, completedAt: now
-      } });
-      return { stage };
+      return completeAggregatorInTransaction(transaction, input, now);
     });
   }
 
@@ -333,18 +368,19 @@ export class PipelineCoordinatorRepository {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) conflict();
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      const tasks = await transaction.pipelineTask.findMany({
+      const taskRows = await transaction.pipelineTask.findMany({
         where: { stage: { run: { executionBackend: "aws", state: "running" }, state: "collecting" }, OR: [
           { state: "pending", OR: [{ lastDispatchedAt: null }, { lastDispatchedAt: { lte: olderThan } }] },
           { state: "processing", leaseExpiresAt: { lte: now } }
-        ] }, orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: limit
+        ] }, include: { stage: true }, orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: limit
       });
-      const stages = tasks.length === limit ? [] : await transaction.pipelineStage.findMany({
+      const stages = taskRows.length === limit ? [] : await transaction.pipelineStage.findMany({
         where: { run: { executionBackend: "aws", state: "running" }, OR: [
           { state: "ready", updatedAt: { lte: olderThan } },
           { state: "aggregating", aggregationLeaseExpiresAt: { lte: now } }
-        ] }, orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: limit - tasks.length
+        ] }, orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: limit - taskRows.length
       });
+      const tasks = taskRows.map(({ stage, ...task }) => ({ task, stage }));
       return { tasks, stages };
     });
   }

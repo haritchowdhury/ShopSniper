@@ -147,6 +147,7 @@ model Run {
   executionBackend       RunExecutionBackend @default(local)
   pipelineGeneration     Int                 @default(1)
   trafficEnrichmentConfig Json?
+  awsProviderConfig       Json?
   trafficEnrichmentSummary Json?
   queryRevision          Int             @default(0)
   confirmedQueryRevision Int?
@@ -183,6 +184,7 @@ model PipelineStage {
   generation                Int
   manifestS3Key             String
   manifestFingerprint       String
+  manifestProducedAt        DateTime
   expectedCount             Int
   terminalCount             Int                @default(0)
   succeededCount            Int                @default(0)
@@ -432,6 +434,7 @@ model ShopWork {
   processingRunId      String?
   processingRun        Run?          @relation("ShopWorkProcessingRun", fields: [processingRunId], references: [id], onDelete: SetNull)
   processingLeaseToken String?
+  processingPipelineTaskId String?
   safeErrorCode        String?
   safeErrorMessage     String?
   startedAt            DateTime?
@@ -441,6 +444,7 @@ model ShopWork {
 
   @@unique([shopId, workType, scopeKey])
   @@index([state, processingRunId])
+  @@index([processingPipelineTaskId])
 }
 
 model TrafficEnrichmentCache {

@@ -56,12 +56,20 @@ test("all retained positive pipeline fixtures parse through production schemas",
 });
 
 test("messages are strict single-item reference envelopes", async () => {
-  const { messages } = await fixture("sqs-envelopes.valid.json");
-  parseWorkMessage(messages.discovery); parseWorkMessage(messages.lead); parseWorkMessage(messages.traffic);
+  const { messages, encodedBytes } = await fixture("sqs-envelopes.valid.json");
+  for (const name of ["discovery", "lead", "traffic"]) {
+    const parsed = parseWorkMessage(messages[name]);
+    assert.equal(parsed.manifestProducedAt, "2026-08-11T00:00:00.000Z");
+    assert.equal(Buffer.byteLength(canonicalJson(parsed)), encodedBytes[name]);
+  }
   parseAggregationCheckMessage(messages.aggregateCheck);
+  assert.equal(Buffer.byteLength(canonicalJson(messages.aggregateCheck)), encodedBytes.aggregateCheck);
   for (const mutation of [{ itemIds: ["x"] }, { providerBody: {} }, { html: "<html>" }, { credential: "x" }])
     rejects(() => parseWorkMessage({ ...messages.lead, ...mutation }), "PIPELINE_MESSAGE_INVALID");
   rejects(() => parseWorkMessage({ ...messages.lead, manifestFingerprint: "0".repeat(63) }), "PIPELINE_MESSAGE_INVALID");
+  for (const invalid of [undefined, "not-a-timestamp", 1723334400000, "2026-08-11T05:30:00+05:30"])
+    rejects(() => parseWorkMessage({ ...messages.lead, manifestProducedAt: invalid }), "PIPELINE_MESSAGE_INVALID");
+  rejects(() => parseWorkMessage({ ...messages.lead, producedAt: messages.lead.manifestProducedAt }), "PIPELINE_MESSAGE_INVALID");
 });
 
 test("artifact bounds, strictness, identities and combined manifest reconcile", async () => {

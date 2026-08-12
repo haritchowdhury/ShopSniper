@@ -10,6 +10,7 @@
       "itemId": "query_fixture_001",
       "manifestKey": "runs/run_fixture_payload_discovery_0001/queries/manifest.json",
       "manifestFingerprint": "c94a86075ef3ab1fa27553fab4f4668c71822e60fcf5ba09c6c181adb85b6aed",
+      "manifestProducedAt": "2026-08-11T00:00:00.000Z",
       "attempt": 1
     },
     "lead": {
@@ -21,6 +22,7 @@
       "itemId": "shop_13iOzZDK7joaSKKTmscbk00V",
       "manifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
       "manifestFingerprint": "67c898ab710e3c715d0057bf0713a86f93f3888cb1250ff9c7acd8cb850426c6",
+      "manifestProducedAt": "2026-08-11T00:00:00.000Z",
       "attempt": 1
     },
     "traffic": {
@@ -32,6 +34,7 @@
       "itemId": "shop_13iOzZDK7joaSKKTmscbk00V",
       "manifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
       "manifestFingerprint": "67c898ab710e3c715d0057bf0713a86f93f3888cb1250ff9c7acd8cb850426c6",
+      "manifestProducedAt": "2026-08-11T00:00:00.000Z",
       "attempt": 1
     },
     "aggregateCheck": {
@@ -45,9 +48,9 @@
     }
   },
   "encodedBytes": {
-    "discovery": 326,
-    "lead": 329,
-    "traffic": 340,
+    "discovery": 374,
+    "lead": 377,
+    "traffic": 388,
     "aggregateCheck": 169
   }
 }
