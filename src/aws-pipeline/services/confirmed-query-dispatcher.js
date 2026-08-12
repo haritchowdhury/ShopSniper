@@ -36,7 +36,8 @@ export async function dispatchConfirmedQueries(input, runtime) {
   }) }));
   const published = await runtime.repository.publishAwsDiscoveryStage({ ...input, manifestS3Key: key,
     manifestFingerprint, manifestProducedAt: input.queriesConfirmedAt, awsProviderConfig, tasks }, new Date());
-  const messages = published.dispatchItems.map((task) => ({ version: 1, type: "discovery.query", runId: input.runId,
+  const messages = [...published.dispatchItems].sort((left, right) => left.itemKey.localeCompare(right.itemKey))
+    .map((task) => ({ version: 1, type: "discovery.query", runId: input.runId,
     stage: "discovery", generation: 1, itemId: task.itemKey, manifestKey: key, manifestFingerprint,
     manifestProducedAt: producedAt, attempt: 1 }));
   const sent = await runtime.dispatcher.sendMany(runtime.config.awsPipelineDiscoveryQueueUrl, messages, workMessageSchema);

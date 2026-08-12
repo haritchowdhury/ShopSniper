@@ -15,6 +15,10 @@ export const LAMBDA_HANDLERS = Object.freeze([
 ]);
 
 export const REQUIRED_PRISMA_ENGINE = "libquery_engine-debian-openssl-3.0.x.so.node";
+export const ESM_REQUIRE_BANNER = [
+  'import { createRequire as __createRequire } from "node:module";',
+  "const require = __createRequire(import.meta.url);"
+].join("\n");
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const buildRoot = path.join(projectRoot, ".lambda-build");
 const outputRoot = path.join(projectRoot, "dist", "lambda");
@@ -71,6 +75,7 @@ async function buildHandler(name) {
     target: "node24",
     minify: false,
     sourcemap: false,
+    banner: { js: ESM_REQUIRE_BANNER },
     external: ["@prisma/client"]
   });
   await copyTree(

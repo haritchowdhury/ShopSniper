@@ -46,6 +46,17 @@ import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-co
 import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
 import { createPipelineRuntime } from "./aws-pipeline/runtime.js";
 import { dispatchConfirmedQueries } from "./aws-pipeline/services/confirmed-query-dispatcher.js";
+import {
+  googleProbeAttemptArtifactSchema,
+  googleProbeResultArtifactSchema,
+  parseGoogleProbeResultArtifact
+} from "./aws-pipeline/contracts/artifacts.js";
+import { fingerprintJson } from "./aws-pipeline/core/canonical.js";
+import {
+  googleProbeAttemptArtifactKey,
+  googleProbeResultArtifactKey
+} from "./aws-pipeline/core/keys.js";
+import { searchGooglePage } from "./search.js";
 
 export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{16,80}$/u;
 export const RUN_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
@@ -84,6 +95,86 @@ function queryReviewPolicy(run, config) {
     maxQueries: awsProviderConfig.queryValidation.maxQueries,
     generatedQueryCount: awsProviderConfig.queryValidation.generatedQueryCount,
     awsProviderConfig
+  };
+}
+
+function awsValidationConfig(snapshot) {
+  return {
+    ...snapshot.queryValidation,
+    googleResultsPerQuery: snapshot.googleSearch.resultsPerQuery
+  };
+}
+
+function awsProbeSearchPage({ runId, confirmedRevision, queriesConfirmedAt, snapshot, runtime }) {
+  const providerConfigFingerprint = fingerprintJson(snapshot.googleSearch);
+  const producedAt = queriesConfirmedAt.toISOString();
+  const searchConfig = {
+    googleApiKey: runtime.secrets.googleApiKey,
+    googleSearchEngineId: runtime.secrets.googleSearchEngineId,
+    googleResultsPerQuery: snapshot.googleSearch.resultsPerQuery,
+    requestTimeoutMs: snapshot.googleSearch.requestTimeoutMs
+  };
+  const engineFingerprint = fingerprintJson({
+    contractVersion: "google-search-engine-v1",
+    searchEngineId: searchConfig.googleSearchEngineId
+  });
+  if (!searchConfig.googleApiKey || engineFingerprint !== snapshot.googleSearch.engineIdFingerprint) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  return async (query) => {
+    const searchRequestFingerprint = fingerprintJson({
+      contractVersion: "google-probe-request-v1", runId, generation: 1,
+      confirmedRevision, queriesConfirmedAt: producedAt, query, providerConfigFingerprint
+    });
+    const expected = {
+      contractVersion: "google-probe-result-v1", runId, stage: "query_validation", generation: 1,
+      itemId: searchRequestFingerprint, inputFingerprint: searchRequestFingerprint, producedAt
+    };
+    const resultKey = googleProbeResultArtifactKey(runId, searchRequestFingerprint);
+    const storedResult = await runtime.artifactStore.getOptionalValidated({
+      key: resultKey, expected, schema: googleProbeResultArtifactSchema
+    });
+    const reconstruct = (raw) => {
+      const parsed = parseGoogleProbeResultArtifact(raw);
+      return {
+        estimatedTotalResults: parsed.estimatedTotalResults,
+        nextPageAvailable: parsed.nextPageAvailable,
+        results: [
+          ...parsed.results.map((item) => ({ ...item, query, rejectionReason: "" })),
+          ...parsed.rejections.map((item) => ({ query, rank: item.rank, url: "", title: "", snippet: "",
+            rejectionReason: item.reason }))
+        ].sort((left, right) => left.rank - right.rank)
+      };
+    };
+    if (storedResult.outcome === "found") return reconstruct(storedResult.value);
+
+    const attemptKey = googleProbeAttemptArtifactKey(runId, searchRequestFingerprint);
+    const attemptExpected = { ...expected, contractVersion: "google-probe-attempt-v1" };
+    const marker = await runtime.artifactStore.getOptionalValidated({
+      key: attemptKey, expected: attemptExpected, schema: googleProbeAttemptArtifactSchema
+    });
+    if (marker.outcome === "found") {
+      throw new PipelineInvariantError("PIPELINE_PROVIDER_AMBIGUOUS");
+    }
+    const attempt = { contractVersion: "google-probe-attempt-v1", runId, generation: 1,
+      searchRequestFingerprint, providerConfigFingerprint };
+    await runtime.artifactStore.putImmutable({ key: attemptKey, ...attemptExpected,
+      value: attempt, schema: googleProbeAttemptArtifactSchema });
+    const page = await searchGooglePage(query, searchConfig, { retries: 0 });
+    const normalized = {
+      contractVersion: "google-probe-result-v1", runId, generation: 1,
+      searchRequestFingerprint, providerConfigFingerprint,
+      estimatedTotalResults: page.estimatedTotalResults,
+      nextPageAvailable: Boolean(page.nextPageAvailable),
+      results: page.results.filter((item) => !item.rejectionReason).map(({ rank, url, title, snippet }) =>
+        ({ rank, url, title, snippet })),
+      rejections: page.results.filter((item) => item.rejectionReason).map(({ rank, rejectionReason }) =>
+        ({ rank, reason: rejectionReason }))
+    };
+    const parsed = parseGoogleProbeResultArtifact(normalized);
+    await runtime.artifactStore.putImmutable({ key: resultKey, ...expected,
+      value: parsed, schema: googleProbeResultArtifactSchema });
+    return reconstruct(parsed);
   };
 }
 const DEFAULT_RECOVERY_INTERVAL_MS = 15_000;
@@ -940,15 +1031,42 @@ export async function executeRun({
     if (supportsReview && categories.phase === "scraping") {
       if (categories.executionBackend === "aws") {
         const runtime = await pipelineRuntimeFactory({ baseConfig: config, prisma: repository.prisma, repository });
-        const rows = await repository.loadConfirmedQueryPlans(identifier, lease, currentDate(now));
-        if (!rows) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        const snapshot = parseAwsProviderConfig(categories.awsProviderConfig);
+        const confirmedAt = new Date(categories.queriesConfirmedAt);
+        let rows = await repository.loadConfirmedQueryPlans(identifier, lease, currentDate(now));
+        if (!Array.isArray(rows) || Number.isNaN(confirmedAt.getTime())) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+        const validationConfig = awsValidationConfig(snapshot);
+        const validation = await queryValidationPipeline(validationConfig, tracker.status, {
+          rows, categories: categories.items, now: confirmedAt,
+          freshnessMs: validationConfig.queryProbeFreshnessMs,
+          searchPage: awsProbeSearchPage({ runId: identifier,
+            confirmedRevision: categories.confirmedQueryRevision,
+            queriesConfirmedAt: confirmedAt, snapshot, runtime })
+        });
+        await repository.saveQueryValidation(identifier, lease, validation.rows, currentDate(now));
+        await tracker.flush();
+        if (!validation.valid) {
+          await heartbeat.stop();
+          await repository.returnRunToQueryReview(identifier, lease, tracker.status, currentDate(now));
+          logger("query_confirmation_rejected", { runId: identifier,
+            invalidQueries: validation.rows.filter((row) => row.validationState === "invalid").length });
+          return;
+        }
+        rows = await repository.loadConfirmedQueryPlans(identifier, lease, currentDate(now));
+        if (!rows.every((row) => row.validationState === "valid" &&
+          row.probeContractVersion === "google-probe-v2" && /^[a-f0-9]{64}$/u.test(row.probeFingerprint || "") &&
+          Array.isArray(row.probeResults) && row.probedAt)) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
         await heartbeat.renew();
         await tracker.stop();
         await heartbeat.stop();
         await dispatchConfirmedQueries({ runId: identifier, lease, categories: categories.items,
           confirmedRevision: categories.confirmedQueryRevision,
           queriesConfirmedAt: new Date(categories.queriesConfirmedAt), awsProviderConfig: categories.awsProviderConfig,
-          queries: rows.queries, generation: categories.pipelineGeneration, status: tracker.status }, runtime);
+          queries: rows, generation: categories.pipelineGeneration, status: tracker.status }, runtime);
         return;
       }
       const progressive = typeof repository.saveDiscoveredStores === "function" &&

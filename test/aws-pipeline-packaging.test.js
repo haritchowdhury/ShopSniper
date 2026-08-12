@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { LAMBDA_HANDLERS, REQUIRED_PRISMA_ENGINE } from "../scripts/build-lambda.js";
+import {
+  ESM_REQUIRE_BANNER,
+  LAMBDA_HANDLERS,
+  REQUIRED_PRISMA_ENGINE
+} from "../scripts/build-lambda.js";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const outputRoot = path.join(projectRoot, "dist", "lambda");
@@ -41,8 +45,24 @@ test("all seven Lambda packages pass inventory, size, and engine inspection", as
   }
 });
 
+test("ESM Lambda bundles install CommonJS require interop before bundled SDK code", async () => {
+  for (const handlerName of LAMBDA_HANDLERS) {
+    const bundle = await readFile(
+      path.join(projectRoot, ".lambda-build", handlerName, "index.mjs"),
+      "utf8"
+    );
+    assert.equal(bundle.startsWith(`${ESM_REQUIRE_BANNER}\n`), true, handlerName);
+  }
+
+  const discoveryBundle = await readFile(
+    path.join(projectRoot, ".lambda-build", "discovery-worker", "index.mjs"),
+    "utf8"
+  );
+  assert.match(discoveryBundle, /__require\(["']node:https["']\)/);
+});
+
 for (const handlerName of LAMBDA_HANDLERS) {
-  test(`${handlerName} imports without work and fails closed on invocation`, () => {
+  test(`${handlerName} imports without work and has its expected empty invocation boundary`, () => {
     const handlerUrl = pathToFileURL(path.join(projectRoot, "src", "aws-pipeline", "handlers", `${handlerName}.js`)).href;
     const temporary = mkdtempSync(path.join(tmpdir(), "storesignal-handler-test-"));
     const resultPath = path.join(temporary, "result.json");
@@ -54,10 +74,9 @@ for (const handlerName of LAMBDA_HANDLERS) {
         env: { PATH: process.env.PATH }
       });
       assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), {
-        imported: true,
-        invoked: "PIPELINE_HANDLER_NOT_IMPLEMENTED"
-      });
+      assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")), ["discovery-worker", "domain-aggregator"].includes(handlerName)
+        ? { imported: true, invoked: "resolved" }
+        : { imported: true, invoked: "PIPELINE_HANDLER_NOT_IMPLEMENTED" });
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }

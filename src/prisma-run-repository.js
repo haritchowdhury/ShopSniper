@@ -38,8 +38,13 @@ import { getPrismaClient, prismaSchemaForClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
 import { fingerprintJson } from "./aws-pipeline/core/canonical.js";
 import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-config.js";
+import { parseTrafficRunConfig } from "./aws-pipeline/contracts/traffic-config.js";
 import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
-import { registerStageInTransaction } from "./aws-pipeline/repositories/pipeline-coordinator-repository.js";
+import {
+  assertCompleteAggregatorInTransaction,
+  completeAggregatorInTransaction,
+  registerStageInTransaction
+} from "./aws-pipeline/repositories/pipeline-coordinator-repository.js";
 import {
   GOOGLE_PROBE_CONTRACT_VERSION,
   normalizeProbeResults,
@@ -1299,6 +1304,99 @@ export class PrismaRunRepository {
       const finalRun = await transaction.run.findUnique({ where: { id: input.runId } });
       return { run: finalRun, stage: registered.stage,
         dispatchItems: registered.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
+    });
+  }
+
+  async readAwsReuseInputs(input) {
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, {
+        runId: input.runId, stage: "discovery", generation: input.generation,
+        token: input.aggregationToken
+      }, new Date());
+      if (!(input.evaluatedAt instanceof Date) || input.evaluatedAt.getTime() !== owned.stage.createdAt.getTime()) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const trafficSnapshot = parseTrafficRunConfig(owned.run.trafficEnrichmentConfig);
+      const awsProviderConfig = parseAwsProviderConfig(owned.run.awsProviderConfig);
+      const shopIds = input.domains.map((domain) => domain.shopId);
+      const exactKeys = input.domains.flatMap((domain) => {
+        const origin = new URL(domain.identity.canonicalUrl).origin;
+        return [
+          ...trafficSnapshot.dataForSeo.scopes.map((scope) => ({ source: "dataforseo",
+            identity: domain.identity.resolvedDomain,
+            scopeKey: typeof scope === "string" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}`,
+            metricSetKey: trafficSnapshot.dataForSeo.metricSetKey,
+            contractVersion: trafficSnapshot.dataForSeo.contractVersion })),
+          { source: "crux_rest", identity: origin, scopeKey: "current",
+            metricSetKey: trafficSnapshot.crux.rest.metricSetKey,
+            contractVersion: trafficSnapshot.crux.rest.contractVersion }
+        ];
+      });
+      const bigQueryOrigins = input.domains.map((domain) => new URL(domain.identity.canonicalUrl).origin);
+      const profiles = await transaction.shopLeadProfile.findMany({
+        where: { shopId: { in: shopIds }, state: "completed", updatedAt: { lte: input.evaluatedAt } },
+        orderBy: { shopId: "asc" }
+      });
+      const trafficRows = exactKeys.length ? await transaction.trafficEnrichmentCache.findMany({
+        where: { fetchedAt: { lte: input.evaluatedAt }, expiresAt: { gt: input.evaluatedAt },
+          OR: exactKeys.map(({ source, identity, scopeKey, metricSetKey, contractVersion }) =>
+            ({ source, identity, scopeKey, metricSetKey, contractVersion })) },
+        orderBy: { id: "asc" }
+      }) : [];
+      const latestCruxMonth = bigQueryOrigins.length ? await transaction.trafficEnrichmentCache.findMany({
+        where: { source: "crux_bigquery", identity: { in: [...new Set(bigQueryOrigins)] },
+          scopeKey: { startsWith: "month:" }, fetchedAt: { lte: input.evaluatedAt },
+          expiresAt: { gt: input.evaluatedAt }, metricSetKey: trafficSnapshot.crux.bigQuery.metricSetKey,
+          contractVersion: trafficSnapshot.crux.bigQuery.contractVersion },
+        orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
+      }) : [];
+      return { profiles, trafficRows, latestCruxMonth, trafficSnapshot, awsProviderConfig,
+        stage: owned.stage, tasks: owned.tasks };
+    });
+  }
+
+  async publishAwsDomainCheckpoint(input, now = new Date()) {
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, {
+        runId: input.runId, stage: "discovery", generation: input.generation,
+        token: input.aggregationToken
+      }, now);
+      const shopRows = input.domains.map(({ identity, shopId }) => ({ id: shopId, ...identity }));
+      const shops = await bulkUpsertShops(transaction, shopRows, now);
+      if (shops.length !== shopRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const runStores = input.domains.map(({ runStoreId: id, shopId, candidatePayload }) => ({
+        id, runId: input.runId, shopId, state: "processing", candidatePayload
+      }));
+      const existing = runStores.length ? await transaction.runStore.findMany({
+        where: { id: { in: runStores.map((row) => row.id) } }
+      }) : [];
+      const expected = new Map(runStores.map((row) => [row.id, row]));
+      if (existing.some((row) => canonicalJson(row.candidatePayload) !== canonicalJson(expected.get(row.id)?.candidatePayload))) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      if (runStores.length) await transaction.runStore.createMany({ data: runStores, skipDuplicates: true });
+      const diagnostics = input.diagnostics.map((record, index) => diagnosticRecordToCreate(
+        input.runId, childId("diag", input.runId, `aws-discovery:${100000 + index}`), 100000 + index, record
+      ));
+      const written = await bulkUpsertDiagnostics(transaction, diagnostics);
+      if (written.length !== diagnostics.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const lead = await registerStageInTransaction(transaction, {
+        runId: input.runId, stage: "lead", generation: input.generation,
+        manifestS3Key: input.domainStageManifestKey,
+        manifestFingerprint: input.domainStageManifestFingerprint,
+        manifestProducedAt: input.manifestProducedAt, tasks: input.leadTasks
+      }, now);
+      const updated = await transaction.run.updateMany({ where: { id: input.runId, executionBackend: "aws",
+        pipelineGeneration: input.generation, state: "running" }, data: { stage: "aws_lead",
+        progress: input.status, resultsAvailable: false } });
+      requireLeaseMutation(updated);
+      const completed = await completeAggregatorInTransaction(transaction, {
+        stageId: input.stageId, token: input.aggregationToken, state: "completed"
+      }, now);
+      return { stage: completed.stage, leadStage: lead.stage,
+        dispatchItems: lead.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
     });
   }
 
