@@ -30,13 +30,19 @@ function exactKey(key) {
   return [key.source, key.identity, key.scopeKey, key.metricSetKey, key.contractVersion].join("\0");
 }
 
-export async function processDomainAggregation(message, runtime) {
+export async function processDomainAggregation(message, runtime, {
+  mergeCandidatesFn = mergeRunStoreCandidatePayloads,
+  createLeaseMonitorFn = createPipelineLeaseMonitor
+} = {}) {
+  if (typeof mergeCandidatesFn !== "function" || typeof createLeaseMonitorFn !== "function") {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
   const token = randomUUID();
   const claim = await runtime.coordinator.claimAggregator({ runId: message.runId, stage: "discovery",
     generation: message.generation, owner: `domain-${randomUUID()}`, token,
     leaseDurationMs: 120000 }, new Date());
   if (claim.outcome !== "owned") return { terminal: true, outcome: claim.outcome };
-  const monitor = createPipelineLeaseMonitor({ intervalMs: 40000,
+  const monitor = createLeaseMonitorFn({ intervalMs: 40000,
     renew: (now) => runtime.coordinator.renewAggregator({ stageId: claim.stage.id, token,
       leaseDurationMs: 120000 }, now) });
   try {
@@ -67,7 +73,7 @@ export async function processDomainAggregation(message, runtime) {
       if (artifact.queryAudits.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       artifacts.push({ artifact, fingerprint: stored.contentFingerprint });
     }
-    const merged = mergeRunStoreCandidatePayloads(artifacts.flatMap(({ artifact }) =>
+    const merged = mergeCandidatesFn(artifacts.flatMap(({ artifact }) =>
       artifact.stores.map((store) => store.candidatePayload)));
     const domains = merged.map((candidatePayload) => {
       const identity = stableShopIdentity(candidatePayload);
@@ -81,10 +87,11 @@ export async function processDomainAggregation(message, runtime) {
     if (canonicalJson(reuse.awsProviderConfig) !== canonicalJson(confirmed.awsProviderConfig)) {
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     }
+    const domainByShopId = new Map(domains.map((domain) => [domain.shopId, domain]));
     const profiles = new Map();
     for (const row of reuse.profiles) {
       const profile = parseShopLeadProfile(row.profilePayload);
-      if (profile.stableIdentity !== domains.find((domain) => domain.shopId === row.shopId)?.identity.stableKey) continue;
+      if (profile.stableIdentity !== domainByShopId.get(row.shopId)?.identity.stableKey) continue;
       profiles.set(row.shopId, { profileShopId: row.shopId, profileFingerprint: fingerprintJson(profile) });
     }
     const cache = new Map();
@@ -117,7 +124,7 @@ export async function processDomainAggregation(message, runtime) {
         metricSetKey: traffic.crux.rest.metricSetKey, contractVersion: traffic.crux.rest.contractVersion };
       const bigKey = { source: "crux_bigquery", identity: origin, scopeKey: latestMonth || "latest",
         metricSetKey: traffic.crux.bigQuery.metricSetKey, contractVersion: traffic.crux.bigQuery.contractVersion };
-      const cruxRest = { ...restKey, reuse: latestMonth === "never" ? null : (cache.get(exactKey(restKey)) || null) };
+      const cruxRest = { ...restKey, reuse: cache.get(exactKey(restKey)) || null };
       const cruxBigQuery = { ...bigKey, reuse: latestMonth ? (cache.get(exactKey(bigKey)) || null) : null };
       const candidateArtifact = parseDomainCandidateArtifact({ contractVersion: "domain-candidate-v1",
         runId: message.runId, generation: message.generation, ...domain });

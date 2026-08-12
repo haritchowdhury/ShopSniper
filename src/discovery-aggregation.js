@@ -1,5 +1,6 @@
 import { categoryIntentKey, compareCategoryIntents } from "./category-input.js";
 import { canonicalJson } from "./aws-pipeline/core/canonical.js";
+import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
 import { parseRunStoreCandidate } from "./shop-persistence-contract.js";
 
 function normalizedAliases(candidate) {
@@ -169,7 +170,9 @@ export function mergeRunStoreCandidatePayloads(values) {
   return [...clusters.values()].map((members) => {
     const representative = [...members].sort(comparePayloads)[0];
     const aliases = sortedStrings(members.flatMap(normalizedAliases));
-    const myshopifyDomain = aliases.filter((alias) => alias.endsWith(".myshopify.com"))[0] || "";
+    const myshopifyDomains = aliases.filter((alias) => alias.endsWith(".myshopify.com"));
+    if (myshopifyDomains.length > 1) throw new PipelineInvariantError("PIPELINE_IDENTITY_MISMATCH");
+    const myshopifyDomain = myshopifyDomains[0] || "";
     const stableIdentity = myshopifyDomain || representative.stableIdentity;
     const intents = new Map();
     for (const intent of members.flatMap((payload) => payload.categoryIntents || [])) {

@@ -1380,6 +1380,17 @@ export class PrismaRunRepository {
       const diagnostics = input.diagnostics.map((record, index) => diagnosticRecordToCreate(
         input.runId, childId("diag", input.runId, `aws-discovery:${100000 + index}`), 100000 + index, record
       ));
+      const existingDiagnostics = diagnostics.length ? await transaction.runDiagnostic.findMany({
+        where: { runId: input.runId, sequence: { in: diagnostics.map((row) => row.sequence) } }
+      }) : [];
+      const expectedDiagnostics = new Map(diagnostics.map((row) => [row.sequence, row]));
+      if (existingDiagnostics.some((row) => canonicalJson({
+        id: row.id, runId: row.runId, sequence: row.sequence, scope: row.scope, code: row.code,
+        shopType: row.shopType, businessQualifier: row.businessQualifier, query: row.query,
+        resultUrl: row.resultUrl, details: row.details
+      }) !== canonicalJson(expectedDiagnostics.get(row.sequence)))) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
       const written = await bulkUpsertDiagnostics(transaction, diagnostics);
       if (written.length !== diagnostics.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const lead = await registerStageInTransaction(transaction, {
