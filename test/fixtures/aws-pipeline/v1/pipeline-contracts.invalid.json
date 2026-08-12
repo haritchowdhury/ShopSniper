@@ -4,6 +4,10 @@
     "unknown_field", "missing_field", "occurrences_1001", "diagnostics_1001",
     "identifier_traversal", "identity_mismatch", "fingerprint_mismatch",
     "domain_set_mismatch", "candidate_key_mismatch", "needs_crux_mismatch",
-    "itemIds", "raw_provider_body", "credential_url", "persisted_browserless_html"
+    "itemIds", "raw_provider_body", "credential_url", "persisted_browserless_html",
+    "candidate_fingerprint_drift", "provider_config_mismatch", "probe_rank_duplicate",
+    "probe_query_mismatch", "provider_scope_duplicate", "provider_partial_wrong_source",
+    "attempt_request_id_mismatch", "attempt_month_mismatch", "openai_secret_missing",
+    "lease_renewal_overlap", "lease_loss_before_durable_write"
   ]
 }

@@ -4,104 +4,27 @@
   "generation": 1,
   "evaluatedAt": "2026-08-11T09:30:00.000Z",
   "domainManifestKey": "runs/run_fixture_payload_discovery_0001/domains-manifest.json",
-  "domains": [
-    {
-      "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
-      "runStoreId": "run_store_gZ1Jyq8ONnaelYw2GvPTSnwy",
-      "candidateKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/candidate.json",
-      "needsLead": true,
-      "needsTraffic": true,
-      "needsCruxRest": true,
-      "needsCruxBigQuery": true,
-      "needsCrux": true,
-      "sourceKeys": {
-        "dataForSeo": [
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "worldwide",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:US:2840",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:GB:2826",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:CA:2124",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:AU:2036",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:NZ:2554",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:DE:2276",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:FR:2250",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:IN:2356",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          },
-          {
-            "source": "dataforseo",
-            "identity": "fixture.example",
-            "scopeKey": "country:AE:2784",
-            "metricSetKey": "featured_snippet,local_pack,organic,paid",
-            "contractVersion": "dataforseo-traffic-v1"
-          }
-        ],
-        "cruxRest": {
-          "source": "crux_rest",
-          "identity": "https://fixture.example",
-          "scopeKey": "current",
-          "metricSetKey": "cumulative_layout_shift,experimental_time_to_first_byte,first_contentful_paint,form_factors,interaction_to_next_paint,largest_contentful_paint",
-          "contractVersion": "crux-origin-metrics-v1"
-        },
-        "cruxBigQuery": {
-          "source": "crux_bigquery",
-          "identity": "https://fixture.example",
-          "scopeKey": "month:202606",
-          "metricSetKey": "desktop_density,phone_density,popularity_rank,tablet_density",
-          "contractVersion": "crux-popularity-v1"
-        }
-      }
+  "awsProviderConfig": {
+    "version": "aws-provider-config-v1",
+    "googleSearch": { "contractVersion": "google-custom-search-v1", "engineIdFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "resultsPerQuery": 10, "requestTimeoutMs": 15000 },
+    "queryValidation": { "probeContractVersion": "google-probe-v2", "maxQueries": 100, "generatedQueryCount": 10, "queryProbeFreshnessMs": 86400000, "queryProbeConcurrency": 2, "minQueryResults": 1, "minQueryUniqueHosts": 1, "minQueryRelevantResults": 1, "minQueryRelevanceRatio": 0.5, "minQueryBaseScore": 50 },
+    "discoveryIdentity": { "requestTimeoutMs": 15000, "browserlessEnabled": false },
+    "leadFetch": { "requestTimeoutMs": 15000, "maxPagesPerStore": 5, "pageFetchConcurrency": 2 },
+    "browserless": { "enabled": true, "origin": "https://production-sfo.browserless.io", "contractVersion": "browserless-domain-render-documents-v1", "primaryConfigured": true, "fallbackConfigured": true, "navigationTimeoutMs": 8000, "requestTimeoutMs": 45000, "clientAbortMs": 48000 },
+    "aiNormalization": { "enabled": true, "contractVersion": "openai-chat-completions-shopify-lead-v1", "model": "gpt-5-mini", "requestTimeoutMs": 15000 },
+    "trafficHttp": { "requestTimeoutMs": 15000, "cruxBigQueryProjectIdFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  },
+  "domains": [{
+    "shopId": "shop_13iOzZDK7joaSKKTmscbk00V",
+    "runStoreId": "run_store_gZ1Jyq8ONnaelYw2GvPTSnwy",
+    "candidateKey": "runs/run_fixture_payload_discovery_0001/domains/shop_13iOzZDK7joaSKKTmscbk00V/candidate.json",
+    "candidateFingerprint": "f43974c22de9f6f83382934fd66f1070b936baa0bd8a61fbbca201fee3d01011",
+    "leadReuse": null,
+    "needsLead": true, "needsTraffic": true, "needsCruxRest": true, "needsCruxBigQuery": true, "needsCrux": true,
+    "sourceKeys": {
+      "dataForSeo": [{ "source": "dataforseo", "identity": "fixture.example", "scopeKey": "worldwide", "metricSetKey": "featured_snippet,local_pack,organic,paid", "contractVersion": "dataforseo-traffic-v1", "reuse": null }],
+      "cruxRest": { "source": "crux_rest", "identity": "https://fixture.example", "scopeKey": "current", "metricSetKey": "cumulative_layout_shift,experimental_time_to_first_byte,first_contentful_paint,form_factors,interaction_to_next_paint,largest_contentful_paint", "contractVersion": "crux-origin-metrics-v1", "reuse": null },
+      "cruxBigQuery": { "source": "crux_bigquery", "identity": "https://fixture.example", "scopeKey": "latest", "metricSetKey": "desktop_density,phone_density,popularity_rank,tablet_density", "contractVersion": "crux-popularity-v1", "reuse": null }
     }
-  ]
+  }]
 }

@@ -3,6 +3,16 @@
   "runId": "run_fixture_payload_discovery_0001",
   "generation": 1,
   "confirmedRevision": 1,
+  "awsProviderConfig": {
+    "version": "aws-provider-config-v1",
+    "googleSearch": { "contractVersion": "google-custom-search-v1", "engineIdFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "resultsPerQuery": 10, "requestTimeoutMs": 15000 },
+    "queryValidation": { "probeContractVersion": "google-probe-v2", "maxQueries": 100, "generatedQueryCount": 10, "queryProbeFreshnessMs": 86400000, "queryProbeConcurrency": 2, "minQueryResults": 1, "minQueryUniqueHosts": 1, "minQueryRelevantResults": 1, "minQueryRelevanceRatio": 0.5, "minQueryBaseScore": 50 },
+    "discoveryIdentity": { "requestTimeoutMs": 15000, "browserlessEnabled": false },
+    "leadFetch": { "requestTimeoutMs": 15000, "maxPagesPerStore": 5, "pageFetchConcurrency": 2 },
+    "browserless": { "enabled": true, "origin": "https://production-sfo.browserless.io", "contractVersion": "browserless-domain-render-documents-v1", "primaryConfigured": true, "fallbackConfigured": true, "navigationTimeoutMs": 8000, "requestTimeoutMs": 45000, "clientAbortMs": 48000 },
+    "aiNormalization": { "enabled": true, "contractVersion": "openai-chat-completions-shopify-lead-v1", "model": "gpt-5-mini", "requestTimeoutMs": 15000 },
+    "trafficHttp": { "requestTimeoutMs": 15000, "cruxBigQueryProjectIdFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  },
   "categories": [
     {
       "categoryIndex": 0,

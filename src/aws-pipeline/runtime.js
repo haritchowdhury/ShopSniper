@@ -42,9 +42,9 @@ export async function createPipelineRuntime(overrides = {}) {
     });
   }
 
-  const s3Client = overrides.s3Client ?? new S3Client({ region: config.awsRegion });
-  const sqsClient = overrides.sqsClient ?? new SQSClient({ region: config.awsRegion });
-  const secretsClient = overrides.secretsClient ?? new SecretsManagerClient({ region: config.awsRegion });
+  const s3Client = overrides.s3Client ?? new S3Client({ region: config.awsRegion, maxAttempts: 3 });
+  const sqsClient = overrides.sqsClient ?? new SQSClient({ region: config.awsRegion, maxAttempts: 3 });
+  const secretsClient = overrides.secretsClient ?? new SecretsManagerClient({ region: config.awsRegion, maxAttempts: 3 });
   const secrets = overrides.secrets ?? await loadPipelineSecrets({
     client: secretsClient,
     secretId: config.awsPipelineSecretId

@@ -252,6 +252,7 @@ function secret(overrides = {}) {
     DATABASE_URL: "postgresql://fixture-user:fixture-password@example.invalid/db",
     GOOGLE_API_KEY: "fixture-google-key", GOOGLE_SEARCH_ENGINE_ID: "fixture-engine",
     BROWSERLESS_TOKEN: "fixture-browserless", BROWSERLESS_FALLBACK_TOKEN: "fixture-fallback",
+    OPENAI_API_KEY: "fixture-openai-key",
     DATAFORSEO_LOGIN: "fixture-login", DATAFORSEO_PASSWORD: "fixture-password",
     CRUX_API_KEY: "fixture-crux", CRUX_BIGQUERY_PROJECT_ID: "fixture-project",
     GOOGLE_APPLICATION_CREDENTIALS_JSON: JSON.stringify({ client_email: "fixture@example.invalid",
@@ -268,12 +269,37 @@ test("Secrets Manager parsing is strict, cached per client/id, and failures are 
   assert.equal(first, second);
   assert.equal(calls, 1);
   assert.equal(first.googleApplicationCredentials.project_id, "fixture-project");
+  assert.equal(first.openaiApiKey, "fixture-openai-key");
   await loadPipelineSecrets({ client, secretId: "other" });
   assert.equal(calls, 2);
   const failing = { async send() { calls += 1; return { SecretString: secret({ UNKNOWN: "rejected" }) }; } };
   await assert.rejects(loadPipelineSecrets({ client: failing, secretId: "bad" }), (error) => error.code === "PIPELINE_CONTRACT_DRIFT" && error.message === error.code);
   await assert.rejects(loadPipelineSecrets({ client: failing, secretId: "bad" }));
   assert.equal(calls, 4);
+});
+
+test("default AWS clients pin three attempts while overrides remain untouched", async () => {
+  const marker = {};
+  const config = loadAwsPipelineConfig({
+    runExecutionBackend: "aws", awsPipelineEnabled: true, awsRegion: "ap-south-2",
+    awsPipelineBucket: "fixture-bucket", awsPipelineSecretId: "fixture-secret",
+    awsPipelineDiscoveryQueueUrl: "https://sqs.example/discovery",
+    awsPipelineDomainAggregationQueueUrl: "https://sqs.example/domain",
+    awsPipelineLeadQueueUrl: "https://sqs.example/lead",
+    awsPipelineLeadAggregationQueueUrl: "https://sqs.example/lead-aggregation",
+    awsPipelineTrafficQueueUrl: "https://sqs.example/traffic",
+    awsPipelineFinalAggregationQueueUrl: "https://sqs.example/final"
+  });
+  const runtime = await createPipelineRuntime({ config, secrets: { databaseUrl: "fixture" }, prisma: marker,
+    repository: marker, coordinator: marker, artifactStore: marker, dispatcher: marker });
+  assert.equal(await runtime.s3Client.config.maxAttempts(), 3);
+  assert.equal(await runtime.sqsClient.config.maxAttempts(), 3);
+  assert.equal(await runtime.secretsClient.config.maxAttempts(), 3);
+  const supplied = await createPipelineRuntime({ config, secrets: marker, prisma: marker, repository: marker,
+    coordinator: marker, artifactStore: marker, dispatcher: marker, s3Client: marker, sqsClient: marker, secretsClient: marker });
+  assert.equal(supplied.s3Client, marker);
+  assert.equal(supplied.sqsClient, marker);
+  assert.equal(supplied.secretsClient, marker);
 });
 
 test("pipeline logs use the exact allowlist and runtime modules import without I/O", () => {

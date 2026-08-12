@@ -42,6 +42,10 @@ import {
 import { validateEditableQueryList } from "./query-review.js";
 import { readJsonBody } from "./request-json.js";
 import { createInitialStatus } from "./status.js";
+import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-config.js";
+import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
+import { createPipelineRuntime } from "./aws-pipeline/runtime.js";
+import { dispatchConfirmedQueries } from "./aws-pipeline/services/confirmed-query-dispatcher.js";
 
 export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{16,80}$/u;
 export const RUN_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
@@ -68,6 +72,20 @@ const SORT_FIELDS = new Set([
 ]);
 const DEFAULT_LEASE_DURATION_MS = 90_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
+
+function queryReviewPolicy(run, config) {
+  if (run.executionBackend !== "aws") return {
+    maxQueries: config.maxQueries || 500,
+    generatedQueryCount: config.generatedQueryCount ?? 10,
+    awsProviderConfig: null
+  };
+  const awsProviderConfig = parseAwsProviderConfig(run.awsProviderConfig);
+  return {
+    maxQueries: awsProviderConfig.queryValidation.maxQueries,
+    generatedQueryCount: awsProviderConfig.queryValidation.generatedQueryCount,
+    awsProviderConfig
+  };
+}
 const DEFAULT_RECOVERY_INTERVAL_MS = 15_000;
 
 function workerId() {
@@ -836,7 +854,8 @@ export async function executeRun({
   leaseDurationMs,
   heartbeatIntervalMs,
   setIntervalFn,
-  clearIntervalFn
+  clearIntervalFn,
+  pipelineRuntimeFactory = createPipelineRuntime
 }) {
   const baseStatus = {
     ...createInitialStatus(),
@@ -919,6 +938,19 @@ export async function executeRun({
       return;
     }
     if (supportsReview && categories.phase === "scraping") {
+      if (categories.executionBackend === "aws") {
+        const runtime = await pipelineRuntimeFactory({ baseConfig: config, prisma: repository.prisma, repository });
+        const rows = await repository.loadConfirmedQueryPlans(identifier, lease, currentDate(now));
+        if (!rows) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        await heartbeat.renew();
+        await tracker.stop();
+        await heartbeat.stop();
+        await dispatchConfirmedQueries({ runId: identifier, lease, categories: categories.items,
+          confirmedRevision: categories.confirmedQueryRevision,
+          queriesConfirmedAt: new Date(categories.queriesConfirmedAt), awsProviderConfig: categories.awsProviderConfig,
+          queries: rows.queries, generation: categories.pipelineGeneration, status: tracker.status }, runtime);
+        return;
+      }
       const progressive = typeof repository.saveDiscoveredStores === "function" &&
         typeof repository.saveLeadBatch === "function";
       const resumedLeadStage = progressive && [
@@ -1256,7 +1288,8 @@ export function createLeadServer(
     heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
     recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS,
     setIntervalFn = setInterval,
-    clearIntervalFn = clearInterval
+    clearIntervalFn = clearInterval,
+    pipelineRuntimeFactory = createPipelineRuntime
   } = {}
 ) {
   const acceptedRunTimes = [];
@@ -1362,7 +1395,12 @@ export function createLeadServer(
               phase: run.run.phase || "scraping",
               stage: run.run.stage,
               leadSummary: run.run.leadSummary,
-              progress: run.run.progress
+              progress: run.run.progress,
+              executionBackend: run.run.executionBackend,
+              pipelineGeneration: run.run.pipelineGeneration,
+              confirmedQueryRevision: run.run.confirmedQueryRevision,
+              queriesConfirmedAt: run.run.queriesConfirmedAt,
+              awsProviderConfig: run.run.awsProviderConfig
             },
             lease: run.lease,
             pipeline,
@@ -1381,7 +1419,8 @@ export function createLeadServer(
             leaseDurationMs,
             heartbeatIntervalMs,
             setIntervalFn,
-            clearIntervalFn
+            clearIntervalFn,
+            pipelineRuntimeFactory
           });
         }
       } while (drainRequested);
@@ -1523,9 +1562,10 @@ export function createLeadServer(
             .filter((row) => row.categoryIndex === categoryIndex)
             .flatMap((row) => Array.isArray(row.categoryVocabulary) ? row.categoryVocabulary : []))
         ]);
+        const policy = queryReviewPolicy(run, config);
         const checked = validateEditableQueryList(payload.queries, categories, {
-          maxQueries: config.maxQueries || 500,
-          generatedQueryCount: config.generatedQueryCount ?? 10,
+          maxQueries: policy.maxQueries,
+          generatedQueryCount: policy.generatedQueryCount,
           categoryVocabularyByIndex
         });
         if (!checked.valid) {
@@ -1584,8 +1624,8 @@ export function createLeadServer(
             })),
             categories,
             {
-              maxQueries: config.maxQueries || 500,
-              generatedQueryCount: config.generatedQueryCount ?? 10,
+              maxQueries: queryReviewPolicy(current, config).maxQueries,
+              generatedQueryCount: queryReviewPolicy(current, config).generatedQueryCount,
               categoryVocabularyByIndex
             }
           );
@@ -1601,7 +1641,9 @@ export function createLeadServer(
             identifier,
             ownerId,
             revision,
-            currentDate(now)
+            currentDate(now),
+            config.runExecutionBackend,
+            queryReviewPolicy(current, config).awsProviderConfig
           );
           if (!run) {
             throw new ApiError(404, "RUN_NOT_FOUND", "The requested run was not found.");

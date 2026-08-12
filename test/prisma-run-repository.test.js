@@ -1467,7 +1467,7 @@ test("restart recovery requeues progressive checkpoints and fails only legacy wo
   });
 
   const recovered = await repository.recoverExpiredRuns(NOW);
-  assert.equal(recovered.count, 2);
+  assert.equal(recovered.count, 3);
   assert.equal(updates[0].where.state, "running");
   assert.deepEqual(updates[0].where.OR, [
     { leaseExpiresAt: { lte: NOW } },
@@ -1477,8 +1477,13 @@ test("restart recovery requeues progressive checkpoints and fails only legacy wo
     "stores_persisted", "discovering_leads", "leads_persisted", "enriching_traffic"
   ]);
   assert.equal(updates[0].data.state, "queued");
-  assert.equal(updates[1].data.state, "failed");
-  assert.equal(updates[1].data.safeErrorCode, "RUN_LEASE_EXPIRED");
+  assert.equal(updates[0].where.executionBackend, "local");
+  assert.equal(updates[1].where.executionBackend, "aws");
+  assert.deepEqual(updates[1].where.stage.in, ["validating_confirmed_queries", "probing_confirmed_queries"]);
+  assert.equal(updates[1].data.state, "queued");
+  assert.equal(updates[2].where.executionBackend, "local");
+  assert.equal(updates[2].data.state, "failed");
+  assert.equal(updates[2].data.safeErrorCode, "RUN_LEASE_EXPIRED");
 });
 
 test("progress, heartbeat, and failure writes require the active lease fence", async () => {

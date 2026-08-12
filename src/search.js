@@ -79,7 +79,7 @@ export function parseGoogleSearchResponse(body, query) {
   };
 }
 
-export async function searchGooglePage(query, config, { request = requestText } = {}) {
+export async function searchGooglePage(query, config, { request = requestText, retries = 1 } = {}) {
   const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
   url.searchParams.set("key", config.googleApiKey);
   url.searchParams.set("cx", config.googleSearchEngineId);
@@ -88,12 +88,12 @@ export async function searchGooglePage(query, config, { request = requestText } 
 
   const response = await request(url, {
     timeoutMs: config.requestTimeoutMs,
-    retries: 1,
+    retries,
     maxBytes: 1_000_000
   });
   return parseGoogleSearchResponse(response.body, query);
 }
 
-export async function searchGoogle(query, config, dependencies = {}) {
-  return (await searchGooglePage(query, config, dependencies)).results;
+export async function searchGoogle(query, config, { request = requestText, retries = 1 } = {}) {
+  return (await searchGooglePage(query, config, { request, retries })).results;
 }

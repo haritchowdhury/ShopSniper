@@ -36,6 +36,10 @@ import {
 } from "./enrichment/crux/bigquery-request.js";
 import { getPrismaClient, prismaSchemaForClient } from "./prisma-client.js";
 import { createInitialProgress, progressFromStatus } from "./status.js";
+import { fingerprintJson } from "./aws-pipeline/core/canonical.js";
+import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-config.js";
+import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
+import { registerStageInTransaction } from "./aws-pipeline/repositories/pipeline-coordinator-repository.js";
 import {
   GOOGLE_PROBE_CONTRACT_VERSION,
   normalizeProbeResults,
@@ -567,6 +571,57 @@ export function trafficEnrichmentConfigSnapshot(config = {}) {
   });
 }
 
+export function awsProviderConfigSnapshot(config = {}) {
+  try {
+    const browserlessUrl = new URL(config.browserlessUrl);
+    if (browserlessUrl.protocol !== "https:" || browserlessUrl.username || browserlessUrl.password ||
+        browserlessUrl.search || browserlessUrl.hash || !config.googleSearchEngineId ||
+        (config.cruxEnrichmentEnabled === true && !config.cruxBigQueryProjectId) ||
+        config.maxPagesPerStore !== 5 || config.pageFetchConcurrency !== 2 ||
+        (config.browserlessEnabled === true && !config.browserlessToken) ||
+        (config.enableAiNormalization === true && (!config.openaiApiKey || !config.openaiModel))) {
+      throw new Error("invalid AWS provider configuration");
+    }
+    return deepFreeze(parseAwsProviderConfig({
+      version: "aws-provider-config-v1",
+      googleSearch: {
+        contractVersion: "google-custom-search-v1",
+        engineIdFingerprint: fingerprintJson({ contractVersion: "google-search-engine-v1", searchEngineId: config.googleSearchEngineId }),
+        resultsPerQuery: config.googleResultsPerQuery,
+        requestTimeoutMs: config.requestTimeoutMs
+      },
+      queryValidation: {
+        probeContractVersion: "google-probe-v2", maxQueries: config.maxQueries,
+        generatedQueryCount: config.generatedQueryCount, queryProbeFreshnessMs: config.queryProbeFreshnessMs,
+        queryProbeConcurrency: config.queryProbeConcurrency, minQueryResults: config.minQueryResults,
+        minQueryUniqueHosts: config.minQueryUniqueHosts, minQueryRelevantResults: config.minQueryRelevantResults,
+        minQueryRelevanceRatio: config.minQueryRelevanceRatio, minQueryBaseScore: config.minQueryBaseScore
+      },
+      discoveryIdentity: { requestTimeoutMs: config.requestTimeoutMs, browserlessEnabled: false },
+      leadFetch: { requestTimeoutMs: config.requestTimeoutMs, maxPagesPerStore: 5, pageFetchConcurrency: 2 },
+      browserless: {
+        enabled: config.browserlessEnabled === true, origin: browserlessUrl.origin,
+        contractVersion: "browserless-domain-render-documents-v1",
+        primaryConfigured: Boolean(config.browserlessToken), fallbackConfigured: Boolean(config.browserlessFallbackToken),
+        navigationTimeoutMs: 8000, requestTimeoutMs: 45000, clientAbortMs: 48000
+      },
+      aiNormalization: {
+        enabled: config.enableAiNormalization === true,
+        contractVersion: "openai-chat-completions-shopify-lead-v1", model: config.openaiModel || "",
+        requestTimeoutMs: config.requestTimeoutMs
+      },
+      trafficHttp: {
+        requestTimeoutMs: config.requestTimeoutMs,
+        cruxBigQueryProjectIdFingerprint: config.cruxEnrichmentEnabled === true
+          ? fingerprintJson({ contractVersion: "crux-bigquery-project-v1", projectId: config.cruxBigQueryProjectId })
+          : null
+      }
+    }));
+  } catch {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+}
+
 const SAFE_LEDGER_FAILURES = Object.freeze({
   DATAFORSEO_NOT_DISPATCHED: "The request failed before provider dispatch.",
   DATAFORSEO_ZERO_COST_REJECTION: "The provider rejected the request with proven zero cost."
@@ -733,6 +788,9 @@ export class PrismaRunRepository {
     this.prisma = prisma;
     this.databaseSchema = prismaSchemaForClient(prisma);
     this.trafficEnrichmentConfig = trafficEnrichmentConfigSnapshot(runtimeConfig);
+    this.awsProviderConfig = runtimeConfig.runExecutionBackend === "aws"
+      ? awsProviderConfigSnapshot(runtimeConfig)
+      : null;
   }
 
   async health() {
@@ -753,7 +811,8 @@ export class PrismaRunRepository {
       },
       pipelineVersion: 2,
       scoringVersion: 2,
-      trafficEnrichmentConfig: this.trafficEnrichmentConfig
+      trafficEnrichmentConfig: this.trafficEnrichmentConfig,
+      ...(this.awsProviderConfig ? { awsProviderConfig: this.awsProviderConfig } : {})
     };
   }
 
@@ -1138,16 +1197,34 @@ export class PrismaRunRepository {
     });
   }
 
-  async confirmQueryRevision(runIdentifier, ownerId, expectedRevision, now = new Date()) {
+  async confirmQueryRevision(
+    runIdentifier,
+    ownerId,
+    expectedRevision,
+    now = new Date(),
+    executionBackend = "local",
+    awsProviderConfig = null
+  ) {
     return this.prisma.$transaction(async (transaction) => {
       const run = await transaction.run.findFirst({
         where: { id: runIdentifier, ownerId }
       });
       if (!run) return null;
+      let parsedAwsConfig = null;
+      if (executionBackend === "aws") {
+        parsedAwsConfig = parseAwsProviderConfig(awsProviderConfig);
+        const persisted = parseAwsProviderConfig(run.awsProviderConfig);
+        if (run.executionBackend !== "aws" || canonicalJson(parsedAwsConfig) !== canonicalJson(persisted)) {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
+      } else if (executionBackend !== "local" || awsProviderConfig !== null) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
       if (
         run.phase === "scraping" &&
         run.confirmedQueryRevision === expectedRevision &&
-        ["queued", "running"].includes(run.state)
+        ["queued", "running"].includes(run.state) &&
+        run.executionBackend === executionBackend
       ) return run;
       if (run.state !== "awaiting_query_confirmation" || run.phase !== "query_review") {
         throw new RunNotAwaitingQueryConfirmationError();
@@ -1161,7 +1238,8 @@ export class PrismaRunRepository {
           ownerId,
           state: "awaiting_query_confirmation",
           phase: "query_review",
-          queryRevision: expectedRevision
+          queryRevision: expectedRevision,
+          executionBackend
         },
         data: {
           state: "queued",
@@ -1188,6 +1266,40 @@ export class PrismaRunRepository {
       throw new Error("Confirmed query revision no longer matches the editable revision");
     }
     return run.queries;
+  }
+
+  async publishAwsDiscoveryStage(input, now = new Date()) {
+    const providerConfig = parseAwsProviderConfig(input.awsProviderConfig);
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const run = await transaction.run.findFirst({
+        where: {
+          ...activeLeaseWhere(input.runId, input.lease, now), executionBackend: "aws",
+          pipelineGeneration: input.generation
+        }
+      });
+      if (!run || canonicalJson(parseAwsProviderConfig(run.awsProviderConfig)) !== canonicalJson(providerConfig)) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
+      const updated = await transaction.run.updateMany({
+        where: { ...activeLeaseWhere(input.runId, input.lease, now), executionBackend: "aws",
+          pipelineGeneration: input.generation },
+        data: {
+          state: "running", phase: "scraping", stage: "aws_discovery", resultsAvailable: false,
+          progress: input.status, leaseOwner: null, leaseToken: null, leaseAcquiredAt: null,
+          leaseExpiresAt: null, lastHeartbeatAt: null
+        }
+      });
+      requireLeaseMutation(updated);
+      const registered = await registerStageInTransaction(transaction, {
+        runId: input.runId, stage: "discovery", generation: input.generation,
+        manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
+        manifestProducedAt: input.manifestProducedAt, tasks: input.tasks
+      }, now);
+      const finalRun = await transaction.run.findUnique({ where: { id: input.runId } });
+      return { run: finalRun, stage: registered.stage,
+        dispatchItems: registered.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
+    });
   }
 
   async saveQueryValidation(runIdentifier, lease, rows, now = new Date()) {
@@ -3505,7 +3617,7 @@ export class PrismaRunRepository {
   }
 
   async recoverExpiredRuns(now = new Date()) {
-    const expired = {
+    const expiredLease = {
       state: "running",
       OR: [
         { leaseExpiresAt: { lte: now } },
@@ -3515,7 +3627,8 @@ export class PrismaRunRepository {
     return this.prisma.$transaction(async (transaction) => {
       const resumable = await transaction.run.updateMany({
         where: {
-          ...expired,
+          ...expiredLease,
+          executionBackend: "local",
           phase: "scraping",
           stage: { in: [
             "stores_persisted",
@@ -3536,8 +3649,21 @@ export class PrismaRunRepository {
           safeErrorMessage: null
         }
       });
+      const awsPreHandoff = await transaction.run.updateMany({
+        where: {
+          ...expiredLease,
+          executionBackend: "aws",
+          phase: "scraping",
+          stage: { in: ["validating_confirmed_queries", "probing_confirmed_queries"] }
+        },
+        data: {
+          state: "queued", resultsAvailable: false, leaseOwner: null, leaseToken: null,
+          leaseAcquiredAt: null, leaseExpiresAt: null, lastHeartbeatAt: null,
+          safeErrorCode: null, safeErrorMessage: null
+        }
+      });
       const failed = await transaction.run.updateMany({
-        where: expired,
+        where: { ...expiredLease, executionBackend: "local" },
         data: {
           state: "failed",
           phase: "finished",
@@ -3549,7 +3675,8 @@ export class PrismaRunRepository {
             "The worker stopped renewing this run. Please start a new run."
         }
       });
-      return { count: resumable.count + failed.count, resumable: resumable.count, failed: failed.count };
+      return { count: resumable.count + awsPreHandoff.count + failed.count,
+        resumable: resumable.count + awsPreHandoff.count, failed: failed.count };
     });
   }
 }
