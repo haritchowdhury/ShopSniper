@@ -123,8 +123,13 @@ export async function processFinalAggregation(message, runtime, {
         }
         cacheRows.push(...artifact.cacheRows); leadTrafficRows.push(...artifact.leadTrafficRows);
         const workType = source === "dataforseo" ? "dataforseo" : source;
-        for (const scope of artifact.scopeStates) workOutcomes.push({ shopId: task.itemKey, workType,
-          scopeKey: scope.scopeKey, state: scope.state, pipelineTaskId: task.id });
+        const evidenceByScope = new Map(artifact.requestEvidence.map((item) => [item.scopeKey, item]));
+        for (const scope of artifact.scopeStates) {
+          if (source === "dataforseo" && evidenceByScope.get(scope.scopeKey)?.disposition === "not_dispatched")
+            continue;
+          workOutcomes.push({ shopId: task.itemKey, workType,
+            scopeKey: scope.scopeKey, state: scope.state, pipelineTaskId: task.id });
+        }
         diagnostics.push(...artifact.diagnostics.map((value) => ({ source, shopId: task.itemKey, value })));
         summaries[component].push(artifact.summary);
       }

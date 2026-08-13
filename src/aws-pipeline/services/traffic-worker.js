@@ -540,9 +540,15 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const record = recordByLead.get(`${stableLeadId(message.runId, persistedLead(lead))}:${keySource.replaceAll("-", "_")}`);
           const state = record?.state || "unavailable";
           const sourceName = keySource.replaceAll("-", "_");
+          const bigQueryScope = plan.sourceKeys.cruxBigQuery.scopeKey === "latest"
+            ? capturedRows.find((row) => row.source === "crux_bigquery" &&
+              row.identity === plan.sourceKeys.cruxBigQuery.identity)?.scopeKey
+            : plan.sourceKeys.cruxBigQuery.scopeKey;
+          if (component === "cruxBigQuery" && (!bigQueryScope || !/^month:20\d{4}$/u.test(bigQueryScope)))
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           const scopeKeys = component === "dataforseo"
             ? plan.sourceKeys.dataForSeo.map(({ scopeKey }) => scopeKey).sort()
-            : [component === "cruxRest" ? "current" : plan.sourceKeys.cruxBigQuery.scopeKey];
+            : [component === "cruxRest" ? "current" : bigQueryScope];
           const materialScopes = new Set([...(record?.normalizedPayload?.records?.map((item) =>
             item.scopeKey || normalizedDataForSeoScopeKey(item.scope))
             .filter(Boolean) || []), ...capturedRows.filter((row) => sourceName === "dataforseo" &&

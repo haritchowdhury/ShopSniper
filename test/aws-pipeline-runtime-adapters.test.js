@@ -221,6 +221,24 @@ test("SQS dispatcher chunks ten with deterministic IDs and retains partial recov
   assert.ok(commands.every((command) => command.Entries.every(({ MessageBody }) => !MessageBody.includes("credential"))));
 });
 
+test("SQS dispatcher preserves duplicate logical IDs in positional and legacy results", async () => {
+  const client = { async send(command) {
+    return { Successful: [command.input.Entries[1]].map(({ Id }) => ({ Id })),
+      Failed: [command.input.Entries[0]].map(({ Id }) => ({ Id })) };
+  } };
+  const dispatcher = new SqsDispatcher({ client });
+  const messages = [work(1), work(1)];
+  const result = await dispatcher.sendMany("https://sqs.example/queue", messages, workMessageSchema);
+  assert.deepEqual(result, {
+    sentItemIds: ["query_1"],
+    failedItemIds: ["query_1"],
+    results: [
+      { index: 0, itemId: "query_1", outcome: "failed" },
+      { index: 1, itemId: "query_1", outcome: "sent" }
+    ]
+  });
+});
+
 test("SQS single and whole-batch failures return recoverable logical IDs", async () => {
   const client = { async send() { throw new Error("network"); } };
   const dispatcher = new SqsDispatcher({ client });

@@ -132,7 +132,8 @@ test("final aggregator reconstructs all independent source and lead artifacts", 
   const { result, published } = await oneDomainFinalHarness();
   assert.deepEqual(result, { terminal: true, outcome: "completed" });
   assert.equal(published.leadTrafficRows.length, 3);
-  assert.equal(published.workOutcomes.length, 3);
+  assert.deepEqual(published.workOutcomes.map(({ workType }) => workType).sort(),
+    ["crux_bigquery", "crux_rest"]);
   assert.deepEqual(published.leadProfileOutcomes.map(({ state }) => state), ["new"]);
 });
 

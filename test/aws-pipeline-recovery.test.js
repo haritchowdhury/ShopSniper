@@ -66,6 +66,25 @@ for (const laterOnly of [false, true]) test(`recovery correlates duplicate logic
       { stageId: second.id, itemKeys: ["shop_collision"] }]);
 });
 
+for (const invalidResults of [
+  [{ index: 0, itemId: "shop_collision", outcome: "sent" }],
+  [{ index: 0, itemId: "shop_collision", outcome: "sent" },
+    { index: 0, itemId: "shop_collision", outcome: "sent" }],
+  [{ index: 0, itemId: "wrong", outcome: "sent" },
+    { index: 1, itemId: "shop_collision", outcome: "sent" }],
+  [{ index: 0, itemId: "shop_collision", outcome: "sent" },
+    { index: 2, itemId: "shop_collision", outcome: "sent" }]
+]) test("recovery rejects malformed positional results before recording dispatch", async () => {
+  const first = stage("lead", "invalid_1"); const second = stage("lead", "invalid_2");
+  const { runtime, events } = runtimeFor({ tasks: [{ task: task("shop_collision"), stage: first },
+    { task: task("shop_collision"), stage: second }], stages: [] });
+  runtime.dispatcher.sendMany = async () => ({ sentItemIds: ["shop_collision"],
+    failedItemIds: [], results: invalidResults });
+  await assert.rejects(recoverPipelineWork({ now }, runtime),
+    (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+  assert.equal(events.some(([type]) => type === "record"), false);
+});
+
 test("recovery prevalidates the complete plan before the first send", async () => {
   const invalid = stage("lead", "0004"); invalid.manifestFingerprint = "wrong";
   const { runtime, events } = runtimeFor({ tasks: [{ task: task("shop_1"), stage: invalid }], stages: [] });
