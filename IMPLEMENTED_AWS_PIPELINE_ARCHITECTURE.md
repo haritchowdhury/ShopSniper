@@ -176,9 +176,9 @@ flowchart TB
 ```
 
 <details>
-<summary>Original single-canvas flow from commit 17129f2</summary>
+<summary>Original single-canvas Mermaid source (archived; commit 17129f2)</summary>
 
-```mermaid
+```text
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"28px","lineColor":"#1e40af","primaryTextColor":"#0f172a"},"flowchart":{"curve":"basis","nodeSpacing":95,"rankSpacing":125,"diagramPadding":60,"padding":36,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart TB
     subgraph CONTROL["Existing control plane — unchanged"]
@@ -372,7 +372,7 @@ flowchart TB
 ## Durable stage protocol
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#1e40af"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"21px","lineColor":"#1e40af"},"flowchart":{"curve":"basis","nodeSpacing":55,"rankSpacing":70,"padding":24,"htmlLabels":true,"useMaxWidth":true}}}%%
 flowchart LR
     A["Register immutable expected set<br/>before dispatch"] --> B["Deliver at least once"]
     B --> C{"Claim bounded lease<br/>with generation + token fence"}
@@ -401,7 +401,7 @@ flowchart LR
 ## Cost and fan-out shape
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#c2410c"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"21px","lineColor":"#c2410c"},"flowchart":{"curve":"basis","nodeSpacing":55,"rankSpacing":70,"padding":24,"htmlLabels":true,"useMaxWidth":true}}}%%
 flowchart TB
     DOMAINS["Immutable run-wide domain set"]
 
@@ -428,7 +428,7 @@ flowchart TB
 ## Deployment boundary
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#475569"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"21px","lineColor":"#475569"},"flowchart":{"curve":"basis","nodeSpacing":55,"rankSpacing":70,"padding":24,"htmlLabels":true,"useMaxWidth":true}}}%%
 flowchart LR
     DONE["G1–G13 + G-R7–G-R9<br/>implemented and locally verified"] --> REVIEW["Independent review"]
     REVIEW --> G14["G14<br/>IaC + production resource creation<br/>requires explicit approval"]
