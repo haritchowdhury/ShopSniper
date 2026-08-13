@@ -4,6 +4,74 @@
 
 ## Readable execution flow
 
+### How the five canvases form one pipeline
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"21px"},"flowchart":{"curve":"basis","nodeSpacing":45,"rankSpacing":65,"padding":26,"htmlLabels":true}}}%%
+flowchart TB
+    C1["CANVAS 1 <br/> Existing control plane <br/> query confirmation <br/> discovery registration"]
+
+    H12[("DURABLE HANDOFF 1 → 2 <br/> confirmed revision + frozen provider configuration <br/> S3 confirmed-query manifest <br/> Neon immutable expected RunQuery set <br/> discovery messages carry run, generation, item ID, <br/> manifest key, fingerprints, production time, and attempt")]
+
+    C2["CANVAS 2 <br/> per-query discovery <br/> domain reconciliation <br/> immutable work planning"]
+
+    H23[("DURABLE HANDOFF 2 → 3 <br/> validated per-query S3 artifacts + Neon terminal evidence <br/> stable shop identity + complete query/category provenance <br/> S3 candidate artifacts + cumulative domain manifest <br/> frozen per-domain reuse and missing-work decisions <br/> Neon Shop/RunStore checkpoint + complete lead task set <br/> lead messages or explicit zero-task aggregation check")]
+
+    C3["CANVAS 3 <br/> per-domain lead enrichment <br/> lead aggregation <br/> private checkpoint"]
+
+    H34[("DURABLE HANDOFF 3 → 4 <br/> validated lead artifacts + Neon terminal evidence <br/> private RunStore/Lead checkpoint with resultsAvailable=false <br/> persisted qualified lead set + reusable-profile decisions <br/> original domain manifest and frozen provider configuration <br/> complete traffic_crux task set <br/> traffic triggers or explicit zero-task aggregation check")]
+
+    C4["CANVAS 4 <br/> one stage-wide traffic owner <br/> three provider paths <br/> per-domain terminal fan-out"]
+
+    H45[("DURABLE HANDOFF 4 → 5 <br/> DataForSEO batch artifacts + paid-ledger evidence <br/> CrUX REST attempt and per-domain source artifacts <br/> CrUX BigQuery attempt + batch artifacts <br/> per-domain combined traffic-crux artifacts <br/> Neon terminal traffic evidence <br/> final-aggregation check")]
+
+    C5["CANVAS 5 <br/> final validation <br/> atomic publication <br/> recovery and cancellation"]
+
+    H5A[("ATOMIC APPLICATION HANDOFF <br/> profiles + owner grants <br/> DataForSEO + CrUX REST + CrUX BigQuery rows <br/> score v3 + summaries + completed Run <br/> resultsAvailable=true is the final mutation")]
+
+    APP["Existing owner-scoped application <br/> history · results · master leads <br/> traffic · CSV · frontend"]
+
+    C1 --> H12 --> C2 --> H23 --> C3 --> H34 --> C4 --> H45 --> C5 --> H5A --> APP
+
+    classDef canvas fill:#f1f5f9,stroke:#475569,stroke-width:4px,color:#0f172a;
+    classDef handoff fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef app fill:#dcfce7,stroke:#16a34a,stroke-width:4px,color:#052e16;
+    class C1,C2,C3,C4,C5 canvas;
+    class H12,H23,H34,H45,H5A handoff;
+    class APP app;
+    linkStyle default stroke:#0891b2,stroke-width:5px;
+```
+
+### Cross-cutting rails carried through every canvas
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"21px"},"flowchart":{"curve":"basis","nodeSpacing":50,"rankSpacing":65,"padding":26,"htmlLabels":true}}}%%
+flowchart TB
+    IMM[("IMMUTABLE CONTEXT RAIL <br/> run ID + generation + expected item set <br/> manifest key + manifest fingerprint + producedAt <br/> task input fingerprints + frozen provider configuration <br/> follows registration through final validation")]
+
+    ORDER["WORKER COMMIT-ORDER RAIL <br/> claim fenced lease → execute only frozen missing work <br/> write and validate immutable S3 artifact <br/> record first Neon terminal transition <br/> send aggregation check <br/> acknowledge original SQS record last"]
+
+    COMPLETE{"COMPLETION RAIL <br/> Neon terminalCount must equal immutable expectedCount <br/> then one aggregator validates every expected task and artifact <br/> queue emptiness, S3 counts, and S3 events never complete a stage"}
+
+    DELIVERY[["DELIVERY RAIL <br/> six SQS queues provide at-least-once delivery <br/> partial batch failure, retry, backpressure, and DLQ routing <br/> duplicate, delayed, split, and reverse delivery are expected"]]
+
+    RECOVERY["RECOVERY RAIL <br/> Lambda 7 scans only known expired Neon work <br/> recreates exact versioned work/check messages <br/> re-enters the normal fenced queue path <br/> stale unknown paid DataForSEO work becomes ambiguous"]
+
+    CANCEL[("CANCELLATION RAIL <br/> atomic generation cancellation terminalizes pending work <br/> invalidates lease tokens <br/> rejects every late worker or publication write")]
+
+    IMM --> ORDER --> COMPLETE --> DELIVERY --> RECOVERY --> CANCEL
+
+    classDef context fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef protocol fill:#dbeafe,stroke:#2563eb,stroke-width:4px,color:#172554;
+    classDef gate fill:#fef3c7,stroke:#d97706,stroke-width:4px,color:#451a03;
+    classDef recovery fill:#ffe4e6,stroke:#e11d48,stroke-width:4px,color:#4c0519;
+    class IMM context;
+    class ORDER,DELIVERY protocol;
+    class COMPLETE gate;
+    class RECOVERY,CANCEL recovery;
+    linkStyle default stroke:#475569,stroke-width:5px;
+```
+
 ### 1 — Existing control plane and discovery registration
 
 ```mermaid
