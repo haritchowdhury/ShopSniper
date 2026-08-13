@@ -37,12 +37,18 @@ export async function recoverPipelineWork({ now, limit = 100 }, runtime) {
   for (const queueUrl of [...new Set(taskPlan.map(({ queueUrl }) => queueUrl))]) {
     const entries = taskPlan.filter((entry) => entry.queueUrl === queueUrl);
     const sent = await runtime.dispatcher.sendMany(queueUrl, entries.map(({ message }) => message), workMessageSchema);
+    if (!Array.isArray(sent.results) || sent.results.length !== entries.length ||
+        new Set(sent.results.map(({ index }) => index)).size !== entries.length ||
+        sent.results.some(({ index, itemId, outcome }) => !Number.isInteger(index) || index < 0 || index >= entries.length ||
+          entries[index].message.itemId !== itemId || !["sent", "failed"].includes(outcome)))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     tasksSent += sent.sentItemIds.length;
     const byStage = new Map();
-    for (const itemKey of sent.sentItemIds) {
-      const entry = entries.find(({ task }) => task.itemKey === itemKey);
-      if (!entry) continue;
-      const values = byStage.get(entry.stage.id) || []; values.push(itemKey); byStage.set(entry.stage.id, values);
+    for (const result of sent.results) {
+      if (result.outcome !== "sent") continue;
+      const entry = entries[result.index];
+      const values = byStage.get(entry.stage.id) || []; values.push(entry.task.itemKey);
+      byStage.set(entry.stage.id, values);
     }
     for (const [stageId, itemKeys] of byStage) await runtime.coordinator.recordDispatch({ stageId, itemKeys }, now);
   }

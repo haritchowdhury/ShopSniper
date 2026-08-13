@@ -14,7 +14,8 @@ export async function handler(event) {
   try {
     const result = await processTrafficBatch(records, runtime);
     return { batchItemFailures: [...new Set([...invalid,
-      ...result.results.filter(({ terminal }) => !terminal).map(({ recordId }) => recordId)])].sort()
+      ...result.results.filter(({ outcome }) => ["busy", "retryable"].includes(outcome))
+        .map(({ recordId }) => recordId)])].sort()
       .map((itemIdentifier) => ({ itemIdentifier })) };
   } catch {
     return { batchItemFailures: [...new Set([...invalid, ...records.map(({ recordId }) => recordId)])].sort()

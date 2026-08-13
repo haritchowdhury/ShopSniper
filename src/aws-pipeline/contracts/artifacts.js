@@ -6,7 +6,7 @@ import {
 import { leadRecordToCreate, leadTrafficEnrichmentRecordToCreate, trafficCacheRecordToUpsert } from
   "../../api-serializer.js";
 import { PipelineContractError, PipelineInvariantError } from "./errors.js";
-import { candidateArtifactKey, providerArtifactKey } from "../core/keys.js";
+import { candidateArtifactKey, providerArtifactKey, providerBatchArtifactKey } from "../core/keys.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { awsProviderConfigSchema } from "./aws-provider-config.js";
 
@@ -169,12 +169,24 @@ const leadOutcome = z.object({ runId, generation, shopId: id, runStoreId: id,
 });
 export const leadResultArtifactSchema = z.object({ contractVersion: z.literal("lead-result-v1"), result: leadOutcome }).strict();
 
+const dataForSeoScopeEvidenceSchema = z.union([
+  z.object({ scopeKey: z.string().max(128), disposition: z.literal("ledger"), requestFingerprint: fingerprint,
+    targetCount: z.number().int().min(1).max(1000), ledgerState: z.literal("succeeded"), batchId: fingerprint,
+    batchArtifactKey: z.string().max(2048), batchArtifactFingerprint: fingerprint }).strict(),
+  z.object({ scopeKey: z.string().max(128), disposition: z.literal("ledger"), requestFingerprint: fingerprint,
+    targetCount: z.number().int().min(1).max(1000), ledgerState: z.enum(["failed", "ambiguous"]) }).strict(),
+  z.object({ scopeKey: z.string().max(128), disposition: z.literal("reused"), cacheFingerprint: fingerprint }).strict(),
+  z.object({ scopeKey: z.string().max(128), disposition: z.literal("not_dispatched"),
+    reason: z.enum(["budget_exhausted", "work_failed", "work_ambiguous"]) }).strict()
+]);
+
 export const providerSourceArtifactSchema = z.object({ contractVersion: z.literal("provider-source-result-v1"), runId,
   generation, shopId: id, source: z.enum(["dataforseo", "crux_rest", "crux_bigquery"]),
   state: z.enum(["available", "partial", "no_coverage", "unavailable", "ambiguous", "contract_mismatch", "reused"]),
   scopeStates: z.array(z.object({ scopeKey: z.string().max(128), state: z.enum([
     "available", "no_coverage", "unavailable", "ambiguous", "contract_mismatch", "reused"
   ]) }).strict()).min(1).max(100),
+  requestEvidence: z.array(dataForSeoScopeEvidenceSchema).max(100),
   cacheRows: z.array(z.record(z.string(), z.unknown())).max(1000), leadTrafficRows: z.array(z.record(z.string(), z.unknown())).max(1000),
   summary: z.record(z.string(), z.unknown()), diagnostics: z.array(diagnostic).max(1000) }).strict().superRefine((value, context) => {
     try {
@@ -184,6 +196,25 @@ export const providerSourceArtifactSchema = z.object({ contractVersion: z.litera
     const scopes = value.scopeStates.map((entry) => entry.scopeKey);
     if (new Set(scopes).size !== scopes.length || scopes.some((scope, index) => index > 0 && scope <= scopes[index - 1]))
       context.addIssue({ code: "custom", message: "scope order" });
+    const evidenceScopes = value.requestEvidence.map((entry) => entry.scopeKey);
+    if (value.source !== "dataforseo") {
+      if (evidenceScopes.length) context.addIssue({ code: "custom", message: "CrUX evidence" });
+    } else if (evidenceScopes.length !== scopes.length || evidenceScopes.some((scope, index) => scope !== scopes[index])) {
+      context.addIssue({ code: "custom", message: "evidence scopes" });
+    } else {
+      value.requestEvidence.forEach((evidence, index) => {
+        const state = value.scopeStates[index].state;
+        const allowed = evidence.disposition === "reused" ? ["reused"]
+          : evidence.disposition === "not_dispatched"
+            ? [evidence.reason === "work_ambiguous" ? "ambiguous" : "unavailable"]
+            : evidence.ledgerState === "succeeded" ? ["available", "unavailable"]
+              : evidence.ledgerState === "ambiguous" ? ["ambiguous"] : ["unavailable"];
+        if (!allowed.includes(state)) context.addIssue({ code: "custom", message: "evidence state" });
+        if (evidence.disposition === "ledger" && evidence.ledgerState === "succeeded" &&
+            evidence.batchArtifactKey !== providerBatchArtifactKey(value.runId, "dataforseo", evidence.batchId))
+          context.addIssue({ code: "custom", message: "evidence batch" });
+      });
+    }
     if (value.source !== "dataforseo" && value.state === "partial") context.addIssue({ code: "custom", message: "partial source" });
     const states = new Set(value.scopeStates.map((entry) => entry.state));
     if (value.state === "partial") {

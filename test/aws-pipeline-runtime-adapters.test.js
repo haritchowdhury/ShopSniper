@@ -216,6 +216,8 @@ test("SQS dispatcher chunks ten with deterministic IDs and retains partial recov
   assert.deepEqual(commands.flatMap(({ Entries }) => Entries.map(({ Id }) => Id)), Array.from({ length: 12 }, (_, index) => `m${String(index).padStart(4, "0")}`));
   assert.deepEqual(result.failedItemIds, ["query_2"]);
   assert.equal(result.sentItemIds.length, 11);
+  assert.deepEqual(result.results.map(({ index, itemId, outcome }) => [index, itemId, outcome]),
+    Array.from({ length: 12 }, (_, index) => [index, `query_${index}`, index === 2 ? "failed" : "sent"]));
   assert.ok(commands.every((command) => command.Entries.every(({ MessageBody }) => !MessageBody.includes("credential"))));
 });
 
@@ -228,7 +230,8 @@ test("SQS single and whole-batch failures return recoverable logical IDs", async
   const check = { version: 1, type: "aggregation.check", runId: "run_runtime_adapter_0001",
     stage: "discovery", generation: 1, reason: "recovery", attempt: 1 };
   assert.deepEqual(await dispatcher.sendMany("https://sqs.example/q", [check], aggregationCheckMessageSchema), {
-    sentItemIds: [], failedItemIds: ["run_runtime_adapter_0001:discovery:1:recovery"]
+    sentItemIds: [], failedItemIds: ["run_runtime_adapter_0001:discovery:1:recovery"],
+    results: [{ index: 0, itemId: "run_runtime_adapter_0001:discovery:1:recovery", outcome: "failed" }]
   });
 });
 

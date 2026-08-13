@@ -127,9 +127,25 @@ test("attempt and batch contracts reject cross-field drift, ordering, duplicates
   const source = { contractVersion: "provider-source-result-v1", runId: manifest.runId, generation: 1,
     shopId: "shop_13iOzZDK7joaSKKTmscbk00V", source: "dataforseo", state: "partial",
     scopeStates: [{ scopeKey: "a", state: "available" }, { scopeKey: "b", state: "unavailable" }],
+    requestEvidence: ["a", "b"].map((scopeKey, index) => { const batchId = `${index + 1}`.repeat(64);
+      return { scopeKey, disposition: "ledger", requestFingerprint: `${index + 3}`.repeat(64), targetCount: 1,
+        ledgerState: "succeeded", batchId, batchArtifactKey: keys.providerBatchArtifactKey(manifest.runId,
+          "dataforseo", batchId), batchArtifactFingerprint: `${index + 5}`.repeat(64) }; }),
     cacheRows: [], leadTrafficRows: [], summary: {}, diagnostics: [] };
   parseProviderSourceArtifact(source);
   rejects(() => parseProviderSourceArtifact({ ...source, source: "crux_rest" }), "PIPELINE_ARTIFACT_INVALID");
+  const missingEvidence = clone(source); delete missingEvidence.requestEvidence;
+  rejects(() => parseProviderSourceArtifact(missingEvidence), "PIPELINE_ARTIFACT_INVALID");
+  const duplicateEvidence = clone(source); duplicateEvidence.requestEvidence[1].scopeKey = "a";
+  rejects(() => parseProviderSourceArtifact(duplicateEvidence), "PIPELINE_ARTIFACT_INVALID");
+  const wrongBatchKey = clone(source); wrongBatchKey.requestEvidence[0].batchArtifactKey = "runs/wrong.json";
+  rejects(() => parseProviderSourceArtifact(wrongBatchKey), "PIPELINE_ARTIFACT_INVALID");
+  const privateEvidence = clone(source); privateEvidence.requestEvidence[0].targets = ["private.example"];
+  rejects(() => parseProviderSourceArtifact(privateEvidence), "PIPELINE_ARTIFACT_INVALID");
+  const cruxEvidence = clone(source); cruxEvidence.source = "crux_rest"; cruxEvidence.state = "available";
+  cruxEvidence.scopeStates = [{ scopeKey: "current", state: "available" }];
+  cruxEvidence.requestEvidence = [source.requestEvidence[0]];
+  rejects(() => parseProviderSourceArtifact(cruxEvidence), "PIPELINE_ARTIFACT_INVALID");
   const duplicateScope = clone(source); duplicateScope.scopeStates[1].scopeKey = "a";
   rejects(() => parseProviderSourceArtifact(duplicateScope), "PIPELINE_ARTIFACT_INVALID");
   const traffic = await fixture("combined-traffic-crux-result.valid.json");

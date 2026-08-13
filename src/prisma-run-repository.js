@@ -2189,7 +2189,18 @@ export class PrismaRunRepository {
     });
   }
 
-  async publishAwsFinalResults(input, now = new Date()) {
+  async publishAwsFinalResults(input, now = new Date(), { afterStep = async () => {} } = {}) {
+    if (typeof afterStep !== "function" || !Array.isArray(input.dataForSeoLedgerEvidence))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const ledgerEvidence = [...input.dataForSeoLedgerEvidence];
+    requireUniqueBatchKeys("AWS final DataForSEO ledger evidence", ledgerEvidence,
+      ({ requestFingerprint }) => requestFingerprint);
+    if (ledgerEvidence.some((entry, index) => !/^[a-f0-9]{64}$/u.test(entry.requestFingerprint) ||
+        !Number.isInteger(entry.targetCount) || entry.targetCount < 1 || entry.targetCount > 1000 ||
+        !["succeeded", "failed", "ambiguous"].includes(entry.state) ||
+        (entry.state === "succeeded") !== /^[a-f0-9]{64}$/u.test(entry.resultFingerprint || "") ||
+        (index > 0 && entry.requestFingerprint <= ledgerEvidence[index - 1].requestFingerprint)))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     const cacheRows = input.cacheRows.map((row) => trafficCacheRecordToUpsert(cacheId(row), row));
     const trafficRows = input.leadTrafficRows.map((row) => leadTrafficEnrichmentRecordToCreate(
       childId("lead_traffic", input.runId, `${row.leadId}:${row.source}`), input.runId, row.leadId, row));
@@ -2201,10 +2212,25 @@ export class PrismaRunRepository {
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
         stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
       if (owned.run.resultsAvailable) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const ledgers = await transaction.$queryRaw`
+        SELECT "runId", "requestFingerprint", "scopeKey", "targetCount", "state", "resultFingerprint"
+        FROM "DataForSeoRequestLedger" WHERE "runId" = ${input.runId}
+        ORDER BY "requestFingerprint" ASC FOR UPDATE
+      `;
+      if (ledgers.length !== ledgerEvidence.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      for (let index = 0; index < ledgers.length; index += 1) {
+        const row = ledgers[index]; const evidence = ledgerEvidence[index];
+        if (row.runId !== input.runId || row.requestFingerprint !== evidence.requestFingerprint ||
+            row.scopeKey !== evidence.scopeKey || row.targetCount !== evidence.targetCount ||
+            row.state !== evidence.state || (row.resultFingerprint ?? null) !== evidence.resultFingerprint)
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
       const writtenCache = await bulkUpsertTrafficCache(transaction, cacheRows, now);
       if (writtenCache.length !== cacheRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      await afterStep("cache_written");
       const writtenTraffic = await bulkUpsertLeadTraffic(transaction, trafficRows);
       if (writtenTraffic.length !== trafficRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      await afterStep("traffic_written");
       for (const outcome of input.workOutcomes || []) {
         const targetState = ["available", "no_coverage"].includes(outcome.state) ? "completed" :
           outcome.state === "ambiguous" ? "ambiguous" : outcome.state === "reused" ? "reused" : "failed";
@@ -2227,6 +2253,7 @@ export class PrismaRunRepository {
             ? "WORK_OUTCOME_AMBIGUOUS" : "PIPELINE_PROVIDER_UNAVAILABLE" } });
         if (updatedWork.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
+      await afterStep("work_settled");
       for (const outcome of input.leadProfileOutcomes) {
         if (outcome.state === "new") {
           const profile = parseShopLeadProfile(outcome.profile);
@@ -2270,16 +2297,20 @@ export class PrismaRunRepository {
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         }
       }
+      await afterStep("profiles_settled");
       const diagnosticRows = (input.diagnostics || []).map(({ value }, index) => diagnosticRecordToCreate(
         input.runId, childId("diag", input.runId, `aws-traffic:${2_000_000 + index}`), 2_000_000 + index, value));
       if ((await bulkUpsertDiagnostics(transaction, diagnosticRows)).length !== diagnosticRows.length)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      await afterStep("diagnostics_written");
       const scoringVersion = await finalizePersistedLeadScoresV3(transaction, input.runId, owned.run);
+      await afterStep("scores_finalized");
       const leads = await transaction.lead.findMany({ where: { runId: input.runId }, orderBy: { id: "asc" } });
       const leadSummary = leads.reduce((summary, lead) => { summary.total += 1;
         if (lead.status in summary) summary[lead.status] += 1; return summary; },
       { total: 0, qualified: 0, rejected: 0, failed: 0 });
       await grantRunShopsToOwner(transaction, input.runId, leads, now);
+      await afterStep("grants_written");
       const audits = await transaction.queryAudit.findMany({ where: { runId: input.runId },
         orderBy: [{ sequence: "asc" }, { id: "asc" }] });
       const diagnostics = await transaction.runDiagnostic.findMany({ where: { runId: input.runId },
@@ -2292,6 +2323,8 @@ export class PrismaRunRepository {
         trafficSummary: input.trafficSummary, pipelineVersion: 2, scoringVersion });
       await completeAggregatorInTransaction(transaction, { stageId: input.stageId,
         token: input.aggregationToken, state: "completed" }, now);
+      await afterStep("stage_completed");
+      await afterStep("before_run_visibility");
       const updated = await transaction.run.updateMany({ where: { id: input.runId, state: "running",
         executionBackend: "aws", pipelineGeneration: input.generation, resultsAvailable: false }, data: {
         state: "completed", phase: "finished", stage: "completed", completedAt: now,

@@ -38,6 +38,7 @@ export class SqsDispatcher {
     const values = messages.map((message) => parsed(schema, message));
     const sentItemIds = [];
     const failedItemIds = [];
+    const results = [];
     for (let offset = 0; offset < values.length; offset += 10) {
       const chunk = values.slice(offset, offset + 10);
       const entries = chunk.map((message, index) => ({
@@ -50,6 +51,8 @@ export class SqsDispatcher {
         response = await this.client.send(new SendMessageBatchCommand({ QueueUrl: queueUrl, Entries: entries }));
       } catch {
         failedItemIds.push(...chunk.map(itemId));
+        results.push(...chunk.map((message, index) => ({ index: offset + index,
+          itemId: itemId(message), outcome: "failed" })));
         continue;
       }
       const successful = response?.Successful ?? [];
@@ -59,7 +62,10 @@ export class SqsDispatcher {
           responseIds.some((id) => !byId.has(id)) || responseIds.length !== chunk.length) invalid();
       sentItemIds.push(...successful.map(({ Id }) => byId.get(Id)));
       failedItemIds.push(...failed.map(({ Id }) => byId.get(Id)));
+      const successfulIds = new Set(successful.map(({ Id }) => Id));
+      results.push(...entries.map((entry, index) => ({ index: offset + index, itemId: byId.get(entry.Id),
+        outcome: successfulIds.has(entry.Id) ? "sent" : "failed" })));
     }
-    return { sentItemIds, failedItemIds };
+    return { sentItemIds, failedItemIds, results };
   }
 }

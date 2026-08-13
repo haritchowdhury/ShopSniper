@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { leadRecordToCreate } from "../src/api-serializer.js";
+import { runStoreId, shopIdForStableKey } from "../src/shop-persistence-contract.js";
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
 import { buildCruxBigQueryLiveRequest } from "../src/enrichment/crux/bigquery-request.js";
@@ -19,36 +20,86 @@ const message = Object.freeze({ version: 1, type: "traffic.domain",
 const load = async (name) => JSON.parse(await readFile(new URL(`./fixtures/aws-pipeline/v1/${name}`, import.meta.url)));
 
 async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"], cancelled = false,
-  artifactSeed, sharedState } = {}) {
+  artifactSeed, sharedState, domainCount = 1, fullScopes = true, adapterOverrides = {},
+  leaseAttempt = 1, secretOverrides = {} } = {}) {
   const domainManifest = await load("domain-manifest.valid.json");
   const workPlan = await load("domain-work-plan.valid.json");
   const leadFixture = (await load("lead-results.valid.json")).success.lead;
-  const traffic = trafficEnrichmentConfigSnapshot({});
-  workPlan.domains[0] = { ...workPlan.domains[0], needsTraffic: false,
-    needsCruxRest: false, needsCruxBigQuery: false, needsCrux: false };
-  workPlan.awsProviderConfig.trafficHttp.cruxBigQueryProjectIdFingerprint = null;
+  const trafficSnapshot = trafficEnrichmentConfigSnapshot({ dataForSeoEnrichmentEnabled: true,
+    cruxEnrichmentEnabled: true });
+  const traffic = fullScopes ? trafficSnapshot : { ...trafficSnapshot,
+    dataForSeo: { ...trafficSnapshot.dataForSeo, scopes: ["worldwide"] } };
+  if (domainCount > 1) {
+    const baseDomain = domainManifest.domains[0]; const basePlan = workPlan.domains[0];
+    domainManifest.domains = Array.from({ length: domainCount }, (_, index) => {
+      const suffix = String(index).padStart(3, "0");
+      const domain = JSON.parse(JSON.stringify(baseDomain).replaceAll("fixture.example", `fixture-${suffix}.example`)
+        .replaceAll("fixture.myshopify.com", `fixture-${suffix}.myshopify.com`));
+      domain.shopId = shopIdForStableKey(domain.identity.stableKey);
+      domain.runStoreId = runStoreId(domainManifest.runId, domain.shopId); return domain;
+    });
+    workPlan.domains = domainManifest.domains.map((domain, index) => {
+      const suffix = String(index).padStart(3, "0");
+      const plan = JSON.parse(JSON.stringify(basePlan).replaceAll("fixture.example", `fixture-${suffix}.example`)
+        .replaceAll("fixture.myshopify.com", `fixture-${suffix}.myshopify.com`));
+      plan.shopId = domain.shopId; plan.runStoreId = domain.runStoreId;
+      plan.candidateKey = `runs/${domainManifest.runId}/domains/${domain.shopId}/candidate.json`;
+      plan.candidateFingerprint = fingerprintJson({ contractVersion: "domain-candidate-v1",
+        runId: domainManifest.runId, generation: 1, shopId: domain.shopId, runStoreId: domain.runStoreId,
+        identity: domain.identity, candidatePayload: domain.candidatePayload });
+      if (fullScopes) { const base = plan.sourceKeys.dataForSeo[0];
+        plan.sourceKeys.dataForSeo = traffic.dataForSeo.scopes.map((scope) => ({ ...base,
+          scopeKey: scope === "worldwide" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}` })); }
+      return plan;
+    });
+  }
+  if (domainCount === 1 && fullScopes) {
+    const base = workPlan.domains[0].sourceKeys.dataForSeo[0];
+    workPlan.domains[0].sourceKeys.dataForSeo = traffic.dataForSeo.scopes.map((scope) => ({ ...base,
+      scopeKey: scope === "worldwide" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}` }));
+  }
+  workPlan.awsProviderConfig.trafficHttp.cruxBigQueryProjectIdFingerprint = fingerprintJson({
+    contractVersion: "crux-bigquery-project-v1", projectId: "fixture-project" });
   const manifest = { contractVersion: "domain-stage-manifest-v1", domainManifest, workPlan };
   const manifestFingerprint = fingerprintJson(manifest);
-  const plan = workPlan.domains[0];
-  const lead = { ...leadRecordToCreate(domainManifest.runId, "lead_fixture_service_0001", leadFixture),
-    id: "lead_fixture_service_0001", runId: domainManifest.runId, shopId: plan.shopId,
-    status: "qualified", identityEvidence: leadFixture.identity_evidence };
-  const task = { id: "pipeline_task_fixture_service", itemKey: plan.shopId,
-    createdAt: new Date(workPlan.evaluatedAt) };
-  task.inputFingerprint = trafficInputFingerprint(domainManifest.runId, 1, manifestFingerprint, plan, lead);
+  const plans = workPlan.domains; const leads = plans.map((plan, index) => {
+    const suffix = String(index).padStart(3, "0");
+    const fixture = domainCount === 1 ? leadFixture : JSON.parse(JSON.stringify(leadFixture)
+      .replaceAll("fixture.example", `fixture-${suffix}.example`)
+      .replaceAll("fixture.myshopify.com", `fixture-${suffix}.myshopify.com`));
+    const id = `lead_fixture_service_${suffix}`;
+    return { ...leadRecordToCreate(domainManifest.runId, id, fixture), id, runId: domainManifest.runId,
+      shopId: plan.shopId, status: "qualified", identityEvidence: fixture.identity_evidence };
+  });
+  const tasks = plans.map((plan, index) => { const task = { id: `pipeline_task_fixture_${index}`,
+    itemKey: plan.shopId, createdAt: new Date(workPlan.evaluatedAt) };
+    task.inputFingerprint = trafficInputFingerprint(domainManifest.runId, 1, manifestFingerprint, plan, leads[index]);
+    return task; });
+  const plan = plans[0];
   const artifacts = artifactSeed || new Map();
   const state = sharedState || { terminal: terminalReplay };
-  const events = [];
+  const events = []; const calls = { dataforseo: 0, rest: 0, table: 0, dry: 0, live: 0 };
   const maybeFail = (name) => { events.push(name); if (failAt === name) throw new Error(`injected:${name}`); };
   const runtime = {
-    config: { awsPipelineFinalAggregationQueueUrl: "final" }, secrets: {},
+    config: { awsPipelineFinalAggregationQueueUrl: "final" }, secrets: {
+      dataForSeoLogin: "fixture", dataForSeoPassword: "fixture", cruxApiKey: "fixture",
+      cruxBigQueryProjectId: "fixture-project", googleApplicationCredentials: "fixture", ...secretOverrides },
     repository: {
       async claimAwsRunLease() { maybeFail("claim-run"); return cancelled ? { outcome: "cancelled" } :
-        { outcome: "owned", lease: { token: "run-token", attempt: 1, expiresAt: new Date(Date.now() + 60000) } }; },
+        { outcome: "owned", lease: { token: "run-token", attempt: leaseAttempt, leaseAttempt,
+          expiresAt: new Date(Date.now() + 60000) } }; },
       async loadAwsTrafficStage() { maybeFail("load-stage"); return { run: { trafficEnrichmentConfig: traffic,
-        awsProviderConfig: workPlan.awsProviderConfig }, stage: { expectedCount: 1 }, tasks: [task], leads: [lead] }; },
+        awsProviderConfig: workPlan.awsProviderConfig }, stage: { expectedCount: tasks.length }, tasks, leads }; },
       async releaseAwsRunLease() { maybeFail("release-run"); return { run: {} }; },
-      async renewAwsRunLease() { return { expiresAt: new Date(Date.now() + 60000) }; }
+      async renewAwsRunLease() { return { expiresAt: new Date(Date.now() + 60000) }; },
+      async getDataForSeoRunCostUsd() { return 0; },
+      async planDataForSeoRequest() { return { outcome: "planned" }; },
+      async claimDataForSeoRequest() { return { outcome: "in_flight", networkAllowed: true }; },
+      async recordAwsDataForSeoOutcome() { return { ledger: {} }; },
+      async readReusableTrafficCache() { return []; },
+      async readReusableLatestCruxBigQueryCache() { return []; },
+      async claimAwsTrafficWorkBatch({ claims }) { return claims.map(({ shopId, selection }) => ({
+        shopId, workType: selection.source, scopeKey: selection.scopeKey, outcome: "owned" })); }
     },
     artifactStore: {
       async getValidated() { maybeFail("read-manifest"); return { value: manifest, contentFingerprint: manifestFingerprint }; },
@@ -60,8 +111,8 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
         return { contentFingerprint: fingerprintJson(value) }; }
     },
     coordinator: {
-      async claimTask() { maybeFail("claim-task"); return state.terminal ? { outcome: "terminal", task } :
-        { outcome: "owned", task }; },
+      async claimTask({ itemKey }) { maybeFail("claim-task"); const task = tasks.find((entry) => entry.itemKey === itemKey);
+        return state.terminal ? { outcome: "terminal", task } : { outcome: "owned", task }; },
       async recordTerminal() { maybeFail("record-terminal"); state.terminal = true; }
     },
     dispatcher: { async sendOne() { maybeFail("send-check"); return { sentItemIds: ["check"], failedItemIds: [] }; } }
@@ -69,9 +120,27 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
   const records = triggers.map((recordId) => ({ recordId, message: { ...message,
     runId: domainManifest.runId, itemId: plan.shopId, manifestKey: workPlan.domainManifestKey,
     manifestFingerprint, manifestProducedAt: workPlan.evaluatedAt } }));
-  const result = await processTrafficBatch(records, runtime, { createLeaseMonitorFn: () => ({
-    assertActive() {}, async renewNow() { events.push("renew-now"); }, async stop() { events.push("stop-monitor"); } }) });
-  return { result, events, artifacts, state };
+  const defaultAdapters = { createLeaseMonitorFn: () => ({
+    assertActive() {}, async renewNow() { events.push("renew-now"); }, async stop() { events.push("stop-monitor"); } }),
+    fetchDataForSeoTrafficFn: async ({ targets, scope }) => { calls.dataforseo += 1; return {
+      records: targets.map((target) => ({ state: "available", value: { contractVersion: "dataforseo-traffic-v1",
+        target, scope: scope === "worldwide" ? scope : { countryIsoCode: scope.countryIsoCode,
+          locationCode: traffic.dataForSeo.scopes.find((entry) => entry.countryIsoCode === scope.countryIsoCode).locationCode },
+        languageScope: "all_available", metrics: { organic: { etv: 10, count: 1 }, paid: { etv: 0, count: 0 },
+          featuredSnippet: { etv: 0, count: 0 }, localPack: { etv: 0, count: 0 } },
+        fetchedAt: workPlan.evaluatedAt } })), cost: { providerReported: 0.01 } }; },
+    fetchCruxOriginMetricsFn: async ({ origin }) => { calls.rest += 1; return { contractVersion: "crux-origin-metrics-v1",
+      origin, coverage: "available", metrics: { largestContentfulPaintP75Ms: 1000 },
+      collectionPeriod: { firstDate: "2026-07-01", lastDate: "2026-07-28" }, fetchedAt: workPlan.evaluatedAt }; },
+    fetchCruxLatestDatasetMonthFn: async () => { calls.table += 1; return "202607"; },
+    dryRunCruxPopularityFn: async () => { calls.dry += 1; return { datasetMonth: "202607", bytesProcessed: 100 }; },
+    fetchCruxPopularityForMonthFn: async ({ origins, datasetMonth, dryRun }) => { calls.live += 1; return {
+      datasetMonth, records: origins.map((origin) => ({ contractVersion: "crux-popularity-v1", origin,
+        coverage: "available", datasetMonth, popularityRank: 1000,
+        deviceFractions: { phone: 0.7, desktop: 0.29, tablet: 0.01 }, fetchedAt: workPlan.evaluatedAt })),
+      dryRunBytesProcessed: dryRun.bytesProcessed, bytesProcessed: 100, bytesBilled: 100, cacheHit: false }; } };
+  const result = await processTrafficBatch(records, runtime, { ...defaultAdapters, ...adapterOverrides });
+  return { result, events, artifacts, state, calls };
 }
 
 test("BigQuery live request pins a strict request ID only in the request body", () => {
@@ -106,7 +175,7 @@ test("mixed groups are processed sequentially and one ownership failure does not
       manifestKey: `runs/run_traffic_fixture_${suffix}/domains-manifest.json` } }));
   const result = await processTrafficBatch(records, runtime);
   assert.deepEqual(calls, ["run_traffic_fixture_0002", "run_traffic_fixture_0001", "run_traffic_fixture_0003"]);
-  assert.deepEqual(result.results.map(({ outcome }) => outcome), ["cancelled", "failed", "cancelled"]);
+  assert.deepEqual(result.results.map(({ outcome }) => outcome), ["cancelled", "retryable", "cancelled"]);
 });
 
 test("traffic service rejects unknown dependency injection before ownership", async () => {
@@ -183,13 +252,69 @@ test("52-domain amplification ceilings are exact and fail closed", () => {
 });
 
 test("service processes duplicate and reverse triggers from one complete stage-wide set", async () => {
-  const { result, events, artifacts } = await serviceHarness({ triggers: ["m3", "m1", "m2", "m1"] });
+  const { result, events, artifacts, calls, state } = await serviceHarness({ triggers: ["m3", "m1", "m2", "m1"] });
   assert.deepEqual(result.results.map(({ recordId, outcome }) => [recordId, outcome]),
     [["m1", "recorded"], ["m1", "recorded"], ["m2", "recorded"], ["m3", "recorded"]]);
   assert.equal([...artifacts.keys()].filter((key) => key.endsWith("traffic-crux.json")).length, 1);
+  assert.deepEqual(calls, { dataforseo: 10, rest: 1, table: 1, dry: 1, live: 1 });
   assert.ok(events.indexOf("record-terminal") < events.indexOf("release-run"));
   assert.ok(events.indexOf("release-run") < events.indexOf("send-check"));
   assert.equal(events.filter((event) => event === "send-check").length, 1);
+});
+
+test("52-domain stage preserves run-wide provider cardinality through the real service", async () => {
+  const { result, calls, artifacts } = await serviceHarness({ domainCount: 52, fullScopes: true,
+    triggers: ["split-b", "split-a"] });
+  assert.ok(result.results.every(({ outcome }) => outcome === "recorded"));
+  assert.deepEqual(calls, { dataforseo: 10, rest: 52, table: 1, dry: 1, live: 1 });
+  assert.equal([...artifacts.values()].filter(({ contractVersion }) =>
+    contractVersion === "combined-traffic-crux-result-v1").length, 52);
+});
+
+test("REST marker makes a lost response terminally ambiguous without a second adapter call", async () => {
+  let calls = 0;
+  const failure = new EnrichmentError("lost", { code: ENRICHMENT_ERROR_CODES.providerHttp,
+    provider: "crux", contractVersion: "crux-origin-metrics-v1", httpStatus: 0 });
+  const first = await serviceHarness({ adapterOverrides: { fetchCruxOriginMetricsFn: async () => {
+    calls += 1; throw failure; } } });
+  assert.equal(calls, 1);
+  const second = await serviceHarness({ artifactSeed: first.artifacts, sharedState: first.state,
+    adapterOverrides: { fetchCruxOriginMetricsFn: async () => { calls += 1; throw failure; } } });
+  assert.equal(calls, 1);
+  const rest = [...second.artifacts.values()].find((value) => value.contractVersion === "provider-source-result-v1" &&
+    value.source === "crux_rest");
+  assert.equal(rest.state, "ambiguous");
+});
+
+test("BigQuery transient dry-run leaves the task nonterminal and retries on a later lease", async () => {
+  const transient = new EnrichmentError("transient", { code: ENRICHMENT_ERROR_CODES.providerHttp,
+    provider: "crux", contractVersion: "crux-popularity-v1", httpStatus: 503 });
+  const first = await serviceHarness({ leaseAttempt: 1,
+    adapterOverrides: { dryRunCruxPopularityFn: async () => { throw transient; } } });
+  assert.equal(first.result.results[0].outcome, "busy");
+  assert.equal([...first.artifacts.values()].some((value) => value.contractVersion ===
+    "combined-traffic-crux-result-v1"), false);
+  const second = await serviceHarness({ leaseAttempt: 2, artifactSeed: first.artifacts, sharedState: first.state });
+  assert.equal(second.result.results[0].outcome, "recorded");
+  assert.equal(second.calls.dry, 1);
+});
+
+test("BigQuery attempt marker retries live only before the strict fifteen-minute boundary", () => {
+  const marker = bigQueryAttemptBody({ runId: message.runId, generation: 1, scopeKey: "month:202607",
+    batchInputFingerprint: "c".repeat(64), datasetMonth: "202607", dryRunBytesProcessed: 100,
+    dispatchedAt: "2026-08-12T00:00:00.000Z" });
+  assert.equal(reconcileBigQueryAttempt(marker, { now: "2026-08-12T00:14:59.999Z",
+    scopeKey: "month:202607", maximumBytesBilled: 100 }).outcome, "retry");
+  assert.equal(reconcileBigQueryAttempt(marker, { now: "2026-08-12T00:15:00.000Z",
+    scopeKey: "month:202607", maximumBytesBilled: 100 }).outcome, "ambiguous");
+  assert.throws(() => reconcileBigQueryAttempt(marker, { now: "2026-08-12T00:01:00.000Z",
+    scopeKey: "month:202606", maximumBytesBilled: 100 }), (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+});
+
+test("provider configuration mismatch remains retryable and calls no adapter", async () => {
+  const result = await serviceHarness({ secretOverrides: { cruxBigQueryProjectId: "wrong-project" } });
+  assert.equal(result.result.results[0].outcome, "retryable");
+  assert.deepEqual(result.calls, { dataforseo: 0, rest: 0, table: 0, dry: 0, live: 0 });
 });
 
 test("terminal replay still releases the Run lease before exactly one recovery check", async () => {
@@ -230,7 +355,7 @@ for (const crash of ["load-stage", "read-manifest", "optional:traffic-crux.json"
   "put:traffic-crux.json", "claim-task", "record-terminal", "release-run", "send-check"]) {
   test(`service crash boundary ${crash} is privacy-safe and never fabricates success`, async () => {
     const { result, events } = await serviceHarness({ failAt: crash });
-    assert.deepEqual(result.results, [{ recordId: "m1", terminal: true, outcome: "failed" }]);
+    assert.deepEqual(result.results, [{ recordId: "m1", terminal: false, outcome: "retryable" }]);
     if (events.includes("release-run")) assert.ok(events.indexOf("record-terminal") < events.indexOf("release-run"));
     if (events.includes("send-check")) assert.ok(events.indexOf("release-run") < events.indexOf("send-check"));
   });

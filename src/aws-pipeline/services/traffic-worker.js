@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { leadRecordToCreate, serializeLead } from "../../api-serializer.js";
+import { leadRecordToCreate, serializeLead, trafficCacheRecordToUpsert } from "../../api-serializer.js";
+import { stableLeadId } from "../../prisma-run-repository.js";
 import { enrichTraffic } from "../../enrichment/orchestrator.js";
 import { buildDataForSeoRequest } from "../../enrichment/dataforseo/request.js";
 import { fetchDataForSeoTraffic } from "../../enrichment/dataforseo/adapter.js";
@@ -17,8 +18,6 @@ import { fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey, providerBatchArtifactKey, providerBatchAttemptKey,
   providerSourceAttemptArtifactKey, trafficArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
-import { executeCruxBigQuerySource, executeCruxRestSource,
-  executeDataForSeoSource } from "../traffic/source-executors.js";
 import { bigQueryAttemptBody, mapProviderError, providerBatchIdentity, reconcileBigQueryAttempt,
   sourceAttemptBody } from "../traffic/durable-protocol.js";
 
@@ -74,8 +73,9 @@ function artifactExpected(message, task, contractVersion) {
 }
 
 function assertDependencies(value) {
-  const allowed = new Set(["executeDataForSeoSourceFn", "executeCruxRestSourceFn",
-    "executeCruxBigQuerySourceFn", "createLeaseMonitorFn"]);
+  const allowed = new Set(["createLeaseMonitorFn", "buildDataForSeoRequestFn", "fetchDataForSeoTrafficFn",
+    "fetchCruxOriginMetricsFn", "fetchCruxLatestDatasetMonthFn", "dryRunCruxPopularityFn",
+    "fetchCruxPopularityForMonthFn"]);
   if (Object.keys(value).some((key) => !allowed.has(key)) ||
       Object.values(value).some((entry) => typeof entry !== "function"))
     throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -83,10 +83,10 @@ function assertDependencies(value) {
 
 export async function processTrafficBatch(records, runtime, dependencies = {}) {
   assertDependencies(dependencies);
-  dependencies = { executeDataForSeoSourceFn: executeDataForSeoSource,
-    executeCruxRestSourceFn: executeCruxRestSource,
-    executeCruxBigQuerySourceFn: executeCruxBigQuerySource,
-    createLeaseMonitorFn: createPipelineLeaseMonitor, ...dependencies };
+  dependencies = { createLeaseMonitorFn: createPipelineLeaseMonitor, buildDataForSeoRequestFn: buildDataForSeoRequest,
+    fetchDataForSeoTrafficFn: fetchDataForSeoTraffic, fetchCruxOriginMetricsFn: fetchCruxOriginMetrics,
+    fetchCruxLatestDatasetMonthFn: fetchCruxLatestDatasetMonth, dryRunCruxPopularityFn: dryRunCruxPopularity,
+    fetchCruxPopularityForMonthFn: fetchCruxPopularityForMonth, ...dependencies };
   const createLeaseMonitorFn = dependencies.createLeaseMonitorFn ?? createPipelineLeaseMonitor;
   const parsed = records.map((entry) => ({ recordId: entry.recordId, message: parseWorkMessage(entry.message) }));
   const groups = new Map();
@@ -107,7 +107,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       generation: message.generation, owner: `traffic-${randomUUID()}`, token,
       leaseDurationMs: 60000 }, new Date()); }
     catch { results.push(...group.map(({ recordId }) =>
-      ({ recordId, terminal: true, outcome: "failed" }))); continue; }
+      ({ recordId, terminal: false, outcome: "retryable" }))); continue; }
     if (claim.outcome === "busy") { results.push(...group.map(({ recordId }) =>
       ({ recordId, terminal: false, outcome: "busy" }))); continue; }
     if (claim.outcome === "cancelled") { results.push(...group.map(({ recordId }) =>
@@ -165,6 +165,22 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       const requestDescriptors = new Map();
       const bigQueryState = { datasetMonth: null, batch: null, existing: null };
       const transientSources = new Set();
+      const dataForSeoEvidence = new Map();
+      const setDataForSeoEvidence = (descriptor, evidence) => {
+        for (const plan of manifest.workPlan.domains) {
+          const selection = plan.sourceKeys.dataForSeo.find(({ scopeKey, identity }) =>
+            scopeKey === descriptor.scopeKey && descriptor.targets.includes(identity));
+          if (selection) dataForSeoEvidence.set(`${descriptor.scopeKey}\0${plan.shopId}`,
+            { scopeKey: descriptor.scopeKey, ...evidence });
+        }
+      };
+      for (const plan of manifest.workPlan.domains) {
+        for (const selection of plan.sourceKeys.dataForSeo) {
+          if (selection.reuse) dataForSeoEvidence.set(`${selection.scopeKey}\0${plan.shopId}`,
+            { scopeKey: selection.scopeKey, disposition: "reused",
+              cacheFingerprint: selection.reuse.cacheFingerprint });
+        }
+      }
       const dataForSeoBatch = (descriptor) => {
         const items = manifest.workPlan.domains.flatMap((plan) => {
           const selection = plan.sourceKeys.dataForSeo.find(({ scopeKey }) => scopeKey === descriptor.scopeKey);
@@ -203,11 +219,30 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
               { requestFingerprint: metadata.requestFingerprint, targetCount: metadata.targetCount,
                 scopeKey: metadata.scopeKey, outcome: "succeeded", providerCostUsd,
                 resultFingerprint: existing.contentFingerprint }, new Date());
+            setDataForSeoEvidence(metadata, { disposition: "ledger",
+              requestFingerprint: metadata.requestFingerprint, targetCount: metadata.targetCount,
+              ledgerState: "succeeded", batchId: batch.batchId, batchArtifactKey: batch.key,
+              batchArtifactFingerprint: existing.contentFingerprint });
             return { outcome: "succeeded" };
           }
-          return runtime.repository.planDataForSeoRequest(...args);
+          const planned = await runtime.repository.planDataForSeoRequest(...args);
+          if (planned.outcome !== "planned") setDataForSeoEvidence(metadata,
+            planned.outcome === "ambiguous" || planned.outcome === "in_flight"
+              ? { disposition: "ledger", requestFingerprint: metadata.requestFingerprint,
+                targetCount: metadata.targetCount, ledgerState: "ambiguous" }
+              : { disposition: "not_dispatched", reason: "budget_exhausted" });
+          return planned;
         },
-        claimDataForSeoRequest: (...args) => runtime.repository.claimDataForSeoRequest(...args),
+        claimDataForSeoRequest: async (...args) => {
+          const claimed = await runtime.repository.claimDataForSeoRequest(...args);
+          const metadata = ledgerMetadata.get(args[2]);
+          if (metadata && !claimed.networkAllowed) setDataForSeoEvidence(metadata,
+            claimed.outcome === "ambiguous" || claimed.outcome === "in_flight"
+              ? { disposition: "ledger", requestFingerprint: metadata.requestFingerprint,
+                targetCount: metadata.targetCount, ledgerState: "ambiguous" }
+              : { disposition: "not_dispatched", reason: "budget_exhausted" });
+          return claimed;
+        },
         readReusableTrafficCache: async (_runId, _lease, keys) => {
           const materialized = keys.flatMap((key) => capturedRows.filter((row) =>
             row.source === key.source && row.identity === key.identity && row.scopeKey === key.scopeKey &&
@@ -239,6 +274,18 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const outcomes = await runtime.repository.claimAwsTrafficWorkBatch({ runId: message.runId,
             generation: message.generation, runLease: claim.lease, claims: awsClaims }, new Date());
           outcomes.forEach((item) => { if (item.outcome === "completed") capturedRows.push(...(item.cacheRows || []));
+            if (item.workType === "dataforseo") {
+              if (item.outcome === "completed") {
+                const row = (item.cacheRows || []).find((entry) => entry.scopeKey === item.scopeKey);
+                if (row?.id) dataForSeoEvidence.set(`${item.scopeKey}\0${item.shopId}`,
+                  { scopeKey: item.scopeKey, disposition: "reused",
+                    cacheFingerprint: fingerprintJson(trafficCacheRecordToUpsert(row.id, row)) });
+              } else if (["failed", "ambiguous"].includes(item.outcome)) {
+                dataForSeoEvidence.set(`${item.scopeKey}\0${item.shopId}`, { scopeKey: item.scopeKey,
+                  disposition: "not_dispatched", reason: item.outcome === "ambiguous"
+                    ? "work_ambiguous" : "work_failed" });
+              }
+            }
             resolved.set(`${item.shopId}:${item.workType}:${item.scopeKey}`, item); });
           }
           return claims.map((claimItem) => { const durable = alreadyTerminal.get(claimItem);
@@ -255,7 +302,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const metadata = ledgerMetadata.get(requestFingerprint);
           if (!metadata) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           const batch = dataForSeoBatch(metadata);
-          const value = parseProviderBatchArtifact({ contractVersion: "provider-batch-result-v1",
+          const batchCandidate = { contractVersion: "provider-batch-result-v1",
             runId: message.runId, generation: message.generation, source: "dataforseo",
             scopeKey: metadata.scopeKey, batchId: batch.batchId,
             providerRequestFingerprint: requestFingerprint, items: batch.items.map(({ shopId, sourceKey }, index) => {
@@ -263,26 +310,36 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
                 row.scopeKey === metadata.scopeKey);
               return { shopId, state: rows.length ? "available" : "unavailable",
                 cacheRows: rows, leadTrafficRows: [], summary: index === 0 ? { providerCostUsd } : {}, diagnostics: [] };
-            }) });
+            }) };
+          const value = parseProviderBatchArtifact(batchCandidate);
           monitor.assertActive();
           const written = await runtime.artifactStore.putImmutable({ key: batch.key, ...batch.expected,
             value, schema: providerBatchArtifactSchema });
           await runtime.repository.recordAwsDataForSeoOutcome(message.runId, claim.lease,
             { requestFingerprint, targetCount: metadata.targetCount, scopeKey: metadata.scopeKey,
-              outcome: "succeeded", providerCostUsd, resultFingerprint: written.contentFingerprint }, now); },
-        markDataForSeoRequestFailed: (_runId, _lease, requestFingerprint, error, now) => {
+              outcome: "succeeded", providerCostUsd, resultFingerprint: written.contentFingerprint }, now);
+          setDataForSeoEvidence(metadata, { disposition: "ledger", requestFingerprint,
+            targetCount: metadata.targetCount, ledgerState: "succeeded", batchId: batch.batchId,
+            batchArtifactKey: batch.key, batchArtifactFingerprint: written.contentFingerprint }); },
+        markDataForSeoRequestFailed: async (_runId, _lease, requestFingerprint, error, now) => {
           const metadata = ledgerMetadata.get(requestFingerprint);
           if (!metadata) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          return runtime.repository.recordAwsDataForSeoOutcome(message.runId, claim.lease,
+          const result = await runtime.repository.recordAwsDataForSeoOutcome(message.runId, claim.lease,
             { requestFingerprint, targetCount: metadata.targetCount, scopeKey: metadata.scopeKey,
               outcome: "failed", safeErrorCode: error.code }, now);
+          setDataForSeoEvidence(metadata, { disposition: "ledger", requestFingerprint,
+            targetCount: metadata.targetCount, ledgerState: "failed" });
+          return result;
         },
-        markDataForSeoRequestAmbiguous: (_runId, _lease, requestFingerprint, now) => {
+        markDataForSeoRequestAmbiguous: async (_runId, _lease, requestFingerprint, now) => {
           const metadata = ledgerMetadata.get(requestFingerprint);
           if (!metadata) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          return runtime.repository.recordAwsDataForSeoOutcome(message.runId, claim.lease,
+          const result = await runtime.repository.recordAwsDataForSeoOutcome(message.runId, claim.lease,
             { requestFingerprint, targetCount: metadata.targetCount, scopeKey: metadata.scopeKey,
               outcome: "ambiguous" }, now);
+          setDataForSeoEvidence(metadata, { disposition: "ledger", requestFingerprint,
+            targetCount: metadata.targetCount, ledgerState: "ambiguous" });
+          return result;
         },
         saveCruxTrafficCache: async (_runId, _lease, rows) => { capturedRows.push(...rows); },
         finishShopWorkClaims: async () => ({ count: 0 })
@@ -291,10 +348,11 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         runSnapshot: loaded.run.trafficEnrichmentConfig, runtimeConfig, leads,
         repository: adapterRepository, assertLeaseActive: () => monitor.assertActive(),
         dependencyOverrides: { buildDataForSeoRequest: (input) => {
-          const descriptor = buildDataForSeoRequest(input);
+          const descriptor = dependencies.buildDataForSeoRequestFn(input);
           requestDescriptors.set(descriptor.requestFingerprint, descriptor);
           return descriptor;
         },
+          fetchDataForSeoTraffic: (input) => dependencies.fetchDataForSeoTrafficFn(input),
           fetchCruxOriginMetrics: async (input) => {
             const plan = manifest.workPlan.domains.find((entry) =>
               entry.sourceKeys.cruxRest?.identity === input.origin);
@@ -315,7 +373,17 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             await runtime.artifactStore.putImmutable({ key, ...expected, value: marker,
               schema: providerSourceAttemptArtifactSchema });
             monitor.assertActive();
-            return fetchCruxOriginMetrics(input);
+            try { return await dependencies.fetchCruxOriginMetricsFn(input); }
+            catch (error) {
+              const mapped = mapProviderError("crux_rest", "live", error);
+              if (mapped.outcome === "ambiguous") throw new EnrichmentError("PIPELINE_PROVIDER_AMBIGUOUS", {
+                code: ENRICHMENT_ERROR_CODES.ambiguousRequest, provider: "crux",
+                contractVersion: loaded.run.trafficEnrichmentConfig.crux.rest.contractVersion });
+              if (mapped.outcome === "throw") throw error;
+              throw new EnrichmentError("PIPELINE_PROVIDER_UNAVAILABLE", {
+                code: ENRICHMENT_ERROR_CODES.providerRejected, provider: "crux",
+                contractVersion: loaded.run.trafficEnrichmentConfig.crux.rest.contractVersion });
+            }
           },
           fetchCruxLatestDatasetMonth: async (input) => {
             if ((claim.lease.leaseAttempt ?? loaded.run.leaseAttempt ?? 1) > 3)
@@ -323,7 +391,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
                 provider: "crux", contractVersion: loaded.run.trafficEnrichmentConfig.crux.bigQuery.contractVersion });
             monitor.assertActive();
             let month;
-            try { month = await fetchCruxLatestDatasetMonth(input); }
+            try { month = await dependencies.fetchCruxLatestDatasetMonthFn(input); }
             catch (error) {
               const mapped = mapProviderError("crux_bigquery", "table", error,
                 claim.lease.leaseAttempt ?? loaded.run.leaseAttempt ?? 1);
@@ -364,12 +432,14 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
               throw new EnrichmentError("PIPELINE_PROVIDER_AMBIGUOUS", { code: ENRICHMENT_ERROR_CODES.ambiguousRequest,
                 provider: "crux", contractVersion: loaded.run.trafficEnrichmentConfig.crux.bigQuery.contractVersion });
             monitor.assertActive();
-            try { return await dryRunCruxPopularity(input); }
+            try { return await dependencies.dryRunCruxPopularityFn(input); }
             catch (error) {
               const mapped = mapProviderError("crux_bigquery", "dry", error,
                 claim.lease.leaseAttempt ?? loaded.run.leaseAttempt ?? 1);
               if (mapped.outcome === "retry")
-                batch.items.forEach(({ shopId }) => transientSources.add(`${shopId}:crux_bigquery`));
+                if (!bigQueryState.batch || bigQueryState.batch.scopeKey !== `month:${input.datasetMonth}`)
+                  throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+                bigQueryState.batch.items.forEach(({ shopId }) => transientSources.add(`${shopId}:crux_bigquery`));
               if (mapped.outcome === "ambiguous") throw new EnrichmentError("PIPELINE_PROVIDER_AMBIGUOUS", {
                 code: ENRICHMENT_ERROR_CODES.ambiguousRequest, provider: "crux",
                 contractVersion: loaded.run.trafficEnrichmentConfig.crux.bigQuery.contractVersion });
@@ -419,7 +489,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
                 value: marker, schema: providerBatchAttemptSchema });
             }
             monitor.assertActive();
-            const response = await fetchCruxPopularityForMonth({ ...input, dryRun, requestId });
+            const response = await dependencies.fetchCruxPopularityForMonthFn({ ...input, dryRun, requestId });
             const value = parseProviderBatchArtifact({ contractVersion: "provider-batch-result-v1",
               runId: message.runId, generation: message.generation, source: "crux_bigquery",
               scopeKey: batch.scopeKey, batchId: batch.batchId, providerRequestFingerprint: requestId,
@@ -467,7 +537,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
               artifactKey: providerArtifactKey(message.runId, task.itemKey, keySource) };
             continue;
           }
-          const record = recordByLead.get(`${lead.id}:${keySource.replaceAll("-", "_")}`);
+          const record = recordByLead.get(`${stableLeadId(message.runId, persistedLead(lead))}:${keySource.replaceAll("-", "_")}`);
           const state = record?.state || "unavailable";
           const sourceName = keySource.replaceAll("-", "_");
           const scopeKeys = component === "dataforseo"
@@ -481,13 +551,17 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             state: state === "partial" ? (materialScopes.has(scopeKey) ? "available" : "unavailable") : state }));
           if (state === "partial" && !scopeStates.some(({ state: value }) => value === "available"))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          const artifact = parseProviderSourceArtifact({ contractVersion: "provider-source-result-v1",
+          const sourceCandidate = { contractVersion: "provider-source-result-v1",
             runId: message.runId, generation: message.generation, shopId: task.itemKey, source: sourceName,
-            state, scopeStates,
+            state, scopeStates, requestEvidence: component === "dataforseo"
+              ? scopeKeys.map((scopeKey, index) => dataForSeoEvidence.get(`${scopeKey}\0${task.itemKey}`) ||
+                { scopeKey, disposition: "not_dispatched", reason:
+                  scopeStates[index].state === "ambiguous" ? "work_ambiguous" : "budget_exhausted" }) : [],
             cacheRows: capturedRows.filter((row) => row.source === sourceName &&
               (row.identity === plan.sourceKeys.cruxRest.identity || row.identity === plan.sourceKeys.cruxBigQuery.identity ||
                 plan.sourceKeys.dataForSeo.some((item) => item.identity === row.identity))),
-            leadTrafficRows: record ? [record] : [], summary: sourceOutputs.get(component)?.summary || {}, diagnostics: [] });
+            leadTrafficRows: record ? [record] : [], summary: sourceOutputs.get(component)?.summary || {}, diagnostics: [] };
+          const artifact = parseProviderSourceArtifact(sourceCandidate);
           const sourceKey = providerArtifactKey(message.runId, task.itemKey, keySource);
           const sourceExpected = artifactExpected(message, task, "provider-source-result-v1");
           await runtime.artifactStore.putImmutable({ key: sourceKey, ...sourceExpected,
@@ -522,7 +596,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           generation: message.generation, reason: "terminal_task_recorded", attempt: 1 }, aggregationCheckMessageSchema);
       results.push(...group.map(({ recordId }) => ({ recordId, terminal: terminalCount > 0,
         outcome: terminalCount === 0 ? "busy" : recordedCount > 0 ? "recorded" : "replayed" })));
-    } catch { results.push(...group.map(({ recordId }) => ({ recordId, terminal: true, outcome: "failed" }))); }
+    } catch { results.push(...group.map(({ recordId }) => ({ recordId, terminal: false, outcome: "retryable" }))); }
     finally { await monitor.stop().catch(() => {}); if (!released) { /* expiry owns recovery */ } }
   }
   return { results: results.sort((left, right) => left.recordId.localeCompare(right.recordId)) };

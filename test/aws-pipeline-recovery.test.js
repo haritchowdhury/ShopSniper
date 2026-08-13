@@ -23,7 +23,9 @@ function runtimeFor(recoverable) {
   }, dispatcher: {
     async sendMany(queue, messages) { events.push(["many", queue, messages]);
       return { sentItemIds: messages.filter((_, index) => index % 2 === 0).map(({ itemId }) => itemId),
-        failedItemIds: messages.filter((_, index) => index % 2 === 1).map(({ itemId }) => itemId) }; },
+        failedItemIds: messages.filter((_, index) => index % 2 === 1).map(({ itemId }) => itemId),
+        results: messages.map(({ itemId }, index) => ({ index, itemId,
+          outcome: index % 2 === 0 ? "sent" : "failed" })) }; },
     async sendOne(queue, message) { events.push(["one", queue, message]);
       return { sentItemIds: [message.stage], failedItemIds: [] }; }
   }, artifactStore: new Proxy({}, { get() { throw new Error("S3 forbidden"); } }) } };
@@ -45,6 +47,23 @@ test("recovery reconstructs exact ordered task/check messages and records only s
     [queue, value.stage, value.attempt]), [["q-domain-check", "discovery", 3],
     ["q-final-check", "traffic_crux", 3]]);
   assert.ok(events.find(([type]) => type === "list")[1].olderThan.getTime() === now.getTime() - 60000);
+});
+
+for (const laterOnly of [false, true]) test(`recovery correlates duplicate logical IDs by position (${laterOnly ? "later only" : "both"})`, async () => {
+  const first = stage("lead", "collision_1"); const second = stage("lead", "collision_2");
+  const { runtime, events } = runtimeFor({ tasks: [{ task: task("shop_collision"), stage: first },
+    { task: task("shop_collision"), stage: second }], stages: [] });
+  runtime.dispatcher.sendMany = async (_queue, messages) => ({
+    sentItemIds: laterOnly ? ["shop_collision"] : ["shop_collision", "shop_collision"],
+    failedItemIds: laterOnly ? ["shop_collision"] : [],
+    results: messages.map(({ itemId }, index) => ({ index, itemId,
+      outcome: laterOnly && index === 0 ? "failed" : "sent" }))
+  });
+  await recoverPipelineWork({ now }, runtime);
+  assert.deepEqual(events.filter(([type]) => type === "record").map(([, value]) => value), laterOnly
+    ? [{ stageId: second.id, itemKeys: ["shop_collision"] }]
+    : [{ stageId: first.id, itemKeys: ["shop_collision"] },
+      { stageId: second.id, itemKeys: ["shop_collision"] }]);
 });
 
 test("recovery prevalidates the complete plan before the first send", async () => {

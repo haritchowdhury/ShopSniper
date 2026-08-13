@@ -79,16 +79,20 @@ async function oneDomainFinalHarness(mutator = () => {}) {
     dataforseo: { contractVersion: "provider-source-result-v1", runId: message.runId, generation: 1,
       shopId: plan.shopId, source: "dataforseo", state: "unavailable",
       scopeStates: plan.sourceKeys.dataForSeo.map(({ scopeKey }) => ({ scopeKey, state: "unavailable" })),
+      requestEvidence: plan.sourceKeys.dataForSeo.map(({ scopeKey }) =>
+        ({ scopeKey, disposition: "not_dispatched", reason: "budget_exhausted" })),
       cacheRows: [], leadTrafficRows: [{ leadId, source: "dataforseo", state: "unavailable",
         contractVersion: "dataforseo-traffic-v1" }], summary: {}, diagnostics: [] },
     "crux-rest": { contractVersion: "provider-source-result-v1", runId: message.runId, generation: 1,
       shopId: plan.shopId, source: "crux_rest", state: "unavailable",
       scopeStates: [{ scopeKey: "current", state: "unavailable" }], cacheRows: [],
+      requestEvidence: [],
       leadTrafficRows: [{ leadId, source: "crux_rest", state: "unavailable",
         contractVersion: "crux-origin-metrics-v1" }], summary: {}, diagnostics: [] },
     "crux-bigquery": { contractVersion: "provider-source-result-v1", runId: message.runId, generation: 1,
       shopId: plan.shopId, source: "crux_bigquery", state: "contract_mismatch",
       scopeStates: [{ scopeKey: "month:202607", state: "contract_mismatch" }], cacheRows: [],
+      requestEvidence: [],
       leadTrafficRows: [{ leadId, source: "crux_bigquery", state: "contract_mismatch",
         contractVersion: "crux-popularity-v1" }], summary: {}, diagnostics: [] }
   };
@@ -99,7 +103,8 @@ async function oneDomainFinalHarness(mutator = () => {}) {
   const leadTask = { id: "lead_task", itemKey: plan.shopId, state: "succeeded", inputFingerprint: "c".repeat(64),
     artifactS3Key: `runs/${message.runId}/domains/${plan.shopId}/lead.json`,
     artifactFingerprint: fingerprintJson(leadResult), createdAt: new Date(workPlan.evaluatedAt) };
-  const state = { manifest, combined, sourceArtifacts, leadResult, trafficTask, leadTask };
+  const batchArtifacts = {};
+  const state = { manifest, combined, sourceArtifacts, batchArtifacts, leadResult, trafficTask, leadTask };
   mutator(state);
   let published;
   const runtime = { coordinator: {
@@ -110,6 +115,7 @@ async function oneDomainFinalHarness(mutator = () => {}) {
     if (key === workPlan.domainManifestKey) return { value: manifest, contentFingerprint: manifestFingerprint };
     if (key === trafficTask.artifactS3Key) return { value: combined, contentFingerprint: fingerprintJson(combined) };
     if (key === leadTask.artifactS3Key) return { value: leadResult, contentFingerprint: fingerprintJson(leadResult) };
+    if (batchArtifacts[key]) return { value: batchArtifacts[key], contentFingerprint: fingerprintJson(batchArtifacts[key]) };
     const source = key.split("/").at(-1).replace(".json", "");
     if (!sourceArtifacts[source]) throw Object.assign(new Error("missing"), { code: "PIPELINE_ARTIFACT_INVALID" });
     return { value: sourceArtifacts[source], contentFingerprint: fingerprintJson(sourceArtifacts[source]) };
@@ -128,6 +134,26 @@ test("final aggregator reconstructs all independent source and lead artifacts", 
   assert.equal(published.leadTrafficRows.length, 3);
   assert.equal(published.workOutcomes.length, 3);
   assert.deepEqual(published.leadProfileOutcomes.map(({ state }) => state), ["new"]);
+});
+
+test("final aggregator validates a succeeded paid batch reference and emits unique ledger evidence", async () => {
+  const { published } = await oneDomainFinalHarness(({ sourceArtifacts, batchArtifacts }) => {
+    const scopeKey = sourceArtifacts.dataforseo.scopeStates[0].scopeKey;
+    const requestFingerprint = "1".repeat(64); const batchId = "2".repeat(64);
+    const key = `runs/${message.runId}/traffic-batches/dataforseo/${batchId}.json`;
+    const batch = { contractVersion: "provider-batch-result-v1", runId: message.runId, generation: 1,
+      source: "dataforseo", scopeKey, batchId, providerRequestFingerprint: requestFingerprint,
+      items: [{ shopId: sourceArtifacts.dataforseo.shopId, state: "unavailable", cacheRows: [],
+        leadTrafficRows: [], summary: { providerCostUsd: 0.01 }, diagnostics: [] }] };
+    batchArtifacts[key] = batch;
+    sourceArtifacts.dataforseo.requestEvidence[0] = { scopeKey, disposition: "ledger", requestFingerprint,
+      targetCount: 1, ledgerState: "succeeded", batchId, batchArtifactKey: key,
+      batchArtifactFingerprint: fingerprintJson(batch) };
+  });
+  assert.deepEqual(published.dataForSeoLedgerEvidence, [{ requestFingerprint: "1".repeat(64),
+    scopeKey: "worldwide", targetCount: 1, state: "succeeded", resultFingerprint:
+    published.dataForSeoLedgerEvidence[0].resultFingerprint }]);
+  assert.match(published.dataForSeoLedgerEvidence[0].resultFingerprint, /^[a-f0-9]{64}$/u);
 });
 
 for (const [name, mutate] of [

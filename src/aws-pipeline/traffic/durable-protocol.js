@@ -13,7 +13,7 @@ export function trafficProviderConfigFingerprint(runSnapshot) {
 
 export function providerBatchIdentity({ runId, generation, source, scopeKey,
   manifestFingerprint, runSnapshot, providerRequestFingerprint, items }) {
-  const ordered = [...items].sort((left, right) => left.shopId.localeCompare(right.shopId));
+  const ordered = [...items].sort((left, right) => left.shopId < right.shopId ? -1 : left.shopId > right.shopId ? 1 : 0);
   if (!ordered.length || ordered.length > 1000 || new Set(ordered.map(({ shopId }) => shopId)).size !== ordered.length ||
       ordered.some(({ shopId, sourceKey }) => typeof shopId !== "string" || !sourceKey))
     throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");

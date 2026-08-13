@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { domainStageManifestSchema, leadResultArtifactSchema, parseCombinedTrafficCruxResult,
   parseDomainStageManifest, parseLeadResultArtifact, parseProviderSourceArtifact,
-  providerSourceArtifactSchema, combinedTrafficCruxResultSchema } from "../contracts/artifacts.js";
+  providerSourceArtifactSchema, providerBatchArtifactSchema, parseProviderBatchArtifact,
+  combinedTrafficCruxResultSchema } from "../contracts/artifacts.js";
 import { PipelineInvariantError } from "../contracts/errors.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey } from "../core/keys.js";
@@ -60,6 +61,7 @@ export async function processFinalAggregation(message, runtime, {
     const leadTrafficRows = [];
     const workOutcomes = [];
     const diagnostics = [];
+    const ledgerEvidenceByRequest = new Map();
     const summaries = { dataforseo: [], cruxRest: [], cruxBigQuery: [] };
     for (const task of complete.tasks) {
       const plan = planByShop.get(task.itemKey);
@@ -93,6 +95,32 @@ export async function processFinalAggregation(message, runtime, {
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         if (artifact.leadTrafficRows.length !== 1 || artifact.leadTrafficRows[0].source !== source)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        if (source === "dataforseo") for (const evidence of artifact.requestEvidence) {
+          if (evidence.disposition !== "ledger") continue;
+          let ledgerEvidence;
+          if (evidence.ledgerState === "succeeded") {
+            const batchStored = await runtime.artifactStore.getValidated({ key: evidence.batchArtifactKey,
+              expected: { contractVersion: "provider-batch-result-v1", runId: message.runId,
+                stage: "traffic_crux", generation: message.generation, itemId: evidence.batchId,
+                inputFingerprint: evidence.batchId, contentFingerprint: evidence.batchArtifactFingerprint,
+                producedAt: manifestTime }, schema: providerBatchArtifactSchema });
+            const batch = parseProviderBatchArtifact(batchStored.value);
+            if (batch.source !== "dataforseo" || batch.runId !== message.runId ||
+                batch.generation !== message.generation || batch.scopeKey !== evidence.scopeKey ||
+                batch.providerRequestFingerprint !== evidence.requestFingerprint ||
+                batchStored.contentFingerprint !== evidence.batchArtifactFingerprint ||
+                !batch.items.some(({ shopId }) => shopId === task.itemKey))
+              throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            ledgerEvidence = { requestFingerprint: evidence.requestFingerprint, scopeKey: evidence.scopeKey,
+              targetCount: evidence.targetCount, state: "succeeded",
+              resultFingerprint: evidence.batchArtifactFingerprint };
+          } else ledgerEvidence = { requestFingerprint: evidence.requestFingerprint, scopeKey: evidence.scopeKey,
+            targetCount: evidence.targetCount, state: evidence.ledgerState, resultFingerprint: null };
+          const prior = ledgerEvidenceByRequest.get(evidence.requestFingerprint);
+          if (prior && fingerprintJson(prior) !== fingerprintJson(ledgerEvidence))
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          ledgerEvidenceByRequest.set(evidence.requestFingerprint, ledgerEvidence);
+        }
         cacheRows.push(...artifact.cacheRows); leadTrafficRows.push(...artifact.leadTrafficRows);
         const workType = source === "dataforseo" ? "dataforseo" : source;
         for (const scope of artifact.scopeStates) workOutcomes.push({ shopId: task.itemKey, workType,
@@ -131,7 +159,10 @@ export async function processFinalAggregation(message, runtime, {
     await monitor.renewNow(); await monitor.stop();
     await runtime.repository.publishAwsFinalResults({ runId: message.runId, generation: message.generation,
       stageId: complete.stage.id, aggregationToken: token, cacheRows, leadTrafficRows,
-      leadProfileOutcomes, workOutcomes, diagnostics, trafficSummary, status: {} }, new Date());
+      leadProfileOutcomes, workOutcomes,
+      dataForSeoLedgerEvidence: [...ledgerEvidenceByRequest.values()].sort((a, b) =>
+        a.requestFingerprint < b.requestFingerprint ? -1 : a.requestFingerprint > b.requestFingerprint ? 1 : 0),
+      diagnostics, trafficSummary, status: {} }, new Date());
     return { terminal: true, outcome: "completed" };
   } catch (error) {
     if (error?.code === "PIPELINE_NOT_READY") return { terminal: true, outcome: "not_ready" };
