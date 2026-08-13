@@ -3,6 +3,7 @@
 > Implemented and verified locally through **G-R9**. AWS infrastructure, deployment, live-provider smoke tests, and cutover remain behind **G14/G15**.
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"28px","lineColor":"#1e40af","primaryTextColor":"#0f172a"},"flowchart":{"curve":"basis","nodeSpacing":95,"rankSpacing":125,"diagramPadding":60,"padding":36,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart TB
     subgraph CONTROL["Existing control plane — unchanged"]
         USER["User / frontend"]
@@ -177,21 +178,23 @@ flowchart TB
     TQ -.-> DLQ
     FCQ -.-> DLQ
 
-    classDef neon fill:#dff4e4,stroke:#18864b,color:#102b1c;
-    classDef s3 fill:#fff0cf,stroke:#b66d00,color:#3e2900;
-    classDef queue fill:#e7edff,stroke:#4263c6,color:#14275e;
-    classDef lambda fill:#f6e7ff,stroke:#8b42b8,color:#351345;
-    classDef gate fill:#ffe3e3,stroke:#c43d3d,color:#4d1212;
+    classDef neon fill:#dff4e4,stroke:#18864b,stroke-width:5px,color:#102b1c;
+    classDef s3 fill:#fff0cf,stroke:#b66d00,stroke-width:5px,color:#3e2900;
+    classDef queue fill:#e7edff,stroke:#4263c6,stroke-width:5px,color:#14275e;
+    classDef lambda fill:#f6e7ff,stroke:#8b42b8,stroke-width:5px,color:#351345;
+    classDef gate fill:#ffe3e3,stroke:#c43d3d,stroke-width:5px,color:#4d1212;
     class DREG,DT,DCP,REUSE,LT,PRIVATE,TREG,DFS_LEDGER,TT,TX,SCAN,FENCE neon;
     class QM,QA,CA,DM,BA,AIA,LA,DFS_BATCH,REST_ATTEMPT,BQ_ATTEMPT,BQ_BATCH,SOURCE,TA s3;
     class DQ,DCQ,LQ,LCQ,TQ,FCQ queue;
     class L1,L2,L3,L4,L5,L6,L7 lambda;
     class DG,LG,TG,OWNER,NEED_RENDER,AIQ gate;
+    linkStyle default stroke:#1e40af,stroke-width:6px;
 ```
 
 ## Durable stage protocol
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#1e40af"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart LR
     A["Register immutable expected set<br/>before dispatch"] --> B["Deliver at least once"]
     B --> C{"Claim bounded lease<br/>with generation + token fence"}
@@ -214,11 +217,13 @@ flowchart LR
     O --> B
     G -. "same fingerprint" .-> P["Idempotent replay"]
     G -. "different fingerprint" .-> Q["Fail closed: conflict"]
+    linkStyle default stroke:#1e40af,stroke-width:6px;
 ```
 
 ## Cost and fan-out shape
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#c2410c"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart TB
     DOMAINS["Immutable run-wide domain set"]
 
@@ -239,13 +244,15 @@ flowchart TB
 
     RETRY["Duplicate / split / reverse SQS delivery"] --> OWNER2
     PER_DOMAIN -. "durable reconciliation" .-> NOCALL["No repeated recorded paid result"]
+    linkStyle default stroke:#c2410c,stroke-width:6px;
 ```
 
 ## Deployment boundary
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"27px","lineColor":"#475569"},"flowchart":{"curve":"basis","nodeSpacing":90,"rankSpacing":115,"diagramPadding":50,"padding":34,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart LR
-    DONE["Application pipeline through G-R9<br/>implemented and locally verified"] --> REVIEW["Independent review"]
+    DONE["G1–G13 + G-R7–G-R9<br/>implemented and locally verified"] --> REVIEW["Independent review"]
     REVIEW --> G14["G14<br/>IaC + production resource creation<br/>requires explicit approval"]
     G14 --> G15["G15<br/>secrets + controlled smoke + mappings<br/>requires separate approvals"]
     G15 --> CUTOVER["Measured cutover / rollback gate"]
