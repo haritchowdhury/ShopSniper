@@ -2,6 +2,182 @@
 
 > Implemented and verified locally through **G-R9**. AWS infrastructure, deployment, live-provider smoke tests, and cutover remain behind **G14/G15**.
 
+## Readable execution flow
+
+### 1 — Existing control plane and discovery registration
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"22px"},"flowchart":{"curve":"basis","nodeSpacing":55,"rankSpacing":70,"padding":28,"htmlLabels":true}}}%%
+flowchart LR
+    A["User and existing frontend"] --> B["Existing authenticated API"]
+    B --> C["Generate and probe queries"]
+    C --> D["Editable review <br/> revision checks <br/> explicit confirmation"]
+    D --> E["Confirmed-query dispatcher <br/> validate frozen provider config"]
+    E --> F[("S3 <br/> confirmed-query-manifest-v1")]
+    E --> G[("Neon <br/> immutable discovery stage <br/> complete expected RunQuery set")]
+    G --> H[["Discovery SQS <br/> one message per confirmed RunQuery ID"]]
+
+    classDef control fill:#f1f5f9,stroke:#475569,stroke-width:4px,color:#0f172a;
+    classDef store fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef queue fill:#dbeafe,stroke:#2563eb,stroke-width:4px,color:#172554;
+    class A,B,C,D,E control;
+    class F,G store;
+    class H queue;
+    linkStyle default stroke:#2563eb,stroke-width:5px;
+```
+
+### 2 — Query fan-out, domain aggregation and immutable work plan
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"22px"},"flowchart":{"curve":"basis","nodeSpacing":65,"rankSpacing":75,"padding":28,"htmlLabels":true}}}%%
+flowchart TB
+    Q[["Discovery SQS"]]
+
+    Q --> W1["Query 1 <br/> Lambda 1: discovery worker <br/> consume durable probe result <br/> zero Google / Browserless"]
+    Q --> W2["Query 2 <br/> Lambda 1: discovery worker <br/> same isolated operation"]
+    Q --> WN["Query N <br/> Lambda 1: discovery worker <br/> same isolated operation"]
+
+    W1 --> A1[("S3 query 1 domains.json <br/> then Neon terminal task")]
+    W2 --> A2[("S3 query 2 domains.json <br/> then Neon terminal task")]
+    WN --> AN[("S3 query N domains.json <br/> then Neon terminal task")]
+
+    A1 --> CHECK[["Domain-aggregation check SQS"]]
+    A2 --> CHECK
+    AN --> CHECK
+    ZERO["expectedCount = 0"] -.-> CHECK
+    CHECK --> GATE{"Neon terminalCount <br/> equals expectedCount?"}
+    GATE -->|"No"| EXIT["Exit without polling <br/> later terminal or recovery sends another check"]
+    GATE -->|"Yes: one conditional owner"| AGG["Lambda 2: domain aggregator <br/> validate every expected task and artifact"]
+
+    AGG --> MERGE["Merge and deduplicate <br/> existing stable shop identity <br/> retain all query/category provenance"]
+    MERGE --> REUSE[("Neon bounded reuse reads <br/> identity + scope + metric set <br/> contract + freshness/latest month")]
+    REUSE --> FLAGS["Freeze per-domain decisions <br/> needsLead <br/> needsTraffic <br/> needsCruxRest <br/> needsCruxBigQuery"]
+    FLAGS --> CAND[("S3 candidate.json <br/> per domain")]
+    FLAGS --> MAN[("S3 domains-manifest.json <br/> complete immutable work plan")]
+    CAND --> REG[("Neon transaction <br/> Shop / RunStore checkpoint <br/> register complete lead stage")]
+    MAN --> REG
+    REG --> LQ[["Lead SQS <br/> one message per needsLead domain"]]
+
+    classDef worker fill:#dbeafe,stroke:#2563eb,stroke-width:4px,color:#172554;
+    classDef store fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef gate fill:#fef3c7,stroke:#d97706,stroke-width:4px,color:#451a03;
+    class Q,W1,W2,WN,CHECK,EXIT,AGG,MERGE,LQ,ZERO worker;
+    class A1,A2,AN,REUSE,CAND,MAN,REG store;
+    class GATE,FLAGS gate;
+    linkStyle default stroke:#2563eb,stroke-width:5px;
+```
+
+### 3 — Per-domain lead enrichment and private checkpoint
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"22px"},"flowchart":{"curve":"basis","nodeSpacing":60,"rankSpacing":75,"padding":28,"htmlLabels":true}}}%%
+flowchart TB
+    LQ[["Lead SQS <br/> one stable domain per message <br/> initial concurrency two"]]
+    LQ --> WORK["Lambda 3: lead worker <br/> fenced 60-second task lease"]
+    WORK --> HTTP["Homepage + bounded sitemap discovery <br/> rank at most five same-store pages <br/> ordinary HTTP first"]
+    HTTP --> NEED{"Any failed or unusable responses?"}
+    NEED -->|"No"| EXTRACT["Extract and validate contact evidence"]
+    NEED -->|"Yes"| MARK[("S3 immutable Browserless attempt marker <br/> written before external call")]
+    MARK --> BL["Browserless /function <br/> one sequential domain session <br/> at most five pages <br/> 8-second navigation / 45-second session <br/> early stop <br/> primary/fallback sequential"]
+    BL --> EXTRACT
+    EXTRACT --> AI{"AI normalization enabled?"}
+    AI -->|"No"| RESULT[("S3 lead.json <br/> qualified, rejected, or safe failed")]
+    AI -->|"Yes"| AIMARK[("S3 immutable AI attempt marker")]
+    AIMARK --> OPENAI["At most one OpenAI normalization request"]
+    OPENAI --> RESULT
+    RESULT --> TERM[("Neon idempotent terminal lead task <br/> artifact key + fingerprint")]
+    TERM --> CHECK[["Lead-aggregation check SQS"]]
+    ZERO["expectedCount = 0 / all reusable"] -.-> CHECK
+    CHECK --> GATE{"All expected lead tasks terminal?"}
+    GATE -->|"No"| EXIT["Exit without polling"]
+    GATE -->|"Yes: one conditional owner"| AGG["Lambda 4: lead aggregator <br/> validate new, reused, rejected, and failed outcomes"]
+    AGG --> PRIVATE[("Atomic private Neon checkpoint <br/> RunStore + run-specific Lead + diagnostics <br/> no new profile/grant visibility <br/> resultsAvailable = false")]
+    PRIVATE --> TREG[("Derive qualified domains <br/> register complete traffic_crux stage")]
+    TREG --> TQ[["Traffic SQS <br/> one logical trigger per eligible domain"]]
+
+    classDef worker fill:#ede9fe,stroke:#7c3aed,stroke-width:4px,color:#2e1065;
+    classDef store fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef gate fill:#fef3c7,stroke:#d97706,stroke-width:4px,color:#451a03;
+    class LQ,WORK,HTTP,EXTRACT,BL,OPENAI,CHECK,ZERO,EXIT,AGG,TQ worker;
+    class MARK,AIMARK,RESULT,TERM,PRIVATE,TREG store;
+    class NEED,AI,GATE gate;
+    linkStyle default stroke:#7c3aed,stroke-width:5px;
+```
+
+### 4 — Stage-wide provider batching and per-domain traffic results
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"22px"},"flowchart":{"curve":"basis","nodeSpacing":65,"rankSpacing":80,"padding":28,"htmlLabels":true}}}%%
+flowchart TB
+    TQ[["Traffic SQS <br/> records are triggers, not provider batches"]]
+    TQ --> WORK["Lambda 5: combined traffic worker"]
+    WORK --> OWNER{"Acquire the one fenced Neon Run lease?"}
+    OWNER -->|"No"| BUSY["Busy / retryable <br/> zero provider calls"]
+    OWNER -->|"Yes"| LOAD[("Load complete registered task set <br/> immutable work plan <br/> qualified persisted leads")]
+
+    LOAD --> LEDGER[("Neon DataForSEO ledger <br/> cost reservation + ambiguity fence")]
+    LEDGER --> DFS["DataForSEO bulk <br/> configured scopes <br/> at most 1,000 domains per request"]
+    DFS --> DFSB[("S3 immutable per-scope batch result <br/> written before per-domain fan-out")]
+
+    LOAD --> RMARK[("S3 CrUX REST attempt marker <br/> per missing origin")]
+    RMARK --> REST["CrUX REST <br/> one missing origin per adapter call <br/> concurrency at most two"]
+
+    LOAD --> BMARK[("S3 BigQuery attempt marker <br/> month + accepted bytes + stable request ID")]
+    BMARK --> BQ["CrUX BigQuery batch <br/> latest table → dry run → live query <br/> at most 1,000 origins + byte cap"]
+    BQ --> BQB[("S3 immutable BigQuery batch result <br/> written before per-domain fan-out")]
+
+    DFSB --> SOURCE[("S3 source artifact per domain")]
+    REST --> SOURCE
+    BQB --> SOURCE
+    SOURCE --> COMBINE["Combine independent states <br/> available / partial / no coverage / unavailable <br/> ambiguous / contract mismatch / reused / skipped"]
+    COMBINE --> ART[("S3 traffic-crux.json <br/> one combined artifact per domain")]
+    ART --> TERM[("Neon idempotent terminal traffic task")]
+    TERM --> CHECK[["Final-aggregation check SQS"]]
+    ZERO["expectedCount = 0 / all reused"] -.-> CHECK
+    CHECK --> GATE{"All expected traffic tasks terminal?"}
+    GATE -->|"No"| EXIT["Exit without polling"]
+    GATE -->|"Yes: one conditional owner"| FINAL["Lambda 6: final aggregator"]
+
+    classDef worker fill:#ffedd5,stroke:#ea580c,stroke-width:4px,color:#431407;
+    classDef store fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    classDef gate fill:#fef3c7,stroke:#d97706,stroke-width:4px,color:#451a03;
+    class TQ,WORK,BUSY,DFS,REST,BQ,COMBINE,CHECK,ZERO,EXIT,FINAL worker;
+    class LOAD,LEDGER,DFSB,RMARK,BMARK,BQB,SOURCE,ART,TERM store;
+    class OWNER,GATE gate;
+    linkStyle default stroke:#ea580c,stroke-width:5px;
+```
+
+### 5 — Atomic publication, recovery and cancellation
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"22px"},"flowchart":{"curve":"basis","nodeSpacing":60,"rankSpacing":75,"padding":28,"htmlLabels":true}}}%%
+flowchart TB
+    FINAL["Lambda 6: final aggregator <br/> single fenced 120-second owner"]
+    FINAL --> VERIFY["Validate every expected task <br/> combined + source + batch artifacts <br/> reuse + paid-ledger evidence"]
+    VERIFY --> TX[("One atomic Neon transaction <br/> lock paid ledgers <br/> publish profiles + owner grants <br/> persist DataForSEO + both CrUX sources <br/> score v3 + summaries <br/> complete stage and Run")]
+    TX --> VISIBLE[("resultsAvailable = true <br/> as the final mutation")]
+    VISIBLE --> API["Existing owner-scoped APIs and frontend <br/> history · results · master leads · traffic · CSV"]
+
+    START["Scheduled or guarded manual trigger"] --> REC["Lambda 7: recovery worker <br/> bounded scan at most 100"]
+    REC --> SCAN[("Neon expired known tasks/stages <br/> stale DataForSEO in-flight becomes ambiguous")]
+    SCAN --> REQUEUE["Recreate exact versioned work/check messages"]
+    REQUEUE --> QUEUES[["Original work or aggregation-check queue"]]
+
+    CANCEL["Operator/internal cancellation"] --> FENCE[("Atomic Neon generation cancellation <br/> terminalize nonterminal work <br/> invalidate late lease tokens")]
+    FENCE --> REJECT["Late terminal writes and publication are rejected"]
+
+    classDef final fill:#dcfce7,stroke:#16a34a,stroke-width:4px,color:#052e16;
+    classDef recovery fill:#ffe4e6,stroke:#e11d48,stroke-width:4px,color:#4c0519;
+    classDef store fill:#ecfeff,stroke:#0891b2,stroke-width:4px,color:#083344;
+    class FINAL,VERIFY,API final;
+    class START,REC,REQUEUE,QUEUES,CANCEL,REJECT recovery;
+    class TX,VISIBLE,SCAN,FENCE store;
+    linkStyle default stroke:#16a34a,stroke-width:5px;
+```
+
+<details>
+<summary>Original single-canvas flow from commit 17129f2</summary>
+
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, sans-serif","fontSize":"28px","lineColor":"#1e40af","primaryTextColor":"#0f172a"},"flowchart":{"curve":"basis","nodeSpacing":95,"rankSpacing":125,"diagramPadding":60,"padding":36,"htmlLabels":true,"useMaxWidth":false}}}%%
 flowchart TB
@@ -190,6 +366,8 @@ flowchart TB
     class DG,LG,TG,OWNER,NEED_RENDER,AIQ gate;
     linkStyle default stroke:#1e40af,stroke-width:6px;
 ```
+
+</details>
 
 ## Durable stage protocol
 
