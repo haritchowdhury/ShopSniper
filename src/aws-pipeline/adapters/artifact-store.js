@@ -1,4 +1,4 @@
-import { GetObjectCommand, NoSuchKey, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, ListObjectsV2Command, NoSuchKey, PutObjectCommand } from "@aws-sdk/client-s3";
 import { TextDecoder } from "node:util";
 import { PipelineContractError } from "../contracts/errors.js";
 import { canonicalJson, sha256Hex } from "../core/canonical.js";
@@ -96,6 +96,21 @@ export class S3ArtifactStore {
   }
 
   async #read(key, { allowMissing = false } = {}) {
+    if (allowMissing) {
+      let listed;
+      try {
+        listed = await this.client.send(new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: key,
+          MaxKeys: 1
+        }));
+      } catch {
+        artifactError();
+      }
+      const present = Array.isArray(listed?.Contents) &&
+        listed.Contents.some((object) => object?.Key === key);
+      if (!present) return null;
+    }
     let response;
     try {
       response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));

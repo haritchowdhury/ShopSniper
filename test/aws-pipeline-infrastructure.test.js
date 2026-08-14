@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildDeploymentPacket, DEPLOYMENT, parseArguments, templateObjectUrl } from
+import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertCodeChanges, assertEngineChanges,
+  buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
 
@@ -67,14 +68,14 @@ function validate(candidate) {
     assert.equal(dlq.SqsManagedSseEnabled, true);
   }
 
-  const functions = { DiscoveryWorker: 300, DomainAggregator: 300, LeadWorker: 90,
-    LeadAggregator: 300, TrafficWorker: 900, FinalAggregator: 300, Recovery: 300 };
-  for (const [id, timeout] of Object.entries(functions)) {
+  const functions = { DiscoveryWorker: [300, 1], DomainAggregator: [300, 2], LeadWorker: [90, 2],
+    LeadAggregator: [300, 2], TrafficWorker: [900, 1], FinalAggregator: [300, 2], Recovery: [300, 1] };
+  for (const [id, [timeout, reservedConcurrency]] of Object.entries(functions)) {
     const fn = resources[id].Properties;
     assert.equal(fn.Runtime, "nodejs24.x");
     assert.equal(fn.MemorySize, 512);
     assert.equal(fn.Timeout, timeout);
-    assert.equal(Object.hasOwn(fn, "ReservedConcurrentExecutions"), false);
+    assert.equal(fn.ReservedConcurrentExecutions, reservedConcurrency);
     assert.equal(fn.EphemeralStorage.Size, 512);
     assert.deepEqual(fn.Architectures, ["x86_64"]);
     assert.deepEqual(fn.Role, { "Fn::GetAtt": [`${id}Role`, "Arn"] });
@@ -115,6 +116,30 @@ function validate(candidate) {
     assert.equal(actions.includes("s3:DeleteObject"), false);
     assert.equal(actions.includes("sqs:PurgeQueue"), false);
   }
+  const expectedListPrefixes = {
+    DiscoveryWorkerRole: ["runs/*/queries/*"],
+    LeadWorkerRole: ["runs/*/domains/*"],
+    TrafficWorkerRole: ["runs/*/domains/*", "runs/*/traffic-batches/*"]
+  };
+  for (const [roleId, prefixes] of Object.entries(expectedListPrefixes)) {
+    const statement = policyStatements(resources[roleId]).find(({ Sid }) => Sid === "ListAssignedArtifactKeys");
+    assert.deepEqual(statement, {
+      Sid: "ListAssignedArtifactKeys", Effect: "Allow", Action: ["s3:ListBucket"],
+      Resource: { "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}" },
+      Condition: { StringLike: { "s3:prefix": prefixes } }
+    });
+  }
+  for (const roleId of ["DomainAggregatorRole", "LeadAggregatorRole", "FinalAggregatorRole", "RecoveryRole"]) {
+    assert.equal(policyStatements(resources[roleId]).some(({ Action }) =>
+      (Array.isArray(Action) ? Action : [Action]).includes("s3:ListBucket")), false);
+  }
+  const controlList = resources.ControlPlanePolicy.Properties.PolicyDocument.Statement
+    .find(({ Sid }) => Sid === "ListQueryArtifactKeys");
+  assert.deepEqual(controlList, {
+    Sid: "ListQueryArtifactKeys", Effect: "Allow", Action: ["s3:ListBucket"],
+    Resource: { "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}" },
+    Condition: { StringLike: { "s3:prefix": ["runs/*/queries/*", "runs/*/query-probes/*"] } }
+  });
   assert.equal(resources.ControlPlanePolicy.Properties.Roles, undefined);
   assert.equal(resources.ControlPlanePolicy.Properties.Users, undefined);
   assert.equal(resources.ControlPlanePolicy.Properties.Groups, undefined);
@@ -148,10 +173,12 @@ test("policy test catches every locked unsafe template class", () => {
     (value) => { value.Resources.ArtifactBucket.Properties.LifecycleConfiguration.Rules[0].Expiration = { Days: 7 }; },
     (value) => { value.Resources.PipelineSecret.Properties.SecretString = "forbidden"; },
     (value) => { value.Resources.DiscoveryMapping.Properties.Enabled = false; },
-    (value) => { value.Resources.DiscoveryWorker.Properties.ReservedConcurrentExecutions = 1; },
+    (value) => { value.Resources.DiscoveryWorker.Properties.ReservedConcurrentExecutions = 2; },
     (value) => { value.Resources.DiscoveryMapping.Properties.ScalingConfig = { MaximumConcurrency: 1 }; },
     (value) => { delete value.Resources.LeadMapping.Properties.FunctionResponseTypes; },
     (value) => { value.Resources.TrafficQueue.Properties.VisibilityTimeout = 5400; },
+    (value) => { delete value.Resources.DiscoveryWorkerRole.Properties.Policies[0]
+      .PolicyDocument.Statement.find(({ Sid }) => Sid === "ListAssignedArtifactKeys").Condition; },
     (value) => { value.Resources.DiscoveryWorkerRole.Properties.Policies[0]
       .PolicyDocument.Statement.push({ Effect: "Allow", Action: "s3:*", Resource: "*" }); }
   ];
@@ -204,7 +231,8 @@ test("stack inspector is read-only and requires the disabled-state assertion", (
 test("deployment constants stay aligned with the packet", () => {
   assert.deepEqual(DEPLOYMENT, {
     profile: "storesignal-dev", region: "ap-south-2", stack: "storesignal-production-pipeline",
-    environment: "production", phases: ["bootstrap", "package", "full", "activate"],
+    environment: "production",
+    phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -212,4 +240,135 @@ test("deployment constants stay aligned with the packet", () => {
       ["Recovery", "recovery"]
     ]
   });
+});
+
+test("G-R12 change-set guard allows only code and exact template concurrency updates", () => {
+  const changes = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...CODE_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const description = {
+    Changes: [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+      ResourceChange: {
+        LogicalResourceId: logicalId,
+        Details: [
+          { Evaluation: "Static", ChangeSource: "ParameterReference",
+            CausingEntity: `${logicalId}CodeKey`,
+            Target: { Name: "Code", RequiresRecreation: "Never" } },
+          { Evaluation: "Static", ChangeSource: "ParameterReference",
+            CausingEntity: `${logicalId}CodeVersion`,
+            Target: { Name: "Code", RequiresRecreation: "Never" } },
+          { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+            Target: { Name: "Code", RequiresRecreation: "Never" } },
+          { Evaluation: "Static", ChangeSource: "DirectModification",
+            Target: { Name: "ReservedConcurrentExecutions", RequiresRecreation: "Never" } }
+        ]
+      }
+    })), {
+      ResourceChange: {
+        LogicalResourceId: "RecoveryInvokePermission",
+        Details: [{ Evaluation: "Dynamic", ChangeSource: "ResourceAttribute",
+          CausingEntity: "RecoverySchedule.Arn",
+          Target: { Name: "SourceArn", RequiresRecreation: "Always" } }]
+      }
+    }, {
+      ResourceChange: {
+        LogicalResourceId: "RecoverySchedule",
+        Details: [{ Evaluation: "Dynamic", ChangeSource: "ResourceAttribute",
+          CausingEntity: "Recovery.Arn",
+          Target: { Name: "Targets", RequiresRecreation: "Never" } }]
+      }
+    }]
+  };
+  assert.doesNotThrow(() => assertCodeChanges(changes, description));
+
+  const missingReservation = clone(description);
+  missingReservation.Changes[0].ResourceChange.Details.pop();
+  assert.throws(() => assertCodeChanges(changes, missingReservation), /Code detail drift/u);
+
+  const crossFunctionCode = clone(description);
+  crossFunctionCode.Changes[0].ResourceChange.Details[0].CausingEntity = "LeadWorkerCodeKey";
+  assert.throws(() => assertCodeChanges(changes, crossFunctionCode), /Code detail drift/u);
+});
+
+test("G-R13 change-set guard allows only code and the two Recovery dependencies", () => {
+  const changes = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...CODE_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const description = {
+    Changes: [...DEPLOYMENT.handlers.map(([logicalId]) => ({ ResourceChange: {
+      LogicalResourceId: logicalId,
+      Details: [
+        { Evaluation: "Static", ChangeSource: "ParameterReference",
+          CausingEntity: `${logicalId}CodeKey`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+        { Evaluation: "Static", ChangeSource: "ParameterReference",
+          CausingEntity: `${logicalId}CodeVersion`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+        { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+          Target: { Name: "Code", RequiresRecreation: "Never" } }
+      ]
+    } })), { ResourceChange: { LogicalResourceId: "RecoveryInvokePermission", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "RecoverySchedule.Arn",
+      Target: { Name: "SourceArn", RequiresRecreation: "Always" }
+    }] } }, { ResourceChange: { LogicalResourceId: "RecoverySchedule", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "Recovery.Arn",
+      Target: { Name: "Targets", RequiresRecreation: "Never" }
+    }] } }]
+  };
+  assert.doesNotThrow(() => assertEngineChanges(changes, description));
+  const unexpectedConcurrency = clone(description);
+  unexpectedConcurrency.Changes[0].ResourceChange.Details.push({
+    Evaluation: "Static", ChangeSource: "DirectModification",
+    Target: { Name: "ReservedConcurrentExecutions", RequiresRecreation: "Never" }
+  });
+  assert.throws(() => assertEngineChanges(changes, unexpectedConcurrency), /Engine code detail drift/u);
+});
+
+test("G-R14 change-set guard allows only shared adapter code, scoped artifact policies, and dependencies", () => {
+  const changes = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...ARTIFACT_ACCESS_UPDATE.policies.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  })), ...ARTIFACT_ACCESS_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const description = { Changes: [
+    ...DEPLOYMENT.handlers.map(([logicalId]) => ({ ResourceChange: {
+      LogicalResourceId: logicalId,
+      Details: [
+        { Evaluation: "Static", ChangeSource: "ParameterReference",
+          CausingEntity: `${logicalId}CodeKey`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+        { Evaluation: "Static", ChangeSource: "ParameterReference",
+          CausingEntity: `${logicalId}CodeVersion`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+        { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+          Target: { Name: "Code", RequiresRecreation: "Never" } },
+        ...(["DiscoveryWorker", "LeadWorker", "TrafficWorker"].includes(logicalId) ? [{
+          Evaluation: "Dynamic", ChangeSource: "ResourceAttribute",
+          CausingEntity: `${logicalId}Role.Arn`, Target: { Name: "Role", RequiresRecreation: "Never" }
+        }] : [])
+      ]
+    } })),
+    ...ARTIFACT_ACCESS_UPDATE.policies.map(({ logicalId }) => ({ ResourceChange: {
+      LogicalResourceId: logicalId,
+      Details: [{ Evaluation: "Static", ChangeSource: "DirectModification",
+        Target: { Name: logicalId === "ControlPlanePolicy" ? "PolicyDocument" : "Policies",
+          RequiresRecreation: "Never" } }]
+    } })),
+    { ResourceChange: { LogicalResourceId: "RecoveryInvokePermission", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "RecoverySchedule.Arn",
+      Target: { Name: "SourceArn", RequiresRecreation: "Always" }
+    }] } },
+    { ResourceChange: { LogicalResourceId: "RecoverySchedule", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "Recovery.Arn",
+      Target: { Name: "Targets", RequiresRecreation: "Never" }
+    }] } }
+  ] };
+  assert.doesNotThrow(() => assertArtifactAccessChanges(changes, description));
+  const broadenedPolicy = clone(description);
+  const policy = broadenedPolicy.Changes.find(({ ResourceChange }) =>
+    ResourceChange.LogicalResourceId === "DiscoveryWorkerRole");
+  policy.ResourceChange.Details[0].Target.Name = "AssumeRolePolicyDocument";
+  assert.throws(() => assertArtifactAccessChanges(changes, broadenedPolicy), /policy detail drift/u);
 });

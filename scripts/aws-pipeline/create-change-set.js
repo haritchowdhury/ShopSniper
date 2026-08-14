@@ -9,7 +9,7 @@ export const DEPLOYMENT = Object.freeze({
   region: "ap-south-2",
   stack: "storesignal-production-pipeline",
   environment: "production",
-  phases: Object.freeze(["bootstrap", "package", "full", "activate"]),
+  phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -19,6 +19,33 @@ export const DEPLOYMENT = Object.freeze({
     ["FinalAggregator", "final-aggregator"],
     ["Recovery", "recovery"]
   ])
+});
+
+export const CODE_UPDATE = Object.freeze({
+  reservedConcurrency: Object.freeze({
+    DiscoveryWorker: 1,
+    DomainAggregator: 2,
+    LeadWorker: 2,
+    LeadAggregator: 2,
+    TrafficWorker: 1,
+    FinalAggregator: 2,
+    Recovery: 1
+  }),
+  dependentReevaluations: Object.freeze([
+    Object.freeze({ logicalId: "RecoveryInvokePermission", type: "AWS::Lambda::Permission",
+      replacement: "Conditional" }),
+    Object.freeze({ logicalId: "RecoverySchedule", type: "AWS::Events::Rule", replacement: "False" })
+  ])
+});
+
+export const ARTIFACT_ACCESS_UPDATE = Object.freeze({
+  policies: Object.freeze([
+    Object.freeze({ logicalId: "ControlPlanePolicy", type: "AWS::IAM::ManagedPolicy", replacement: "False" }),
+    Object.freeze({ logicalId: "DiscoveryWorkerRole", type: "AWS::IAM::Role", replacement: "False" }),
+    Object.freeze({ logicalId: "LeadWorkerRole", type: "AWS::IAM::Role", replacement: "False" }),
+    Object.freeze({ logicalId: "TrafficWorkerRole", type: "AWS::IAM::Role", replacement: "False" })
+  ]),
+  dependentReevaluations: CODE_UPDATE.dependentReevaluations
 });
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -59,8 +86,8 @@ export function parseArguments(argv) {
     fail("Deployment identity does not match the locked G14 packet");
   }
   if (result.applyReviewedChangeSet &&
-      (!result.execute || !["full", "activate"].includes(result.phase))) {
-    fail("--apply-reviewed-change-set requires --phase=full|activate --execute");
+      (!result.execute || !["full", "activate", "code", "engine", "artifact-access"].includes(result.phase))) {
+    fail("--apply-reviewed-change-set requires --phase=full|activate|code|engine|artifact-access --execute");
   }
   return Object.freeze(result);
 }
@@ -128,6 +155,17 @@ export async function buildDeploymentPacket(options) {
     ],
     expectedDisabled: {
       eventSourceMappings: 6, recoveryRules: 1, sourceQueueMessages: 0, dlqMessages: 0
+    },
+    expectedCodeUpdate: CODE_UPDATE,
+    expectedEngineUpdate: {
+      prismaEngine: "libquery_engine-rhel-openssl-3.0.x.so.node",
+      functions: DEPLOYMENT.handlers.map(([logicalId]) => logicalId),
+      dependentReevaluations: CODE_UPDATE.dependentReevaluations
+    },
+    expectedArtifactAccessUpdate: {
+      functions: DEPLOYMENT.handlers.map(([logicalId]) => logicalId),
+      policies: ARTIFACT_ACCESS_UPDATE.policies,
+      dependentReevaluations: ARTIFACT_ACCESS_UPDATE.dependentReevaluations
     }
   };
   return Object.freeze({ ...packet, approvalToken: sha256(canonical(packet)) });
@@ -161,6 +199,15 @@ async function requireApproval(packet, options) {
   if (token !== packet.approvalToken) fail("Exact AWS mutation approval is absent or stale");
   if (options.phase === "activate" && !/^current_window:\s*G15\s*$/mu.test(state)) {
     fail("G15 is not the active window");
+  }
+  if (options.phase === "code" && !/^current_window:\s*G-R12\s*$/mu.test(state)) {
+    fail("G-R12 is not the active window");
+  }
+  if (options.phase === "engine" && !/^current_window:\s*G-R13\s*$/mu.test(state)) {
+    fail("G-R13 is not the active window");
+  }
+  if (options.phase === "artifact-access" && !/^current_window:\s*G-R14\s*$/mu.test(state)) {
+    fail("G-R14 is not the active window");
   }
   return true;
 }
@@ -240,8 +287,195 @@ function assertActivationChanges(changes, description) {
   }
 }
 
+export function assertCodeChanges(changes, description) {
+  const expected = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...CODE_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Code change-set inventory differs from the approved functions and dependencies");
+  }
+  for (const { ResourceChange: change } of description.Changes || []) {
+    if (change.LogicalResourceId === "RecoveryInvokePermission") {
+      const details = change.Details || [];
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "RecoverySchedule.Arn" ||
+          details[0].Target?.Name !== "SourceArn" ||
+          details[0].Target?.RequiresRecreation !== "Always") {
+        fail("Recovery permission dependency drift");
+      }
+      continue;
+    }
+    if (change.LogicalResourceId === "RecoverySchedule") {
+      const details = change.Details || [];
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "Recovery.Arn" ||
+          details[0].Target?.Name !== "Targets" ||
+          details[0].Target?.RequiresRecreation !== "Never") {
+        fail("Recovery schedule dependency drift");
+      }
+      continue;
+    }
+    const details = change.Details || [];
+    const parameterNames = new Set([
+      `${change.LogicalResourceId}CodeKey`, `${change.LogicalResourceId}CodeVersion`
+    ]);
+    const parameterCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "ParameterReference");
+    const dynamicCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "DirectModification");
+    const concurrencyDetails = details.filter((detail) =>
+      detail.Target?.Name === "ReservedConcurrentExecutions");
+    if (parameterCodeDetails.length !== 2 || dynamicCodeDetails.length !== 1 ||
+        concurrencyDetails.length !== 1 || details.length !== 4 ||
+        new Set(parameterCodeDetails.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+        parameterCodeDetails.some((detail) => detail.Evaluation !== "Static" ||
+          detail.ChangeSource !== "ParameterReference" || !parameterNames.has(detail.CausingEntity) ||
+          detail.Target?.RequiresRecreation !== "Never") ||
+        dynamicCodeDetails.some((detail) => detail.Evaluation !== "Dynamic" ||
+          detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never") ||
+        concurrencyDetails.some((detail) => detail.Evaluation !== "Static" ||
+          detail.ChangeSource !== "DirectModification" || detail.CausingEntity != null ||
+          detail.Target?.RequiresRecreation !== "Never")) {
+      fail(`Code detail drift: ${change.LogicalResourceId}`);
+    }
+  }
+}
+
+export function assertEngineChanges(changes, description) {
+  const expected = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...CODE_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Engine change-set inventory differs from the approved functions and dependencies");
+  }
+  for (const { ResourceChange: change } of description.Changes || []) {
+    if (change.LogicalResourceId === "RecoveryInvokePermission") {
+      const details = change.Details || [];
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "RecoverySchedule.Arn" ||
+          details[0].Target?.Name !== "SourceArn" ||
+          details[0].Target?.RequiresRecreation !== "Always") {
+        fail("Recovery permission dependency drift");
+      }
+      continue;
+    }
+    if (change.LogicalResourceId === "RecoverySchedule") {
+      const details = change.Details || [];
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "Recovery.Arn" ||
+          details[0].Target?.Name !== "Targets" ||
+          details[0].Target?.RequiresRecreation !== "Never") {
+        fail("Recovery schedule dependency drift");
+      }
+      continue;
+    }
+    const details = change.Details || [];
+    const parameterNames = new Set([
+      `${change.LogicalResourceId}CodeKey`, `${change.LogicalResourceId}CodeVersion`
+    ]);
+    const parameterCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "ParameterReference");
+    const dynamicCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "DirectModification");
+    if (parameterCodeDetails.length !== 2 || dynamicCodeDetails.length !== 1 || details.length !== 3 ||
+        new Set(parameterCodeDetails.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+        parameterCodeDetails.some((detail) => detail.Evaluation !== "Static" ||
+          !parameterNames.has(detail.CausingEntity) || detail.Target?.RequiresRecreation !== "Never") ||
+        dynamicCodeDetails.some((detail) => detail.Evaluation !== "Dynamic" ||
+          detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never")) {
+      fail(`Engine code detail drift: ${change.LogicalResourceId}`);
+    }
+  }
+}
+
+export function assertArtifactAccessChanges(changes, description) {
+  const expected = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })), ...ARTIFACT_ACCESS_UPDATE.policies.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  })), ...ARTIFACT_ACCESS_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Artifact-access change-set inventory differs from the approved functions, policies, and dependencies");
+  }
+  const policyTargets = new Map([
+    ["ControlPlanePolicy", "PolicyDocument"],
+    ["DiscoveryWorkerRole", "Policies"],
+    ["LeadWorkerRole", "Policies"],
+    ["TrafficWorkerRole", "Policies"]
+  ]);
+  for (const { ResourceChange: change } of description.Changes || []) {
+    const details = change.Details || [];
+    if (change.LogicalResourceId === "RecoveryInvokePermission") {
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "RecoverySchedule.Arn" ||
+          details[0].Target?.Name !== "SourceArn" ||
+          details[0].Target?.RequiresRecreation !== "Always") {
+        fail("Artifact-access Recovery permission dependency drift");
+      }
+      continue;
+    }
+    if (change.LogicalResourceId === "RecoverySchedule") {
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "Recovery.Arn" ||
+          details[0].Target?.Name !== "Targets" ||
+          details[0].Target?.RequiresRecreation !== "Never") {
+        fail("Artifact-access Recovery schedule dependency drift");
+      }
+      continue;
+    }
+    const policyTarget = policyTargets.get(change.LogicalResourceId);
+    if (policyTarget) {
+      if (details.length !== 1 || details[0].Evaluation !== "Static" ||
+          details[0].ChangeSource !== "DirectModification" || details[0].CausingEntity != null ||
+          details[0].Target?.Name !== policyTarget ||
+          details[0].Target?.RequiresRecreation !== "Never") {
+        fail(`Artifact-access policy detail drift: ${change.LogicalResourceId}`);
+      }
+      continue;
+    }
+    const parameterNames = new Set([
+      `${change.LogicalResourceId}CodeKey`, `${change.LogicalResourceId}CodeVersion`
+    ]);
+    const parameterCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "ParameterReference");
+    const dynamicCodeDetails = details.filter((detail) =>
+      detail.Target?.Name === "Code" && detail.ChangeSource === "DirectModification");
+    const roleDetails = details.filter((detail) => detail.Target?.Name === "Role");
+    const expectsRoleDependency = ["DiscoveryWorker", "LeadWorker", "TrafficWorker"]
+      .includes(change.LogicalResourceId);
+    if (parameterCodeDetails.length !== 2 || dynamicCodeDetails.length !== 1 ||
+        roleDetails.length !== (expectsRoleDependency ? 1 : 0) ||
+        details.length !== 3 + (expectsRoleDependency ? 1 : 0) ||
+        new Set(parameterCodeDetails.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+        parameterCodeDetails.some((detail) => detail.Evaluation !== "Static" ||
+          !parameterNames.has(detail.CausingEntity) || detail.Target?.RequiresRecreation !== "Never") ||
+        dynamicCodeDetails.some((detail) => detail.Evaluation !== "Dynamic" ||
+          detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never") ||
+        roleDetails.some((detail) => detail.Evaluation !== "Dynamic" ||
+          detail.ChangeSource !== "ResourceAttribute" ||
+          detail.CausingEntity !== `${change.LogicalResourceId}Role.Arn` ||
+          detail.Target?.RequiresRecreation !== "Never")) {
+      fail(`Artifact-access code detail drift: ${change.LogicalResourceId}`);
+    }
+  }
+}
+
 function changeSetName(kind, packet) {
-  return `${kind === "activate" ? "g15" : "g14"}-${kind}-${packet.approvalToken.slice(0, 12)}`;
+  const prefix = kind === "activate" ? "g15" : kind === "code" ? "gr12" :
+    kind === "engine" ? "gr13" : kind === "artifact-access" ? "gr14" : "g14";
+  return `${prefix}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
 function assertStackBucket(options, packet) {
@@ -362,14 +596,21 @@ async function executeFull(options, packet) {
   assertStackBucket(options, packet);
   const manifest = await loadArtifactManifest(options, packet);
   const activation = options.phase === "activate";
-  const name = changeSetName(activation ? "activate" : "full", packet);
+  const code = options.phase === "code";
+  const engine = options.phase === "engine";
+  const artifactAccess = options.phase === "artifact-access";
+  const name = changeSetName(activation ? "activate" : code ? "code" : engine ? "engine" :
+    artifactAccess ? "artifact-access" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
       templateObjectUrl(options, packet, manifest.template.versionId),
       "--parameters", ...parameterArguments(options, packet, manifest), "--capabilities", "CAPABILITY_IAM",
       "--description", activation ? "Approved G15 production pipeline activation" :
-        "Approved G14 disabled production pipeline"]);
+        code ? "Approved G-R12 Lambda code correction" :
+          engine ? "Approved G-R13 Amazon Linux Prisma engine correction" :
+            artifactAccess ? "Approved G-R14 scoped optional-artifact access correction" :
+            "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
   }
@@ -377,19 +618,26 @@ async function executeFull(options, packet) {
     "--change-set-name", name]);
   const changes = normalizedChanges(described);
   if (activation) assertActivationChanges(changes, described);
+  else if (code) assertCodeChanges(changes, described);
+  else if (engine) assertEngineChanges(changes, described);
+  else if (artifactAccess) assertArtifactAccessChanges(changes, described);
   else assertFullChanges(changes, packet);
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(changeSetRecordPath, `${JSON.stringify({ approvalToken: packet.approvalToken,
     changeSet: name, changeSetId: described.ChangeSetId, changes }, null, 2)}\n`, { mode: 0o600 });
   if (!options.applyReviewedChangeSet) return { outcome: activation ? "ACTIVATION_CHANGE_SET_REVIEWED" :
-    "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
+    code ? "CODE_CHANGE_SET_REVIEWED" : engine ? "ENGINE_CHANGE_SET_REVIEWED" :
+      artifactAccess ? "ARTIFACT_ACCESS_CHANGE_SET_REVIEWED" :
+      "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
       canonical(recorded.changes) !== canonical(changes)) fail("Reviewed change-set record is absent or stale");
   aws(options, ["cloudformation", "execute-change-set", "--stack-name", options.stack,
     "--change-set-name", name]);
   aws(options, ["cloudformation", "wait", "stack-update-complete", "--stack-name", options.stack], { json: false });
-  return { outcome: activation ? "ACTIVE_STACK_COMPLETE" : "FULL_STACK_COMPLETE", changeSet: name, changes };
+  return { outcome: activation ? "ACTIVE_STACK_COMPLETE" : code ? "CODE_STACK_COMPLETE" :
+    engine ? "ENGINE_STACK_COMPLETE" : artifactAccess ? "ARTIFACT_ACCESS_STACK_COMPLETE" :
+      "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 
 export async function main(argv = process.argv.slice(2)) {

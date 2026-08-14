@@ -129,7 +129,11 @@ export async function registerStageInTransaction(transaction, input, now) {
     await transaction.pipelineTask.createMany({ data: taskRows });
   }
   const tasks = await transaction.pipelineTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
-  if (tasks.length !== orderedTasks.length || tasks.some((task, index) => !taskRegistrationMatches(task, orderedTasks[index]))) conflict();
+  const expectedByItemKey = new Map(orderedTasks.map((task) => [task.itemKey, task]));
+  if (tasks.length !== orderedTasks.length || tasks.some((task) => {
+    const expected = expectedByItemKey.get(task.itemKey);
+    return !expected || !taskRegistrationMatches(task, expected);
+  })) conflict();
   return { outcome: created.count === 1 ? "created" : "replayed", stage, tasks };
 }
 

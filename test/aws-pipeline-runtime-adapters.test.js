@@ -120,9 +120,15 @@ test("optional S3 validated reads distinguish only modeled NoSuchKey from invali
   });
   const expected = { ...identity, contentFingerprint: written.contentFingerprint };
   let result = stored(writer.input.Body, writer.input.Metadata);
+  let listed = true;
+  let listError;
   const commands = [];
   const client = { async send(command) {
-    commands.push(command.constructor.name);
+    commands.push({ name: command.constructor.name, input: command.input });
+    if (command.constructor.name === "ListObjectsV2Command") {
+      if (listError) throw listError;
+      return { Contents: listed ? [{ Key: "runs/a.json" }] : [] };
+    }
     if (result instanceof Error) throw result;
     return result;
   } };
@@ -133,7 +139,21 @@ test("optional S3 validated reads distinguish only modeled NoSuchKey from invali
     outcome: "found", ...validated
   });
 
-  result = new NoSuchKey({ $metadata: { httpStatusCode: 404 }, message: "fixture missing" });
+  listed = false;
+  assert.deepEqual(await store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }), {
+    outcome: "missing"
+  });
+  assert.deepEqual(commands.at(-1), { name: "ListObjectsV2Command",
+    input: { Bucket: "fixture-bucket", Prefix: "runs/a.json", MaxKeys: 1 } });
+
+  listed = true;
+  listError = Object.assign(new Error("fixture list denied"), { name: "AccessDenied" });
+  await assert.rejects(
+    store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
+    (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
+  );
+  listError = undefined;
+  result = new NoSuchKey({ $metadata: { httpStatusCode: 404 }, message: "fixture disappeared" });
   assert.deepEqual(await store.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }), {
     outcome: "missing"
   });
@@ -193,7 +213,11 @@ test("optional S3 validated reads distinguish only modeled NoSuchKey from invali
     tiny.getOptionalValidated({ key: "runs/a.json", expected, schema: valueSchema }),
     (error) => error.code === "PIPELINE_ARTIFACT_INVALID"
   );
-  assert.ok(commands.every((name) => name === "GetObjectCommand"));
+  assert.ok(commands.some(({ name }) => name === "ListObjectsV2Command"));
+  assert.ok(commands.some(({ name }) => name === "GetObjectCommand"));
+  assert.ok(commands.filter(({ name }) => name === "ListObjectsV2Command")
+    .every(({ input }) => input.Bucket === "fixture-bucket" && input.Prefix === "runs/a.json" &&
+      input.MaxKeys === 1));
 });
 
 function work(index) {

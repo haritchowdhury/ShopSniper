@@ -65,3 +65,42 @@ test("coordinator exports every locked method and rejects non-exact lease bounds
   await assert.rejects(repository.listRecoverable({ olderThan: new Date(), limit: 101 }, new Date()),
     (error) => error.code === "PIPELINE_INPUT_CONFLICT");
 });
+
+test("stage registration reconciles exact task identities independently of database collation order", async () => {
+  const now = new Date("2026-08-14T10:17:58.965Z");
+  let stageRow;
+  let taskRows = [];
+  const transaction = {
+    pipelineStage: {
+      createMany: async ({ data }) => {
+        [stageRow] = data;
+        return { count: 1 };
+      },
+      findUnique: async () => stageRow
+    },
+    pipelineTask: {
+      createMany: async ({ data }) => {
+        taskRows = data;
+        return { count: data.length };
+      },
+      findMany: async () => [...taskRows].reverse()
+    }
+  };
+  const tasks = [
+    { itemKey: "query_X04IrwiXT8TzOQrm4c_VkAqW", inputFingerprint: "1".repeat(64) },
+    { itemKey: "query_2t4juXx08haUSfn59L37S92T", inputFingerprint: "2".repeat(64) },
+    { itemKey: "query_ljlNnVtzPY5YqXYJnz_zQ10R", inputFingerprint: "3".repeat(64) }
+  ];
+  const registered = await registerStageInTransaction(transaction, {
+    runId: "run_collation_fixture_0001",
+    stage: "discovery",
+    generation: 1,
+    manifestS3Key: "runs/run_collation_fixture_0001/queries/manifest.json",
+    manifestFingerprint: "a".repeat(64),
+    manifestProducedAt: now,
+    tasks
+  }, now);
+  assert.equal(registered.outcome, "created");
+  assert.deepEqual(new Map(registered.tasks.map((task) => [task.itemKey, task.inputFingerprint])),
+    new Map(tasks.map((task) => [task.itemKey, task.inputFingerprint])));
+});

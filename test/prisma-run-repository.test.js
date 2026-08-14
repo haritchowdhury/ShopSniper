@@ -181,6 +181,36 @@ test("run creation snapshots exact server-owned traffic enrichment policy withou
   assert.doesNotMatch(JSON.stringify(data), /must-not-persist/u);
 });
 
+test("run creation persists the execution backend that owns its provider snapshot", () => {
+  const local = new PrismaRunRepository({}, { runExecutionBackend: "local" })
+    .runCreateData("user", [], "run_local_fixture");
+  assert.equal(local.executionBackend, "local");
+  assert.equal(Object.hasOwn(local, "awsProviderConfig"), false);
+
+  const aws = new PrismaRunRepository({}, {
+    runExecutionBackend: "aws",
+    browserlessUrl: "https://fixture.example",
+    googleSearchEngineId: "fixture",
+    googleResultsPerQuery: 10,
+    requestTimeoutMs: 10000,
+    maxPagesPerStore: 5,
+    pageFetchConcurrency: 2,
+    maxQueries: 20,
+    generatedQueryCount: 10,
+    queryProbeFreshnessMs: 60000,
+    queryProbeConcurrency: 1,
+    minQueryResults: 1,
+    minQueryUniqueHosts: 1,
+    minQueryRelevantResults: 1,
+    minQueryRelevanceRatio: 0.1,
+    minQueryBaseScore: 1,
+    browserlessEnabled: false,
+    enableAiNormalization: false
+  }).runCreateData("user", [], "run_aws_fixture");
+  assert.equal(aws.executionBackend, "aws");
+  assert.equal(aws.awsProviderConfig.version, "aws-provider-config-v1");
+});
+
 test("stable lead IDs are shared across equivalent lead identities", () => {
   const first = stableLeadId("run_fixture", {
     identity_evidence: { stableHostname: "fixture.example" },

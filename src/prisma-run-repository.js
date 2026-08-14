@@ -819,6 +819,7 @@ export class PrismaRunRepository {
       },
       pipelineVersion: 2,
       scoringVersion: 2,
+      executionBackend: this.awsProviderConfig ? "aws" : "local",
       trafficEnrichmentConfig: this.trafficEnrichmentConfig,
       ...(this.awsProviderConfig ? { awsProviderConfig: this.awsProviderConfig } : {})
     };

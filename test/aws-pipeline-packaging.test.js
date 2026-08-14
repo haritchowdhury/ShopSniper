@@ -28,6 +28,13 @@ test("Lambda package dependencies are pinned exactly", async () => {
   assert.equal(lock.packages[""].devDependencies.esbuild, "0.28.2");
 });
 
+test("Prisma generation and Lambda packaging pin the Amazon Linux 2023 engine", async () => {
+  const schema = await readFile(path.join(projectRoot, "prisma/schema.prisma"), "utf8");
+  assert.match(schema, /binaryTargets\s*=\s*\["native",\s*"rhel-openssl-3\.0\.x"\]/u);
+  assert.equal(REQUIRED_PRISMA_ENGINE, "libquery_engine-rhel-openssl-3.0.x.so.node");
+  assert.equal(REQUIRED_PRISMA_ENGINE.includes("debian"), false);
+});
+
 test("all seven Lambda packages pass inventory, size, and engine inspection", async () => {
   const report = JSON.parse(await readFile(path.join(outputRoot, "measurements.json"), "utf8"));
   assert.deepEqual(report.measurements.map(({ handler }) => handler), LAMBDA_HANDLERS);

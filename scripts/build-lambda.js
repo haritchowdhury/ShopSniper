@@ -14,7 +14,7 @@ export const LAMBDA_HANDLERS = Object.freeze([
   "recovery"
 ]);
 
-export const REQUIRED_PRISMA_ENGINE = "libquery_engine-debian-openssl-3.0.x.so.node";
+export const REQUIRED_PRISMA_ENGINE = "libquery_engine-rhel-openssl-3.0.x.so.node";
 export const ESM_REQUIRE_BANNER = [
   'import { createRequire as __createRequire } from "node:module";',
   "const require = __createRequire(import.meta.url);"

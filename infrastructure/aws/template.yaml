@@ -687,6 +687,23 @@
                   ]
                 },
                 {
+                  "Sid": "ListAssignedArtifactKeys",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/*/queries/*"
+                      ]
+                    }
+                  }
+                },
+                {
                   "Sid": "ReadAssignedArtifacts",
                   "Effect": "Allow",
                   "Action": [
@@ -966,6 +983,23 @@
                   ]
                 },
                 {
+                  "Sid": "ListAssignedArtifactKeys",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/*/domains/*"
+                      ]
+                    }
+                  }
+                },
+                {
                   "Sid": "ReadAssignedArtifacts",
                   "Effect": "Allow",
                   "Action": [
@@ -1228,6 +1262,24 @@
                       ]
                     }
                   ]
+                },
+                {
+                  "Sid": "ListAssignedArtifactKeys",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/*/domains/*",
+                        "runs/*/traffic-batches/*"
+                      ]
+                    }
+                  }
                 },
                 {
                   "Sid": "ReadAssignedArtifacts",
@@ -1529,6 +1581,24 @@
               }
             },
             {
+              "Sid": "ListQueryArtifactKeys",
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"
+              },
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "runs/*/queries/*",
+                    "runs/*/query-probes/*"
+                  ]
+                }
+              }
+            },
+            {
               "Sid": "ReadWriteQueryArtifacts",
               "Effect": "Allow",
               "Action": [
@@ -1596,6 +1666,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 1,
         "Timeout": 300,
         "EphemeralStorage": {
           "Size": 512
@@ -1676,6 +1747,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 2,
         "Timeout": 300,
         "EphemeralStorage": {
           "Size": 512
@@ -1756,6 +1828,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 2,
         "Timeout": 90,
         "EphemeralStorage": {
           "Size": 512
@@ -1836,6 +1909,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 2,
         "Timeout": 300,
         "EphemeralStorage": {
           "Size": 512
@@ -1916,6 +1990,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 1,
         "Timeout": 900,
         "EphemeralStorage": {
           "Size": 512
@@ -1996,6 +2071,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 2,
         "Timeout": 300,
         "EphemeralStorage": {
           "Size": 512
@@ -2076,6 +2152,7 @@
           "x86_64"
         ],
         "MemorySize": 512,
+        "ReservedConcurrentExecutions": 1,
         "Timeout": 300,
         "EphemeralStorage": {
           "Size": 512

@@ -61,6 +61,40 @@ function registration(runId, stage, tasks, manifestProducedAt = new Date("2026-0
     manifestFingerprint: fp("a"), manifestProducedAt, tasks };
 }
 
+test("coordinator registration is independent of PostgreSQL collation for live-shaped query IDs",
+  { skip: !enabled, timeout: 120_000 }, async () => {
+    const schema = `gr12_collation_${Date.now()}_${process.pid}`;
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    let prisma;
+    try {
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
+      const repository = new PipelineCoordinatorRepository(prisma);
+      const runId = "run_collation_pg_fixture_0001";
+      await createAwsRun(prisma, runId);
+      const tasks = [
+        { itemKey: "query_X04IrwiXT8TzOQrm4c_VkAqW", inputFingerprint: fp("1") },
+        { itemKey: "query_VFdPdpTksce4k3JPej0IsyEj", inputFingerprint: fp("2") },
+        { itemKey: "query_6fAP2PXjJw2RL6NqZ2r1Xrbt", inputFingerprint: fp("3") },
+        { itemKey: "query_ljlNnVtzPY5YqXYJnz_zQ10R", inputFingerprint: fp("4") },
+        { itemKey: "query_2t4juXx08haUSfn59L37S92T", inputFingerprint: fp("5") },
+        { itemKey: "query_Hjqpn1ewPs_cbpvA65hWBmwf", inputFingerprint: fp("6") }
+      ];
+      const input = registration(runId, "discovery", tasks);
+      const created = await repository.registerStage(input, new Date());
+      const replayed = await repository.registerStage(input, new Date());
+      assert.equal(created.outcome, "created");
+      assert.equal(replayed.outcome, "replayed");
+      assert.deepEqual(new Map(created.tasks.map((task) => [task.itemKey, task.inputFingerprint])),
+        new Map(tasks.map((task) => [task.itemKey, task.inputFingerprint])));
+    } finally {
+      await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+    }
+  });
+
 test("G5 migration replays and preserves pre-migration rows",
   { skip: !enabled, timeout: 120_000 }, async () => {
     const schema = `g5_migration_${Date.now()}_${process.pid}`;
