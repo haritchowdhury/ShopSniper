@@ -64,8 +64,8 @@ const queueExpectations = Object.freeze({
   LeadCheck: 1800, Traffic: 5410, TrafficCheck: 1800
 });
 const functionExpectations = Object.freeze({
-  DiscoveryWorker: [300, 1], DomainAggregator: [300, 2], LeadWorker: [90, 2],
-  LeadAggregator: [300, 2], TrafficWorker: [900, 1], FinalAggregator: [300, 2], Recovery: [300, 1]
+  DiscoveryWorker: 300, DomainAggregator: 300, LeadWorker: 90,
+  LeadAggregator: 300, TrafficWorker: 900, FinalAggregator: 300, Recovery: 300
 });
 const mappingExpectations = Object.freeze({
   DiscoveryWorker: [1, 0, null], DomainAggregator: [1, 0, 2], LeadWorker: [1, 0, 2],
@@ -138,13 +138,13 @@ export async function inspect(options) {
   if (sourceMessages || dlqMessages) fail("Expected-disabled queues are not empty");
 
   let mappings = 0;
-  for (const [id, [timeout, reserved]] of Object.entries(functionExpectations)) {
+  for (const [id, timeout] of Object.entries(functionExpectations)) {
     const arn = outputs[`${id}FunctionArn`];
     const config = aws(options, ["lambda", "get-function-configuration", "--function-name", arn]);
     const concurrency = aws(options, ["lambda", "get-function-concurrency", "--function-name", arn]);
     if (config.Runtime !== "nodejs24.x" || config.Architectures?.[0] !== "x86_64" ||
         config.MemorySize !== 512 || config.Timeout !== timeout || config.EphemeralStorage?.Size !== 512 ||
-        concurrency.ReservedConcurrentExecutions !== reserved) fail(`Lambda configuration drift: ${id}`);
+        concurrency.ReservedConcurrentExecutions != null) fail(`Lambda configuration drift: ${id}`);
     const envKeys = Object.keys(config.Environment?.Variables || {}).sort();
     if (envKeys.some((key) => /(?:TOKEN|PASSWORD|PRIVATE_KEY|DATABASE_URL|API_KEY)/u.test(key)) ||
         envKeys.includes("AWS_REGION")) fail(`Lambda environment privacy drift: ${id}`);

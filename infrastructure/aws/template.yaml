@@ -1600,7 +1600,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 1,
         "Role": {
           "Fn::GetAtt": [
             "DiscoveryWorkerRole",
@@ -1681,7 +1680,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 2,
         "Role": {
           "Fn::GetAtt": [
             "DomainAggregatorRole",
@@ -1762,7 +1760,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 2,
         "Role": {
           "Fn::GetAtt": [
             "LeadWorkerRole",
@@ -1843,7 +1840,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 2,
         "Role": {
           "Fn::GetAtt": [
             "LeadAggregatorRole",
@@ -1924,7 +1920,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 1,
         "Role": {
           "Fn::GetAtt": [
             "TrafficWorkerRole",
@@ -2005,7 +2000,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 2,
         "Role": {
           "Fn::GetAtt": [
             "FinalAggregatorRole",
@@ -2086,7 +2080,6 @@
         "EphemeralStorage": {
           "Size": 512
         },
-        "ReservedConcurrentExecutions": 1,
         "Role": {
           "Fn::GetAtt": [
             "RecoveryRole",

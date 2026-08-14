@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { buildDeploymentPacket, DEPLOYMENT, parseArguments } from
+import { buildDeploymentPacket, DEPLOYMENT, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
 
@@ -67,14 +67,14 @@ function validate(candidate) {
     assert.equal(dlq.SqsManagedSseEnabled, true);
   }
 
-  const functions = { DiscoveryWorker: [300, 1], DomainAggregator: [300, 2], LeadWorker: [90, 2],
-    LeadAggregator: [300, 2], TrafficWorker: [900, 1], FinalAggregator: [300, 2], Recovery: [300, 1] };
-  for (const [id, [timeout, concurrency]] of Object.entries(functions)) {
+  const functions = { DiscoveryWorker: 300, DomainAggregator: 300, LeadWorker: 90,
+    LeadAggregator: 300, TrafficWorker: 900, FinalAggregator: 300, Recovery: 300 };
+  for (const [id, timeout] of Object.entries(functions)) {
     const fn = resources[id].Properties;
     assert.equal(fn.Runtime, "nodejs24.x");
     assert.equal(fn.MemorySize, 512);
     assert.equal(fn.Timeout, timeout);
-    assert.equal(fn.ReservedConcurrentExecutions, concurrency);
+    assert.equal(Object.hasOwn(fn, "ReservedConcurrentExecutions"), false);
     assert.equal(fn.EphemeralStorage.Size, 512);
     assert.deepEqual(fn.Architectures, ["x86_64"]);
     assert.deepEqual(fn.Role, { "Fn::GetAtt": [`${id}Role`, "Arn"] });
@@ -148,6 +148,7 @@ test("policy test catches every locked unsafe template class", () => {
     (value) => { value.Resources.ArtifactBucket.Properties.LifecycleConfiguration.Rules[0].Expiration = { Days: 7 }; },
     (value) => { value.Resources.PipelineSecret.Properties.SecretString = "forbidden"; },
     (value) => { value.Resources.DiscoveryMapping.Properties.Enabled = true; },
+    (value) => { value.Resources.DiscoveryWorker.Properties.ReservedConcurrentExecutions = 1; },
     (value) => { value.Resources.DiscoveryMapping.Properties.ScalingConfig = { MaximumConcurrency: 1 }; },
     (value) => { delete value.Resources.LeadMapping.Properties.FunctionResponseTypes; },
     (value) => { value.Resources.TrafficQueue.Properties.VisibilityTimeout = 5400; },
@@ -173,11 +174,19 @@ test("deployment commands are exact, dry-run-first, and secret-value hostile", a
   assert.equal(packet.zips.length, 7);
   assert.equal(packet.full.resources.length, 72);
   assert.equal(packet.bootstrap.resources.length, 2);
+  assert(packet.full.bytes > 51_200);
+  assert.equal(packet.full.key,
+    `deployment/${packet.full.sha256}/cloudformation-template.json`);
+  assert.equal(packet.mutations.length, 10);
+  assert.equal(templateObjectUrl(expected, packet, "version+/="),
+    `https://${packet.bucket}.s3.ap-south-2.amazonaws.com/${packet.full.key}` +
+    "?versionId=version%2B%2F%3D");
   assert.match(packet.approvalToken, /^[a-f0-9]{64}$/u);
   assert(packet.zips.every(({ key, sha256 }) => key.includes(sha256)));
   assert.equal(scriptSource.includes("shell: true"), false);
   assert.equal(scriptSource.includes("PurgeQueue"), false);
   assert.equal(scriptSource.includes("delete-object"), false);
+  assert.equal(scriptSource.includes('"--template-url"'), true);
 });
 
 test("stack inspector is read-only and requires the disabled-state assertion", () => {

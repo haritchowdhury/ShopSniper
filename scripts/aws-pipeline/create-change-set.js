@@ -96,6 +96,7 @@ export async function buildDeploymentPacket(options) {
   ]);
   const bootstrap = JSON.parse(bootstrapBody);
   const template = JSON.parse(templateBody);
+  const templateSha256 = sha256(templateBody);
   const zips = [];
   for (const [logicalId, handler] of DEPLOYMENT.handlers) {
     const file = path.join(lambdaRoot, `${handler}.zip`);
@@ -113,12 +114,15 @@ export async function buildDeploymentPacket(options) {
     bucket: `storesignal-prod-pipeline-${options.accountId}-${options.region}`,
     bootstrap: { file: path.relative(projectRoot, bootstrapPath), sha256: sha256(bootstrapBody),
       resources: resourceInventory(bootstrap) },
-    full: { file: path.relative(projectRoot, templatePath), sha256: sha256(templateBody),
+    full: { file: path.relative(projectRoot, templatePath), sha256: templateSha256,
+      bytes: Buffer.byteLength(templateBody),
+      key: `deployment/${templateSha256}/cloudformation-template.json`,
       resources: resourceInventory(template) },
     zips: zips.map(({ file, ...entry }) => entry),
     mutations: [
       "CREATE_AND_EXECUTE_BOOTSTRAP_CHANGE_SET",
       ...zips.map(({ key }) => `PUT_ENCRYPTED_VERSIONED_OBJECT:${key}`),
+      `PUT_ENCRYPTED_VERSIONED_OBJECT:deployment/${templateSha256}/cloudformation-template.json`,
       "CREATE_REVIEW_AND_EXECUTE_FULL_UPDATE_CHANGE_SET"
     ],
     expectedDisabled: {
@@ -126,6 +130,13 @@ export async function buildDeploymentPacket(options) {
     }
   };
   return Object.freeze({ ...packet, approvalToken: sha256(canonical(packet)) });
+}
+
+export function templateObjectUrl(options, packet, versionId) {
+  if (!versionId) fail("Versioned CloudFormation template object is required");
+  const key = packet.full.key.split("/").map(encodeURIComponent).join("/");
+  return `https://${packet.bucket}.s3.${options.region}.amazonaws.com/${key}` +
+    `?versionId=${encodeURIComponent(versionId)}`;
 }
 
 function aws(options, args, { json = true, allowFailure = false } = {}) {
@@ -226,46 +237,63 @@ async function executeBootstrap(options, packet) {
 }
 
 async function matchingObjectVersion(options, packet, item) {
-  const listed = aws(options, ["s3api", "list-object-versions", "--bucket", packet.bucket,
-    "--prefix", item.key, "--max-items", "100"]);
-  const versions = (listed.Versions || []).filter(({ Key }) => Key === item.key);
-  for (const version of versions) {
-    const head = aws(options, ["s3api", "head-object", "--bucket", packet.bucket,
-      "--key", item.key, "--version-id", version.VersionId]);
-    if (head.Metadata?.sha256 === item.sha256 && head.ContentLength === item.bytes &&
-        head.ServerSideEncryption === "AES256") return { versionId: version.VersionId,
-          etag: head.ETag, checksumSha256: head.ChecksumSHA256 || null };
+  const head = aws(options, ["s3api", "head-object", "--bucket", packet.bucket,
+    "--key", item.key], { allowFailure: true });
+  if (head.failed) {
+    if (/(?:404|Not Found|NoSuchKey)/iu.test(head.stderr)) return null;
+    fail(`Deployment object could not be reconciled: ${item.label}`);
   }
-  if (versions.length) fail(`Deployment key conflict: ${item.handler}`);
-  return null;
+  if (head.Metadata?.sha256 === item.sha256 && head.ContentLength === item.bytes &&
+      head.ServerSideEncryption === "AES256" && head.VersionId) {
+    return { versionId: head.VersionId, etag: head.ETag,
+      checksumSha256: head.ChecksumSHA256 || null };
+  }
+  fail(`Deployment key conflict: ${item.label}`);
+}
+
+async function storeDeploymentObject(options, packet, item) {
+  const existing = await matchingObjectVersion(options, packet, item);
+  let stored = existing;
+  if (!stored) {
+    const checksum = createHash("sha256").update(await readFile(item.file)).digest("base64");
+    const response = aws(options, ["s3api", "put-object", "--bucket", packet.bucket,
+      "--key", item.key, "--body", item.file, "--server-side-encryption", "AES256",
+      "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum,
+      "--metadata", `sha256=${item.sha256}`,
+      ...(item.contentType ? ["--content-type", item.contentType] : [])]);
+    if (!response.VersionId) fail(`Versioned PutObject did not return a version: ${item.label}`);
+    stored = { versionId: response.VersionId, etag: response.ETag,
+      checksumSha256: response.ChecksumSHA256 || checksum };
+  }
+  return stored;
 }
 
 async function executePackage(options, packet) {
   assertStackBucket(options, packet);
   const objects = [];
   for (const item of packet.zips) {
-    const existing = await matchingObjectVersion(options, packet, item);
-    let stored = existing;
-    if (!stored) {
-      const body = path.join(lambdaRoot, `${item.handler}.zip`);
-      const checksum = createHash("sha256").update(await readFile(body)).digest("base64");
-      const response = aws(options, ["s3api", "put-object", "--bucket", packet.bucket,
-        "--key", item.key, "--body", body, "--server-side-encryption", "AES256",
-        "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum,
-        "--metadata", `sha256=${item.sha256}`]);
-      if (!response.VersionId) fail(`Versioned PutObject did not return a version: ${item.handler}`);
-      stored = { versionId: response.VersionId, etag: response.ETag,
-        checksumSha256: response.ChecksumSHA256 || checksum };
-    }
+    const file = path.join(lambdaRoot, `${item.handler}.zip`);
+    const stored = await storeDeploymentObject(options, packet, {
+      ...item, file, label: item.handler, contentType: "application/zip"
+    });
     objects.push({ logicalId: item.logicalId, handler: item.handler, key: item.key,
       sha256: item.sha256, bytes: item.bytes, ...stored });
   }
+  const templateStored = await storeDeploymentObject(options, packet, {
+    file: templatePath, key: packet.full.key, sha256: packet.full.sha256,
+    bytes: packet.full.bytes, label: "cloudformation-template", contentType: "application/json"
+  });
+  const templateObject = { key: packet.full.key, sha256: packet.full.sha256,
+    bytes: packet.full.bytes, ...templateStored };
+  aws(options, ["cloudformation", "validate-template", "--template-url",
+    templateObjectUrl(options, packet, templateObject.versionId)]);
   const manifest = { contractVersion: "storesignal-g14-package-v1", accountId: options.accountId,
     region: options.region, stack: options.stack, bucket: packet.bucket, approvalToken: packet.approvalToken,
-    objects };
+    template: templateObject, objects };
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(artifactManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-  return { outcome: "PACKAGES_READY", manifest: path.relative(projectRoot, artifactManifestPath), objects };
+  return { outcome: "PACKAGES_READY", manifest: path.relative(projectRoot, artifactManifestPath),
+    template: templateObject, objects };
 }
 
 async function loadArtifactManifest(options, packet) {
@@ -275,6 +303,10 @@ async function loadArtifactManifest(options, packet) {
       manifest.stack !== options.stack || manifest.bucket !== packet.bucket ||
       manifest.approvalToken !== packet.approvalToken || manifest.objects?.length !== packet.zips.length) {
     fail("Artifact manifest does not match approval packet");
+  }
+  if (manifest.template?.key !== packet.full.key || manifest.template?.sha256 !== packet.full.sha256 ||
+      manifest.template?.bytes !== packet.full.bytes || !manifest.template?.versionId) {
+    fail("CloudFormation template manifest drift");
   }
   for (const item of packet.zips) {
     const stored = manifest.objects.find(({ logicalId }) => logicalId === item.logicalId);
@@ -292,7 +324,8 @@ async function executeFull(options, packet) {
   const name = changeSetName("full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
-      "--change-set-name", name, "--change-set-type", "UPDATE", "--template-body", `file://${templatePath}`,
+      "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
+      templateObjectUrl(options, packet, manifest.template.versionId),
       "--parameters", ...parameterArguments(options, packet, manifest), "--capabilities", "CAPABILITY_IAM",
       "--description", "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
