@@ -18,8 +18,12 @@ import { fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey, providerBatchArtifactKey, providerBatchAttemptKey,
   providerSourceAttemptArtifactKey, trafficArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import { mapWithConcurrency } from "../core/bounded-concurrency.js";
 import { bigQueryAttemptBody, mapProviderError, providerBatchIdentity, reconcileBigQueryAttempt,
   sourceAttemptBody } from "../traffic/durable-protocol.js";
+
+const S3_IO_CONCURRENCY = 8;
+const TASK_SETTLEMENT_CONCURRENCY = 4;
 
 export function trafficInputFingerprint(runId, generation, manifestFingerprint, plan, lead) {
   return fingerprintJson({ contractVersion: "traffic-domain-input-v1", runId, generation,
@@ -140,22 +144,27 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       }
       const durableSources = new Map();
       const durableCombined = new Map();
+      const readPlan = [];
       for (const task of loaded.tasks) {
         for (const [source, keySource, enabled] of [["dataforseo", "dataforseo", planByShop.get(task.itemKey).needsTraffic],
           ["crux_rest", "crux-rest", planByShop.get(task.itemKey).needsCruxRest],
           ["crux_bigquery", "crux-bigquery", planByShop.get(task.itemKey).needsCruxBigQuery]]) {
           if (!enabled) continue;
-          monitor.assertActive();
-          const found = await runtime.artifactStore.getOptionalValidated({
+          readPlan.push({ mapKey: `${task.itemKey}:${source}`, combined: false, request: {
             key: providerArtifactKey(message.runId, task.itemKey, keySource),
-            expected: artifactExpected(message, task, "provider-source-result-v1"), schema: providerSourceArtifactSchema });
-          if (found.outcome === "found") durableSources.set(`${task.itemKey}:${source}`, found.value);
+            expected: artifactExpected(message, task, "provider-source-result-v1"),
+            schema: providerSourceArtifactSchema } });
         }
-        monitor.assertActive();
-        const found = await runtime.artifactStore.getOptionalValidated({ key: trafficArtifactKey(message.runId, task.itemKey),
-          expected: artifactExpected(message, task, "combined-traffic-crux-result-v1"), schema: combinedTrafficCruxResultSchema });
-        if (found.outcome === "found") durableCombined.set(task.itemKey, found.value);
+        readPlan.push({ mapKey: task.itemKey, combined: true, request: {
+          key: trafficArtifactKey(message.runId, task.itemKey), expected: artifactExpected(message, task,
+            "combined-traffic-crux-result-v1"), schema: combinedTrafficCruxResultSchema } });
       }
+      const readResults = await mapWithConcurrency(readPlan, S3_IO_CONCURRENCY, async (entry) => {
+        monitor.assertActive();
+        return { entry, found: await runtime.artifactStore.getOptionalValidated(entry.request) };
+      });
+      for (const { entry, found } of readResults) if (found.outcome === "found")
+        (entry.combined ? durableCombined : durableSources).set(entry.mapKey, found.value);
       const runtimeConfig = providerRuntimeConfig(loaded.run.trafficEnrichmentConfig,
         loaded.run.awsProviderConfig, runtime.secrets);
       const evaluatedAt = new Date(manifest.workPlan.evaluatedAt);
@@ -515,6 +524,8 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       const recordByLead = new Map(output.trafficEnrichments.map((entry) => [`${entry.leadId}:${entry.source}`, entry]));
       let terminalCount = 0;
       let recordedCount = 0;
+      const sourceWrites = [];
+      const taskPlans = [];
       for (const task of loaded.tasks) {
         const plan = planByShop.get(task.itemKey); const lead = leadByShop.get(task.itemKey);
         if ((plan.needsTraffic && transientSources.has(`${task.itemKey}:dataforseo`)) ||
@@ -570,30 +581,47 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const artifact = parseProviderSourceArtifact(sourceCandidate);
           const sourceKey = providerArtifactKey(message.runId, task.itemKey, keySource);
           const sourceExpected = artifactExpected(message, task, "provider-source-result-v1");
-          await runtime.artifactStore.putImmutable({ key: sourceKey, ...sourceExpected,
+          sourceWrites.push({ key: sourceKey, ...sourceExpected,
             value: artifact, schema: providerSourceArtifactSchema });
           components[component] = { state, contractVersion: record?.contractVersion ||
             (component === "dataforseo" ? loaded.run.trafficEnrichmentConfig.dataForSeo.contractVersion :
               component === "cruxRest" ? loaded.run.trafficEnrichmentConfig.crux.rest.contractVersion :
                 loaded.run.trafficEnrichmentConfig.crux.bigQuery.contractVersion), artifactKey: sourceKey };
         }
-        const combined = durableCombined.get(task.itemKey) || parseCombinedTrafficCruxResult({
+        taskPlans.push({ task, components });
+      }
+      await mapWithConcurrency(sourceWrites, S3_IO_CONCURRENCY, (write) => {
+        monitor.assertActive();
+        return runtime.artifactStore.putImmutable(write);
+      });
+      const combinedWrites = taskPlans.map(({ task, components }) => {
+        const value = durableCombined.get(task.itemKey) || parseCombinedTrafficCruxResult({
           contractVersion: "combined-traffic-crux-result-v1", runId: message.runId,
           generation: message.generation, shopId: task.itemKey, components });
-        const combinedKey = trafficArtifactKey(message.runId, task.itemKey);
-        const expected = artifactExpected(message, task, "combined-traffic-crux-result-v1");
-        const written = await runtime.artifactStore.putImmutable({ key: combinedKey, ...expected,
-          value: combined, schema: combinedTrafficCruxResultSchema });
+        return { task, request: { key: trafficArtifactKey(message.runId, task.itemKey),
+          ...artifactExpected(message, task, "combined-traffic-crux-result-v1"), value,
+          schema: combinedTrafficCruxResultSchema } };
+      });
+      const writtenCombined = await mapWithConcurrency(combinedWrites, S3_IO_CONCURRENCY, async (entry) => {
+        monitor.assertActive();
+        return { ...entry, written: await runtime.artifactStore.putImmutable(entry.request) };
+      });
+      const settlements = await mapWithConcurrency(writtenCombined, TASK_SETTLEMENT_CONCURRENCY,
+        async ({ task, request, written }) => {
+        monitor.assertActive();
         const taskToken = randomUUID();
         const taskClaim = await runtime.coordinator.claimTask({ runId: message.runId, stage: "traffic_crux",
           generation: message.generation, itemKey: task.itemKey, inputFingerprint: task.inputFingerprint,
           owner: `traffic-terminal-${randomUUID()}`, token: taskToken, leaseDurationMs: 60000 }, new Date());
-        if (taskClaim.outcome === "owned") { await runtime.coordinator.recordTerminal({ taskId: taskClaim.task.id,
+        if (taskClaim.outcome === "owned") { monitor.assertActive();
+          await runtime.coordinator.recordTerminal({ taskId: taskClaim.task.id,
           token: taskToken, inputFingerprint: task.inputFingerprint, state: "succeeded",
-          artifactS3Key: combinedKey, artifactFingerprint: written.contentFingerprint }, new Date());
-          terminalCount += 1; recordedCount += 1; }
-        else if (taskClaim.outcome === "terminal") terminalCount += 1;
-      }
+          artifactS3Key: request.key, artifactFingerprint: written.contentFingerprint }, new Date());
+          return "recorded"; }
+        return taskClaim.outcome === "terminal" ? "replayed" : "busy";
+      });
+      terminalCount = settlements.filter((outcome) => outcome !== "busy").length;
+      recordedCount = settlements.filter((outcome) => outcome === "recorded").length;
       await monitor.renewNow(); await monitor.stop();
       await runtime.repository.releaseAwsRunLease({ runId: message.runId,
         generation: message.generation, token }, new Date()); released = true;

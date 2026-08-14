@@ -15,6 +15,9 @@ import { PipelineInvariantError } from "../contracts/errors.js";
 import { canonicalJson, fingerprintJson } from "../core/canonical.js";
 import { candidateArtifactKey, domainManifestKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import { mapWithConcurrency } from "../core/bounded-concurrency.js";
+
+const S3_IO_CONCURRENCY = 8;
 
 function serializeCache(row) {
   return { source: row.source, identity: row.identity, scopeKey: row.scopeKey,
@@ -60,8 +63,8 @@ export async function processDomainAggregation(message, runtime, {
       schema: confirmedQueryManifestSchema });
     const confirmed = parseConfirmedQueryManifest(manifestStored.value);
     const taskByItem = new Map(complete.tasks.map((task) => [task.itemKey, task]));
-    const artifacts = [];
-    for (const query of [...confirmed.queries].sort((a, b) => a.sequence - b.sequence)) {
+    const orderedQueries = [...confirmed.queries].sort((a, b) => a.sequence - b.sequence);
+    const artifacts = await mapWithConcurrency(orderedQueries, S3_IO_CONCURRENCY, async (query) => {
       const task = taskByItem.get(query.id);
       if (!task?.artifactS3Key || !task.artifactFingerprint) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const stored = await runtime.artifactStore.getValidated({ key: task.artifactS3Key,
@@ -71,8 +74,8 @@ export async function processDomainAggregation(message, runtime, {
           producedAt: task.createdAt }, schema: queryDiscoveryArtifactSchema });
       const artifact = parseQueryDiscoveryArtifact(stored.value);
       if (artifact.queryAudits.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-      artifacts.push({ artifact, fingerprint: stored.contentFingerprint });
-    }
+      return { artifact, fingerprint: stored.contentFingerprint };
+    });
     const merged = mergeCandidatesFn(artifacts.flatMap(({ artifact }) =>
       artifact.stores.map((store) => store.candidatePayload)));
     const domains = merged.map((candidatePayload) => {
@@ -143,11 +146,11 @@ export async function processDomainAggregation(message, runtime, {
           needsCrux: needsCruxRest || needsCruxBigQuery,
           sourceKeys: { dataForSeo, cruxRest, cruxBigQuery } } };
     });
-    for (const domain of planned) await runtime.artifactStore.putImmutable({
+    await mapWithConcurrency(planned, S3_IO_CONCURRENCY, (domain) => runtime.artifactStore.putImmutable({
       key: domain.plan.candidateKey, contractVersion: "domain-candidate-v1", runId: message.runId,
       stage: "domain", generation: message.generation, itemId: domain.shopId,
       inputFingerprint: domain.candidateFingerprint, producedAt: evaluatedAt,
-      value: domain.candidateArtifact, schema: domainCandidateArtifactSchema });
+      value: domain.candidateArtifact, schema: domainCandidateArtifactSchema }));
     const domainManifest = { contractVersion: "domain-manifest-v1", runId: message.runId,
       generation: message.generation, confirmedRevision: confirmed.confirmedRevision,
       inputQueryArtifactFingerprints: artifacts.map(({ fingerprint }) => fingerprint),

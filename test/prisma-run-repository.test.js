@@ -451,7 +451,13 @@ test("progressive completion finalizes every lead to v3 before publication", asy
   let leadUpdate;
   let published;
   const transaction = {
-    $queryRaw: async () => [],
+    $queryRaw: async (strings, ...values) => {
+      if (strings.join("").includes('UPDATE "Lead" AS lead')) {
+        leadUpdate = JSON.parse(values[0])[0];
+        return [{ id: "lead_one" }];
+      }
+      return [];
+    },
     run: {
       findUnique: async () => run,
       updateMany: async ({ data }) => {
@@ -460,10 +466,7 @@ test("progressive completion finalizes every lead to v3 before publication", asy
       }
     },
     runDiagnostic: {},
-    lead: {
-      findMany: async () => [storedLead],
-      updateMany: async ({ data }) => { leadUpdate = data; return { count: 1 }; }
-    },
+    lead: { findMany: async () => [storedLead] },
     leadTrafficEnrichment: { findMany: async () => [trafficRow] }
   };
   const repository = new PrismaRunRepository({
@@ -494,7 +497,11 @@ test("a progressive v3 score write failure prevents the publication update", asy
   let publicationAttempted = false;
   const repository = new PrismaRunRepository({
     $transaction: async (callback) => callback({
-      $queryRaw: async () => [],
+      $queryRaw: async (strings) => {
+        if (strings.join("").includes('UPDATE "Lead" AS lead'))
+          throw new Error("injected score write failure");
+        return [];
+      },
       run: {
         findUnique: async () => run,
         updateMany: async ({ data }) => {
@@ -502,8 +509,7 @@ test("a progressive v3 score write failure prevents the publication update", asy
           return { count: 1 };
         }
       },
-      lead: {
-        findMany: async () => [{
+      lead: { findMany: async () => [{
           id: "lead_one",
           runId: "run_abcdefghijklmnop",
           status: "qualified",
@@ -524,9 +530,7 @@ test("a progressive v3 score write failure prevents the publication update", asy
             total: 80,
             semantics: "deterministic_evidence_rank_not_probability"
           }
-        }],
-        updateMany: async () => { throw new Error("injected score write failure"); }
-      },
+        }] },
       leadTrafficEnrichment: { findMany: async () => [] }
     })
   });

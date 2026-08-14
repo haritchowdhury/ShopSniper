@@ -7,6 +7,9 @@ import { PipelineInvariantError } from "../contracts/errors.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import { mapWithConcurrency } from "../core/bounded-concurrency.js";
+
+const S3_IO_CONCURRENCY = 8;
 
 function producedAt(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -63,7 +66,7 @@ export async function processFinalAggregation(message, runtime, {
     const diagnostics = [];
     const ledgerEvidenceByRequest = new Map();
     const summaries = { dataforseo: [], cruxRest: [], cruxBigQuery: [] };
-    for (const task of complete.tasks) {
+    const combinedEntries = await mapWithConcurrency(complete.tasks, S3_IO_CONCURRENCY, async (task) => {
       const plan = planByShop.get(task.itemKey);
       if (!plan || !task.artifactS3Key || !task.artifactFingerprint)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -72,16 +75,57 @@ export async function processFinalAggregation(message, runtime, {
         schema: combinedTrafficCruxResultSchema });
       const combined = parseCombinedTrafficCruxResult(stored.value);
       if (combined.shopId !== task.itemKey) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return { task, plan, combined };
+    });
+    const sourcePlan = combinedEntries.flatMap(({ task, combined }) =>
+      [["dataforseo", "dataforseo", "dataforseo"], ["cruxRest", "crux_rest", "crux-rest"],
+        ["cruxBigQuery", "crux_bigquery", "crux-bigquery"]].flatMap(([component, source, keySource]) => {
+        const part = combined.components[component];
+        if (part.state === "skipped") return [];
+        const key = providerArtifactKey(message.runId, task.itemKey, keySource);
+        if (part.artifactKey !== key) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        return [{ task, component, source, key, part }];
+      }));
+    const sourceEntries = await mapWithConcurrency(sourcePlan, S3_IO_CONCURRENCY, async (entry) => {
+      const stored = await runtime.artifactStore.getValidated({ key: entry.key,
+        expected: { ...expected(message, entry.task, "provider-source-result-v1"), contentFingerprint: undefined },
+        schema: providerSourceArtifactSchema });
+      return { ...entry, artifact: parseProviderSourceArtifact(stored.value) };
+    });
+    const sourceByTaskComponent = new Map(sourceEntries.map((entry) =>
+      [`${entry.task.itemKey}\0${entry.component}`, entry]));
+    const batchReferences = new Map();
+    for (const { task, source, artifact } of sourceEntries) if (source === "dataforseo") {
+      for (const evidence of artifact.requestEvidence) if (evidence.disposition === "ledger" &&
+          evidence.ledgerState === "succeeded") {
+        const reference = { key: evidence.batchArtifactKey, batchId: evidence.batchId,
+          scopeKey: evidence.scopeKey, requestFingerprint: evidence.requestFingerprint,
+          targetCount: evidence.targetCount, artifactFingerprint: evidence.batchArtifactFingerprint,
+          expected: { contractVersion: "provider-batch-result-v1", runId: message.runId,
+            stage: "traffic_crux", generation: message.generation, itemId: evidence.batchId,
+            inputFingerprint: evidence.batchId, contentFingerprint: evidence.batchArtifactFingerprint,
+            producedAt: manifestTime } };
+        const prior = batchReferences.get(reference.key);
+        if (prior && fingerprintJson(prior) !== fingerprintJson(reference))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        batchReferences.set(reference.key, reference);
+      }
+    }
+    const batchEntries = await mapWithConcurrency([...batchReferences.values()].sort((a, b) =>
+      a.key.localeCompare(b.key)), S3_IO_CONCURRENCY, async (reference) => {
+      const stored = await runtime.artifactStore.getValidated({ key: reference.key,
+        expected: reference.expected, schema: providerBatchArtifactSchema });
+      return [reference.key, { stored, batch: parseProviderBatchArtifact(stored.value) }];
+    });
+    const batchByKey = new Map(batchEntries);
+    for (const { task, plan, combined } of combinedEntries) {
       for (const [component, source, keySource] of [["dataforseo", "dataforseo", "dataforseo"],
         ["cruxRest", "crux_rest", "crux-rest"], ["cruxBigQuery", "crux_bigquery", "crux-bigquery"]]) {
         const part = combined.components[component];
         if (part.state === "skipped") continue;
-        const key = providerArtifactKey(message.runId, task.itemKey, keySource);
-        if (part.artifactKey !== key) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        const sourceStored = await runtime.artifactStore.getValidated({ key,
-          expected: { ...expected(message, task, "provider-source-result-v1"), contentFingerprint: undefined },
-          schema: providerSourceArtifactSchema });
-        const artifact = parseProviderSourceArtifact(sourceStored.value);
+        const entry = sourceByTaskComponent.get(`${task.itemKey}\0${component}`);
+        const artifact = entry?.artifact;
+        if (!artifact) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         if (artifact.shopId !== task.itemKey || artifact.source !== source || artifact.state !== part.state)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         const actualScopes = artifact.scopeStates.map(({ scopeKey }) => scopeKey);
@@ -99,12 +143,9 @@ export async function processFinalAggregation(message, runtime, {
           if (evidence.disposition !== "ledger") continue;
           let ledgerEvidence;
           if (evidence.ledgerState === "succeeded") {
-            const batchStored = await runtime.artifactStore.getValidated({ key: evidence.batchArtifactKey,
-              expected: { contractVersion: "provider-batch-result-v1", runId: message.runId,
-                stage: "traffic_crux", generation: message.generation, itemId: evidence.batchId,
-                inputFingerprint: evidence.batchId, contentFingerprint: evidence.batchArtifactFingerprint,
-                producedAt: manifestTime }, schema: providerBatchArtifactSchema });
-            const batch = parseProviderBatchArtifact(batchStored.value);
+            const memoized = batchByKey.get(evidence.batchArtifactKey);
+            if (!memoized) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            const { stored: batchStored, batch } = memoized;
             if (batch.source !== "dataforseo" || batch.runId !== message.runId ||
                 batch.generation !== message.generation || batch.scopeKey !== evidence.scopeKey ||
                 batch.providerRequestFingerprint !== evidence.requestFingerprint ||
@@ -143,15 +184,26 @@ export async function processFinalAggregation(message, runtime, {
     cacheRows.push(...reused.trafficRows);
     const leadProfileOutcomes = [];
     const leadTaskByShop = new Map(reused.leadTasks.map((task) => [task.itemKey, task]));
+    const leadPlans = [...manifest.workPlan.domains].sort((a, b) => a.shopId.localeCompare(b.shopId))
+      .filter((plan) => !plan.leadReuse).map((plan) => {
+        const task = leadTaskByShop.get(plan.shopId);
+        if (!task?.artifactS3Key || !task.artifactFingerprint)
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        return { plan, task };
+      });
+    const leadEntries = await mapWithConcurrency(leadPlans, S3_IO_CONCURRENCY, async ({ plan, task }) => {
+      const stored = await runtime.artifactStore.getValidated({ key: task.artifactS3Key,
+        expected: { ...expected(message, { ...task, stage: "lead" }, "lead-result-v1"),
+          contentFingerprint: task.artifactFingerprint }, schema: leadResultArtifactSchema });
+      return [plan.shopId, parseLeadResultArtifact(stored.value).result];
+    });
+    const leadArtifactByShop = new Map(leadEntries);
     for (const plan of [...manifest.workPlan.domains].sort((a, b) => a.shopId.localeCompare(b.shopId))) {
       if (plan.leadReuse) { leadProfileOutcomes.push({ shopId: plan.shopId, state: "existing",
         profileFingerprint: plan.leadReuse.profileFingerprint }); continue; }
       const task = leadTaskByShop.get(plan.shopId);
       if (!task?.artifactS3Key || !task.artifactFingerprint) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-      const stored = await runtime.artifactStore.getValidated({ key: task.artifactS3Key,
-        expected: { ...expected(message, { ...task, stage: "lead" }, "lead-result-v1"),
-          contentFingerprint: task.artifactFingerprint }, schema: leadResultArtifactSchema });
-      const artifact = parseLeadResultArtifact(stored.value).result;
+      const artifact = leadArtifactByShop.get(plan.shopId);
       leadProfileOutcomes.push(artifact.state === "completed" && artifact.profile
         ? { shopId: plan.shopId, sourceTaskId: task.id, state: "new",
           profileFingerprint: fingerprintJson(artifact.profile), profile: artifact.profile }

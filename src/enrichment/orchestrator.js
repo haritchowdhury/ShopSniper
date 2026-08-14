@@ -12,6 +12,7 @@ import {
   fetchCruxPopularityForMonth
 } from "./crux/adapter.js";
 import { normalizeCruxOrigin } from "./crux/api-request.js";
+import { mapWithConcurrency } from "../aws-pipeline/core/bounded-concurrency.js";
 
 const FAILURE_PRIORITY = Object.freeze({
   unavailable: 1,
@@ -21,6 +22,7 @@ const FAILURE_PRIORITY = Object.freeze({
 });
 const TRAFFIC_WORK_WAIT_ATTEMPTS = 1200;
 const TRAFFIC_WORK_WAIT_MS = 250;
+const DATAFORSEO_SCOPE_CONCURRENCY = 2;
 
 function dateFrom(now) {
   const value = now();
@@ -50,23 +52,6 @@ function batches(values, limit) {
   for (let index = 0; index < values.length; index += limit) {
     output.push(values.slice(index, index + limit));
   }
-  return output;
-}
-
-async function mapWithConcurrency(items, limit, mapper) {
-  const output = new Array(items.length);
-  let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      output[index] = await mapper(items[index], index);
-    }
-  }
-  await Promise.all(Array.from(
-    { length: Math.min(Math.max(1, limit), items.length) },
-    () => worker()
-  ));
   return output;
 }
 
@@ -279,7 +264,9 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
     dataForSeoEnrichmentEnabled: true
   };
 
-  for (const scope of policy.scopes) {
+  for (const scopeWave of batches(policy.scopes, DATAFORSEO_SCOPE_CONCURRENCY)) {
+    const networkDescriptors = [];
+    for (const scope of scopeWave) {
     const key = scopeKey(scope);
     const keys = identities.map((identity) => cacheKey("dataforseo", identity, key, policy));
     context.assertLeaseActive();
@@ -386,9 +373,11 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
         continue;
       }
 
-      context.assertLeaseActive();
-      externalTasks += 1;
-      try {
+      actualCostUsd += policy.estimatedCostPerTaskUsd;
+      networkDescriptors.push(async () => {
+        context.assertLeaseActive();
+        externalTasks += 1;
+        try {
         const response = await dependencies.fetchDataForSeoTraffic({
           targets,
           scope: scopeInput(scope),
@@ -432,15 +421,13 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
           rowCount: targets.length,
           durationMs: Math.round((performance.now() - commitStartedAt) * 10) / 10
         });
-        actualCostUsd += response.cost.providerReported;
         for (const record of response.records) {
           const target = record.state === "available" ? record.value.target : record.target;
           results.get(target).set(key, record.state === "available"
             ? { state: "available", value: record.value, fetchedAt }
             : { state: "unavailable" });
         }
-        if (actualCostUsd >= policy.maxCostPerRunUsd) budgetStopped = true;
-      } catch (error) {
+        } catch (error) {
         if (!(error instanceof EnrichmentError)) throw error;
         const state = safeProviderState(error);
         if (!["zero_cost_proven", "not_dispatched"].includes(error.paidOutcome)) {
@@ -478,8 +465,16 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
           code: `dataforseo_${state}`,
           details: { provider: "dataforseo", scope: key, targetCount: targets.length }
         });
+        }
+      });
       }
     }
+    await mapWithConcurrency(networkDescriptors, DATAFORSEO_SCOPE_CONCURRENCY,
+      (execute) => execute());
+    actualCostUsd = await context.repository.getDataForSeoRunCostUsd(
+      context.runId, context.lease, dateFrom(context.now)
+    );
+    if (actualCostUsd >= policy.maxCostPerRunUsd) budgetStopped = true;
   }
 
   const published = [];

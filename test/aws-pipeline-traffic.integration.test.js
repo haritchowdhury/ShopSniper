@@ -140,7 +140,7 @@ test("G11 Run lease loads the complete task set and task-fences non-unique traff
         manifestFingerprint, manifestProducedAt: workPlan.evaluatedAt, attempt: 1 } };
       const result = await processTrafficBatch([record], runtime, dependencies);
       assert.deepEqual(result.results, [{ recordId: "traffic-integration", terminal: false, outcome: "retryable" }]);
-      assert.equal(paidCalls, 1);
+      assert.equal(paidCalls, 2);
       await prisma.run.update({ where: { id: runId }, data: { leaseExpiresAt: new Date(0) } });
       const restarted = await processTrafficBatch([record], runtime, dependencies);
       assert.deepEqual(restarted.results, [{ recordId: "traffic-integration", terminal: true, outcome: "recorded" }]);

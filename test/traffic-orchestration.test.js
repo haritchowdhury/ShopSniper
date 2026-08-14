@@ -407,7 +407,7 @@ test("proven zero-cost rejection is retryable and consumes no paid exposure", as
   assert.equal(await repository.getDataForSeoRunExposureUsd(), 0);
 });
 
-test("actual paid cost is authoritative and stops later scoped requests", async () => {
+test("actual paid cost is authoritative after the current two-scope wave", async () => {
   const repository = new MemoryRepository();
   let calls = 0;
   const result = await enrichTraffic(options({
@@ -427,8 +427,8 @@ test("actual paid cost is authoritative and stops later scoped requests", async 
       }
     }
   }));
-  assert.equal(calls, 1);
-  assert.equal(result.trafficEnrichmentSummary.dataforseo.actualCostUsd, 0.04);
+  assert.equal(calls, 2);
+  assert.equal(result.trafficEnrichmentSummary.dataforseo.actualCostUsd, 0.08);
   assert.equal(result.trafficEnrichmentSummary.dataforseo.budgetStopped, true);
   assert.equal(result.trafficEnrichments[0].state, "partial");
 });

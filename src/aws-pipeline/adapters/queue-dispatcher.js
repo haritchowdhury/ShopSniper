@@ -1,6 +1,9 @@
 import { SendMessageBatchCommand, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { PipelineContractError } from "../contracts/errors.js";
 import { canonicalJson } from "../core/canonical.js";
+import { mapWithConcurrency } from "../core/bounded-concurrency.js";
+
+const SQS_BATCH_CONCURRENCY = 4;
 
 function invalid() {
   throw new PipelineContractError("PIPELINE_MESSAGE_INVALID");
@@ -36,11 +39,12 @@ export class SqsDispatcher {
   async sendMany(queueUrl, messages, schema) {
     if (!Array.isArray(messages)) invalid();
     const values = messages.map((message) => parsed(schema, message));
-    const sentItemIds = [];
-    const failedItemIds = [];
-    const results = [];
+    const chunks = [];
     for (let offset = 0; offset < values.length; offset += 10) {
-      const chunk = values.slice(offset, offset + 10);
+      chunks.push({ offset, chunk: values.slice(offset, offset + 10) });
+    }
+    const chunkResults = await mapWithConcurrency(chunks, SQS_BATCH_CONCURRENCY,
+      async ({ offset, chunk }) => {
       const entries = chunk.map((message, index) => ({
         Id: `m${String(offset + index).padStart(4, "0")}`,
         MessageBody: canonicalJson(message)
@@ -50,22 +54,21 @@ export class SqsDispatcher {
       try {
         response = await this.client.send(new SendMessageBatchCommand({ QueueUrl: queueUrl, Entries: entries }));
       } catch {
-        failedItemIds.push(...chunk.map(itemId));
-        results.push(...chunk.map((message, index) => ({ index: offset + index,
-          itemId: itemId(message), outcome: "failed" })));
-        continue;
+        return chunk.map((message, index) => ({ index: offset + index,
+          itemId: itemId(message), outcome: "failed" }));
       }
       const successful = response?.Successful ?? [];
       const failed = response?.Failed ?? [];
       const responseIds = [...successful, ...failed].map(({ Id }) => Id);
       if (new Set(responseIds).size !== responseIds.length ||
           responseIds.some((id) => !byId.has(id)) || responseIds.length !== chunk.length) invalid();
-      sentItemIds.push(...successful.map(({ Id }) => byId.get(Id)));
-      failedItemIds.push(...failed.map(({ Id }) => byId.get(Id)));
       const successfulIds = new Set(successful.map(({ Id }) => Id));
-      results.push(...entries.map((entry, index) => ({ index: offset + index, itemId: byId.get(entry.Id),
-        outcome: successfulIds.has(entry.Id) ? "sent" : "failed" })));
-    }
+      return entries.map((entry, index) => ({ index: offset + index, itemId: byId.get(entry.Id),
+        outcome: successfulIds.has(entry.Id) ? "sent" : "failed" }));
+    });
+    const results = chunkResults.flat().sort((left, right) => left.index - right.index);
+    const sentItemIds = results.filter(({ outcome }) => outcome === "sent").map(({ itemId }) => itemId);
+    const failedItemIds = results.filter(({ outcome }) => outcome === "failed").map(({ itemId }) => itemId);
     return { sentItemIds, failedItemIds, results };
   }
 }

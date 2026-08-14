@@ -9,6 +9,9 @@ import { aggregationCheckMessageSchema, workMessageSchema } from "../contracts/m
 import { PipelineInvariantError } from "../contracts/errors.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import { mapWithConcurrency } from "../core/bounded-concurrency.js";
+
+const S3_IO_CONCURRENCY = 8;
 
 function expectedLeadArtifact(message, task) {
   return { contractVersion: "lead-result-v1", runId: message.runId, stage: "lead",
@@ -42,8 +45,8 @@ export async function processLeadAggregation(message, runtime, {
     const domainByShop = new Map(manifest.domainManifest.domains.map((entry) => [entry.shopId, entry]));
     const planByShop = new Map(manifest.workPlan.domains.map((entry) => [entry.shopId, entry]));
     const taskByShop = new Map(complete.tasks.map((task) => [task.itemKey, task]));
-    const artifacts = new Map();
-    for (const task of [...complete.tasks].sort((a, b) => a.itemKey.localeCompare(b.itemKey))) {
+    const orderedTasks = [...complete.tasks].sort((a, b) => a.itemKey.localeCompare(b.itemKey));
+    const artifactEntries = await mapWithConcurrency(orderedTasks, S3_IO_CONCURRENCY, async (task) => {
       if (!task.artifactS3Key || !task.artifactFingerprint) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const stored = await runtime.artifactStore.getValidated({ key: task.artifactS3Key,
         expected: expectedLeadArtifact(message, task), schema: leadResultArtifactSchema });
@@ -52,8 +55,9 @@ export async function processLeadAggregation(message, runtime, {
           artifact.result.runId !== message.runId || artifact.result.generation !== message.generation) {
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
-      artifacts.set(task.itemKey, artifact.result);
-    }
+      return [task.itemKey, artifact.result];
+    });
+    const artifacts = new Map(artifactEntries);
     const reusableSelections = [];
     for (const plan of manifest.workPlan.domains) {
       const result = artifacts.get(plan.shopId);
