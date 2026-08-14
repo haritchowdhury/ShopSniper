@@ -7,9 +7,10 @@ function fail(message) {
 }
 
 export function parseInspectArguments(argv) {
-  const result = { expectedDisabled: false };
+  const result = { expectedDisabled: false, expectedActive: false };
   for (const raw of argv) {
     if (raw === "--expected-disabled") result.expectedDisabled = true;
+    else if (raw === "--expected-active") result.expectedActive = true;
     else if (raw.startsWith("--") && raw.includes("=")) {
       const at = raw.indexOf("=");
       const key = raw.slice(2, at).replace(/-([a-z])/gu, (_, letter) => letter.toUpperCase());
@@ -20,7 +21,7 @@ export function parseInspectArguments(argv) {
   for (const key of ["profile", "region", "stack", "accountId"]) {
     if (!result[key]) fail(`Missing inspection argument: ${key}`);
   }
-  if (!result.expectedDisabled || result.profile !== DEPLOYMENT.profile ||
+  if (result.expectedDisabled === result.expectedActive || result.profile !== DEPLOYMENT.profile ||
       result.region !== DEPLOYMENT.region || result.stack !== DEPLOYMENT.stack ||
       !/^\d{12}$/u.test(result.accountId)) fail("Inspection identity does not match G14");
   return Object.freeze({ ...result, environment: DEPLOYMENT.environment, phase: "full" });
@@ -135,7 +136,9 @@ export async function inspect(options) {
       Number(dlq.ApproximateNumberOfMessagesNotVisible || 0) +
       Number(dlq.ApproximateNumberOfMessagesDelayed || 0);
   }
-  if (sourceMessages || dlqMessages) fail("Expected-disabled queues are not empty");
+  if (options.expectedDisabled && (sourceMessages || dlqMessages)) {
+    fail("Expected-disabled queues are not empty");
+  }
 
   let mappings = 0;
   for (const [id, timeout] of Object.entries(functionExpectations)) {
@@ -156,7 +159,8 @@ export async function inspect(options) {
     } else {
       if (eventMappings.length !== 1) fail(`Mapping cardinality drift: ${id}`);
       const mapping = eventMappings[0];
-      if (mapping.State !== "Disabled" || mapping.BatchSize !== expected[0] ||
+      if (mapping.State !== (options.expectedActive ? "Enabled" : "Disabled") ||
+          mapping.BatchSize !== expected[0] ||
           mapping.MaximumBatchingWindowInSeconds !== expected[1] ||
           !mapping.FunctionResponseTypes?.includes("ReportBatchItemFailures") ||
           (expected[2] === null ? mapping.ScalingConfig?.MaximumConcurrency != null :
@@ -166,23 +170,31 @@ export async function inspect(options) {
     const logGroup = `/aws/lambda/${options.stack}-${DEPLOYMENT.handlers.find(([logical]) => logical === id)[1]}`;
     const streams = aws(options, ["logs", "describe-log-streams", "--log-group-name", logGroup,
       "--limit", "1"]).logStreams || [];
-    if (streams.length) fail(`Unexpected G14 Lambda activity: ${id}`);
+    if (options.expectedDisabled && streams.length) fail(`Unexpected G14 Lambda activity: ${id}`);
   }
-  if (mappings !== 6) fail("Expected six disabled mappings");
+  if (mappings !== 6) fail("Expected six mappings");
 
   const rule = aws(options, ["events", "describe-rule", "--name", outputs.RecoveryScheduleName]);
-  if (rule.State !== "DISABLED" || rule.ScheduleExpression !== "rate(5 minutes)") {
+  if (rule.State !== (options.expectedActive ? "ENABLED" : "DISABLED") ||
+      rule.ScheduleExpression !== "rate(5 minutes)") {
     fail("Recovery schedule drift");
   }
   const targets = aws(options, ["events", "list-targets-by-rule", "--rule", outputs.RecoveryScheduleName]);
   if (targets.Targets?.length !== 1) fail("Recovery target drift");
 
   const secret = aws(options, ["secretsmanager", "describe-secret", "--secret-id", outputs.PipelineSecretArn]);
-  if (Object.keys(secret.VersionIdsToStages || {}).length) fail("G14 secret unexpectedly has a version");
-  const value = aws(options, ["secretsmanager", "get-secret-value", "--secret-id", outputs.PipelineSecretArn],
-    { allowFailure: true });
-  if (!value.failed || !/ResourceNotFoundException|no version/iu.test(value.stderr)) {
-    fail("G14 secret is not provably empty");
+  const versions = Object.values(secret.VersionIdsToStages || {});
+  if (options.expectedActive) {
+    if (!versions.some((stages) => stages.includes("AWSCURRENT"))) {
+      fail("Active secret has no current version");
+    }
+  } else {
+    if (versions.length) fail("G14 secret unexpectedly has a version");
+    const value = aws(options, ["secretsmanager", "get-secret-value", "--secret-id", outputs.PipelineSecretArn],
+      { allowFailure: true });
+    if (!value.failed || !/ResourceNotFoundException|no version/iu.test(value.stderr)) {
+      fail("G14 secret is not provably empty");
+    }
   }
 
   for (const summary of listed.StackResourceSummaries || []) {
@@ -202,10 +214,11 @@ export async function inspect(options) {
     fail("Alarm definition drift");
   }
 
-  return Object.freeze({ outcome: "EXPECTED_DISABLED_STACK_VERIFIED", accountId: identity.Account,
+  return Object.freeze({ outcome: options.expectedActive ? "EXPECTED_ACTIVE_STACK_VERIFIED" :
+    "EXPECTED_DISABLED_STACK_VERIFIED", accountId: identity.Account,
     region: options.region, stack: options.stack, resources: actualInventory.length, queues: 6,
-    dlqs: 6, functions: 7, disabledMappings: mappings, disabledRecoveryRule: true,
-    emptySecret: true, emptySourceMessages: sourceMessages, emptyDlqMessages: dlqMessages, alarms: 27 });
+    dlqs: 6, functions: 7, mappings, active: options.expectedActive,
+    secretCurrentVersion: options.expectedActive, sourceMessages, dlqMessages, alarms: 27 });
 }
 
 export async function main(argv = process.argv.slice(2)) {

@@ -94,7 +94,7 @@ function validate(candidate) {
   };
   for (const [id, [batch, window, maximum]] of Object.entries(mappingSettings)) {
     const mapping = resources[id].Properties;
-    assert.equal(mapping.Enabled, false);
+    assert.equal(mapping.Enabled, true);
     assert.equal(mapping.BatchSize, batch);
     assert.equal(mapping.MaximumBatchingWindowInSeconds, window);
     assert.deepEqual(mapping.FunctionResponseTypes, ["ReportBatchItemFailures"]);
@@ -102,7 +102,7 @@ function validate(candidate) {
     else assert.equal(mapping.ScalingConfig.MaximumConcurrency, maximum);
     assert.notEqual(mapping.ScalingConfig?.MaximumConcurrency, 1);
   }
-  assert.equal(resources.RecoverySchedule.Properties.State, "DISABLED");
+  assert.equal(resources.RecoverySchedule.Properties.State, "ENABLED");
   assert.equal(resources.RecoverySchedule.Properties.ScheduleExpression, "rate(5 minutes)");
 
   const roles = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::IAM::Role");
@@ -126,7 +126,7 @@ function validate(candidate) {
   return true;
 }
 
-test("G14 template implements the exact disabled topology", () => {
+test("template implements the exact active topology", () => {
   assert.equal(Object.keys(template.Resources).length, 72);
   assert.equal(validate(template), true);
 });
@@ -147,7 +147,7 @@ test("policy test catches every locked unsafe template class", () => {
     (value) => { delete value.Resources.ArtifactBucket.Properties.BucketEncryption; },
     (value) => { value.Resources.ArtifactBucket.Properties.LifecycleConfiguration.Rules[0].Expiration = { Days: 7 }; },
     (value) => { value.Resources.PipelineSecret.Properties.SecretString = "forbidden"; },
-    (value) => { value.Resources.DiscoveryMapping.Properties.Enabled = true; },
+    (value) => { value.Resources.DiscoveryMapping.Properties.Enabled = false; },
     (value) => { value.Resources.DiscoveryWorker.Properties.ReservedConcurrentExecutions = 1; },
     (value) => { value.Resources.DiscoveryMapping.Properties.ScalingConfig = { MaximumConcurrency: 1 }; },
     (value) => { delete value.Resources.LeadMapping.Properties.FunctionResponseTypes; },
@@ -193,6 +193,9 @@ test("stack inspector is read-only and requires the disabled-state assertion", (
   const parsed = parseInspectArguments(["--profile=storesignal-dev", "--region=ap-south-2",
     "--stack=storesignal-production-pipeline", "--account-id=123456789012", "--expected-disabled"]);
   assert.equal(parsed.expectedDisabled, true);
+  const active = parseInspectArguments(["--profile=storesignal-dev", "--region=ap-south-2",
+    "--stack=storesignal-production-pipeline", "--account-id=123456789012", "--expected-active"]);
+  assert.equal(active.expectedActive, true);
   assert.throws(() => parseInspectArguments(["--profile=storesignal-dev", "--region=ap-south-2",
     "--stack=storesignal-production-pipeline", "--account-id=123456789012"]));
   assert.equal(/aws\(options, \["(?:cloudformation|s3api|sqs|lambda|events|secretsmanager)", "(?:create|update|delete|put|execute|enable|disable|purge)/u.test(inspectSource), false);
@@ -201,7 +204,7 @@ test("stack inspector is read-only and requires the disabled-state assertion", (
 test("deployment constants stay aligned with the packet", () => {
   assert.deepEqual(DEPLOYMENT, {
     profile: "storesignal-dev", region: "ap-south-2", stack: "storesignal-production-pipeline",
-    environment: "production", phases: ["bootstrap", "package", "full"],
+    environment: "production", phases: ["bootstrap", "package", "full", "activate"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],

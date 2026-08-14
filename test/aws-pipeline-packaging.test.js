@@ -71,7 +71,11 @@ for (const handlerName of LAMBDA_HANDLERS) {
       const result = spawnSync(process.execPath, ["--input-type=module", "--eval", program], {
         cwd: projectRoot,
         encoding: "utf8",
-        env: { PATH: process.env.PATH }
+        env: {
+          PATH: process.env.PATH,
+          RUN_EXECUTION_BACKEND: "local",
+          AWS_PIPELINE_ENABLED: "false"
+        }
       });
       assert.equal(result.status, 0, result.stderr);
       assert.deepEqual(JSON.parse(readFileSync(resultPath, "utf8")),

@@ -9,7 +9,7 @@ export const DEPLOYMENT = Object.freeze({
   region: "ap-south-2",
   stack: "storesignal-production-pipeline",
   environment: "production",
-  phases: Object.freeze(["bootstrap", "package", "full"]),
+  phases: Object.freeze(["bootstrap", "package", "full", "activate"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -58,8 +58,9 @@ export function parseArguments(argv) {
       !DEPLOYMENT.phases.includes(result.phase) || !/^\d{12}$/u.test(result.accountId)) {
     fail("Deployment identity does not match the locked G14 packet");
   }
-  if (result.applyReviewedChangeSet && (!result.execute || result.phase !== "full")) {
-    fail("--apply-reviewed-change-set requires --phase=full --execute");
+  if (result.applyReviewedChangeSet &&
+      (!result.execute || !["full", "activate"].includes(result.phase))) {
+    fail("--apply-reviewed-change-set requires --phase=full|activate --execute");
   }
   return Object.freeze(result);
 }
@@ -154,11 +155,13 @@ function aws(options, args, { json = true, allowFailure = false } = {}) {
   catch { fail(`AWS command returned invalid JSON: aws ${args.slice(0, 2).join(" ")}`); }
 }
 
-async function requireApproval(packet) {
+async function requireApproval(packet, options) {
   const state = await readFile(statePath, "utf8");
   const token = state.match(/^aws_mutation_approval:\s*([a-f0-9]{64})\s*$/mu)?.[1];
-  if (token !== packet.approvalToken) fail("Exact G14 AWS mutation approval is absent or stale");
-  if (!/^current_window:\s*G14\s*$/mu.test(state)) fail("G14 is not the active window");
+  if (token !== packet.approvalToken) fail("Exact AWS mutation approval is absent or stale");
+  if (options.phase === "activate" && !/^current_window:\s*G15\s*$/mu.test(state)) {
+    fail("G15 is not the active window");
+  }
   return true;
 }
 
@@ -200,8 +203,45 @@ function assertFullChanges(changes, packet) {
   }
 }
 
+function assertActivationChanges(changes, description) {
+  const expected = [
+    ["DiscoveryMapping", "AWS::Lambda::EventSourceMapping", "False"],
+    ["DomainAggregationMapping", "AWS::Lambda::EventSourceMapping", "False"],
+    ["FinalAggregationMapping", "AWS::Lambda::EventSourceMapping", "False"],
+    ["LeadAggregationMapping", "AWS::Lambda::EventSourceMapping", "False"],
+    ["LeadMapping", "AWS::Lambda::EventSourceMapping", "False"],
+    ["RecoveryInvokePermission", "AWS::Lambda::Permission", "Conditional"],
+    ["RecoverySchedule", "AWS::Events::Rule", "False"],
+    ["TrafficMapping", "AWS::Lambda::EventSourceMapping", "False"]
+  ].map(([logicalId, type, replacement]) => ({ action: "Modify", logicalId, type, replacement }))
+    .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Activation change-set inventory differs from the approved eight resources");
+  }
+  for (const { ResourceChange: change } of description.Changes || []) {
+    const details = change.Details || [];
+    if (change.LogicalResourceId === "RecoveryInvokePermission") {
+      if (details.length !== 1 || details[0].Evaluation !== "Dynamic" ||
+          details[0].ChangeSource !== "ResourceAttribute" ||
+          details[0].CausingEntity !== "RecoverySchedule.Arn" ||
+          details[0].Target?.Name !== "SourceArn" ||
+          details[0].Target?.RequiresRecreation !== "Always") {
+        fail("Recovery permission dependency change is not the expected schedule-only consequence");
+      }
+    } else {
+      const expectedName = change.LogicalResourceId === "RecoverySchedule" ? "State" : "Enabled";
+      if (details.length !== 1 || details[0].Evaluation !== "Static" ||
+          details[0].ChangeSource !== "DirectModification" ||
+          details[0].Target?.Name !== expectedName ||
+          details[0].Target?.RequiresRecreation !== "Never") {
+        fail(`Activation detail drift: ${change.LogicalResourceId}`);
+      }
+    }
+  }
+}
+
 function changeSetName(kind, packet) {
-  return `g14-${kind}-${packet.approvalToken.slice(0, 12)}`;
+  return `${kind === "activate" ? "g15" : "g14"}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
 function assertStackBucket(options, packet) {
@@ -321,31 +361,35 @@ async function loadArtifactManifest(options, packet) {
 async function executeFull(options, packet) {
   assertStackBucket(options, packet);
   const manifest = await loadArtifactManifest(options, packet);
-  const name = changeSetName("full", packet);
+  const activation = options.phase === "activate";
+  const name = changeSetName(activation ? "activate" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
       templateObjectUrl(options, packet, manifest.template.versionId),
       "--parameters", ...parameterArguments(options, packet, manifest), "--capabilities", "CAPABILITY_IAM",
-      "--description", "Approved G14 disabled production pipeline"]);
+      "--description", activation ? "Approved G15 production pipeline activation" :
+        "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
   }
   const described = aws(options, ["cloudformation", "describe-change-set", "--stack-name", options.stack,
     "--change-set-name", name]);
   const changes = normalizedChanges(described);
-  assertFullChanges(changes, packet);
+  if (activation) assertActivationChanges(changes, described);
+  else assertFullChanges(changes, packet);
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(changeSetRecordPath, `${JSON.stringify({ approvalToken: packet.approvalToken,
     changeSet: name, changeSetId: described.ChangeSetId, changes }, null, 2)}\n`, { mode: 0o600 });
-  if (!options.applyReviewedChangeSet) return { outcome: "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
+  if (!options.applyReviewedChangeSet) return { outcome: activation ? "ACTIVATION_CHANGE_SET_REVIEWED" :
+    "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
       canonical(recorded.changes) !== canonical(changes)) fail("Reviewed change-set record is absent or stale");
   aws(options, ["cloudformation", "execute-change-set", "--stack-name", options.stack,
     "--change-set-name", name]);
   aws(options, ["cloudformation", "wait", "stack-update-complete", "--stack-name", options.stack], { json: false });
-  return { outcome: "FULL_STACK_COMPLETE", changeSet: name, changes };
+  return { outcome: activation ? "ACTIVE_STACK_COMPLETE" : "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -356,7 +400,7 @@ export async function main(argv = process.argv.slice(2)) {
       estimatedDisabledUsdPerMonth: 3.11 }, null, 2)}\n`);
     return;
   }
-  await requireApproval(packet);
+  await requireApproval(packet, options);
   let result;
   if (options.phase === "bootstrap") result = await executeBootstrap(options, packet);
   else if (options.phase === "package") result = await executePackage(options, packet);

@@ -2132,7 +2132,7 @@
     "DiscoveryMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "DiscoveryQueue",
@@ -2152,7 +2152,7 @@
     "DomainAggregationMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "DiscoveryCheckQueue",
@@ -2175,7 +2175,7 @@
     "LeadMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "LeadQueue",
@@ -2198,7 +2198,7 @@
     "LeadAggregationMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "LeadCheckQueue",
@@ -2221,7 +2221,7 @@
     "TrafficMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "TrafficQueue",
@@ -2241,7 +2241,7 @@
     "FinalAggregationMapping": {
       "Type": "AWS::Lambda::EventSourceMapping",
       "Properties": {
-        "Enabled": false,
+        "Enabled": true,
         "EventSourceArn": {
           "Fn::GetAtt": [
             "TrafficCheckQueue",
@@ -2269,7 +2269,7 @@
         },
         "Description": "Disabled five-minute StoreSignal pipeline recovery scan.",
         "ScheduleExpression": "rate(5 minutes)",
-        "State": "DISABLED",
+        "State": "ENABLED",
         "Targets": [
           {
             "Arn": {
