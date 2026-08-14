@@ -9,7 +9,8 @@ export const DEPLOYMENT = Object.freeze({
   region: "ap-south-2",
   stack: "storesignal-production-pipeline",
   environment: "production",
-  phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access"]),
+  phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
+    "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -86,8 +87,10 @@ export function parseArguments(argv) {
     fail("Deployment identity does not match the locked G14 packet");
   }
   if (result.applyReviewedChangeSet &&
-      (!result.execute || !["full", "activate", "code", "engine", "artifact-access"].includes(result.phase))) {
-    fail("--apply-reviewed-change-set requires --phase=full|activate|code|engine|artifact-access --execute");
+      (!result.execute || !["full", "activate", "code", "engine", "artifact-access", "provider-identity",
+        "lead-work-resume", "lead-memory", "lead-bounded-extraction"]
+        .includes(result.phase))) {
+    fail("--apply-reviewed-change-set requires a reviewed update phase with --execute");
   }
   return Object.freeze(result);
 }
@@ -166,6 +169,14 @@ export async function buildDeploymentPacket(options) {
       functions: DEPLOYMENT.handlers.map(([logicalId]) => logicalId),
       policies: ARTIFACT_ACCESS_UPDATE.policies,
       dependentReevaluations: ARTIFACT_ACCESS_UPDATE.dependentReevaluations
+    },
+    expectedProviderIdentityUpdate: {
+      functions: DEPLOYMENT.handlers.map(([logicalId]) => logicalId),
+      dependentReevaluations: CODE_UPDATE.dependentReevaluations
+    },
+    expectedLeadWorkResumeUpdate: {
+      functions: DEPLOYMENT.handlers.map(([logicalId]) => logicalId),
+      dependentReevaluations: CODE_UPDATE.dependentReevaluations
     }
   };
   return Object.freeze({ ...packet, approvalToken: sha256(canonical(packet)) });
@@ -208,6 +219,18 @@ async function requireApproval(packet, options) {
   }
   if (options.phase === "artifact-access" && !/^current_window:\s*G-R14\s*$/mu.test(state)) {
     fail("G-R14 is not the active window");
+  }
+  if (options.phase === "provider-identity" && !/^current_window:\s*G-R15\s*$/mu.test(state)) {
+    fail("G-R15 is not the active window");
+  }
+  if (options.phase === "lead-work-resume" && !/^current_window:\s*G-R17\s*$/mu.test(state)) {
+    fail("G-R17 is not the active window");
+  }
+  if (options.phase === "lead-memory" && !/^current_window:\s*G-R18\s*$/mu.test(state)) {
+    fail("G-R18 is not the active window");
+  }
+  if (options.phase === "lead-bounded-extraction" && !/^current_window:\s*G-R19\s*$/mu.test(state)) {
+    fail("G-R19 is not the active window");
   }
   return true;
 }
@@ -396,6 +419,71 @@ export function assertEngineChanges(changes, description) {
   }
 }
 
+export function assertProviderIdentityChanges(changes, description) {
+  try {
+    assertEngineChanges(changes, description);
+  } catch (error) {
+    fail(String(error?.message || "Provider-identity code detail drift").replaceAll("Engine", "Provider-identity"));
+  }
+}
+
+export function assertLeadWorkResumeChanges(changes, description) {
+  try {
+    assertEngineChanges(changes, description);
+  } catch (error) {
+    fail(String(error?.message || "Lead-work-resume code detail drift").replaceAll("Engine", "Lead-work-resume"));
+  }
+}
+
+export function assertLeadMemoryChanges(changes, description) {
+  const expected = [{ action: "Modify", logicalId: "LeadWorker",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Lead-memory change-set inventory differs from the approved LeadWorker-only update");
+  }
+  const change = description.Changes?.[0]?.ResourceChange;
+  const details = change?.Details || [];
+  if (change?.LogicalResourceId !== "LeadWorker" || details.length !== 1 ||
+      details[0].Evaluation !== "Static" || details[0].ChangeSource !== "DirectModification" ||
+      details[0].CausingEntity != null || details[0].Target?.Name !== "MemorySize" ||
+      details[0].Target?.RequiresRecreation !== "Never") {
+    fail("Lead-memory change detail drift");
+  }
+}
+
+export function assertLeadBoundedExtractionChanges(changes, description) {
+  const expected = ["DiscoveryWorker", "LeadWorker"].map((logicalId) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })).sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Lead-bounded-extraction inventory differs from approved functions and dependencies");
+  }
+  for (const { ResourceChange: change } of description.Changes || []) {
+    const details = change.Details || [];
+    const parameterNames = new Set([
+      `${change.LogicalResourceId}CodeKey`, `${change.LogicalResourceId}CodeVersion`
+    ]);
+    const parameterCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+      detail.ChangeSource === "ParameterReference");
+    const dynamicCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+      detail.ChangeSource === "DirectModification");
+    const memory = details.filter((detail) => detail.Target?.Name === "MemorySize");
+    const expectsMemory = change.LogicalResourceId === "LeadWorker";
+    if (parameterCode.length !== 2 || dynamicCode.length !== 1 ||
+        memory.length !== (expectsMemory ? 1 : 0) || details.length !== 3 + (expectsMemory ? 1 : 0) ||
+        new Set(parameterCode.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+        parameterCode.some((detail) => detail.Evaluation !== "Static" ||
+          !parameterNames.has(detail.CausingEntity) || detail.Target?.RequiresRecreation !== "Never") ||
+        dynamicCode.some((detail) => detail.Evaluation !== "Dynamic" ||
+          detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never") ||
+        memory.some((detail) => detail.Evaluation !== "Static" ||
+          detail.ChangeSource !== "DirectModification" || detail.CausingEntity != null ||
+          detail.Target?.RequiresRecreation !== "Never")) {
+      fail(`Lead-bounded-extraction detail drift: ${change.LogicalResourceId}`);
+    }
+  }
+}
+
 export function assertArtifactAccessChanges(changes, description) {
   const expected = [...DEPLOYMENT.handlers.map(([logicalId]) => ({
     action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
@@ -474,7 +562,9 @@ export function assertArtifactAccessChanges(changes, description) {
 
 function changeSetName(kind, packet) {
   const prefix = kind === "activate" ? "g15" : kind === "code" ? "gr12" :
-    kind === "engine" ? "gr13" : kind === "artifact-access" ? "gr14" : "g14";
+    kind === "engine" ? "gr13" : kind === "artifact-access" ? "gr14" :
+      kind === "provider-identity" ? "gr15" : kind === "lead-work-resume" ? "gr17" :
+        kind === "lead-memory" ? "gr18" : kind === "lead-bounded-extraction" ? "gr19" : "g14";
   return `${prefix}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
@@ -599,8 +689,14 @@ async function executeFull(options, packet) {
   const code = options.phase === "code";
   const engine = options.phase === "engine";
   const artifactAccess = options.phase === "artifact-access";
+  const providerIdentity = options.phase === "provider-identity";
+  const leadWorkResume = options.phase === "lead-work-resume";
+  const leadMemory = options.phase === "lead-memory";
+  const leadBoundedExtraction = options.phase === "lead-bounded-extraction";
   const name = changeSetName(activation ? "activate" : code ? "code" : engine ? "engine" :
-    artifactAccess ? "artifact-access" : "full", packet);
+    artifactAccess ? "artifact-access" : providerIdentity ? "provider-identity" :
+      leadWorkResume ? "lead-work-resume" : leadMemory ? "lead-memory" :
+        leadBoundedExtraction ? "lead-bounded-extraction" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
@@ -610,7 +706,11 @@ async function executeFull(options, packet) {
         code ? "Approved G-R12 Lambda code correction" :
           engine ? "Approved G-R13 Amazon Linux Prisma engine correction" :
             artifactAccess ? "Approved G-R14 scoped optional-artifact access correction" :
-            "Approved G14 disabled production pipeline"]);
+              providerIdentity ? "Approved G-R15 provider identity fallback correction" :
+                leadWorkResume ? "Approved G-R17 same-task lead-work recovery correction" :
+                  leadMemory ? "Approved G-R18 lead-worker memory correction" :
+                    leadBoundedExtraction ? "Approved G-R19 bounded invalid-mailto extraction correction" :
+                "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
   }
@@ -621,6 +721,10 @@ async function executeFull(options, packet) {
   else if (code) assertCodeChanges(changes, described);
   else if (engine) assertEngineChanges(changes, described);
   else if (artifactAccess) assertArtifactAccessChanges(changes, described);
+  else if (providerIdentity) assertProviderIdentityChanges(changes, described);
+  else if (leadWorkResume) assertLeadWorkResumeChanges(changes, described);
+  else if (leadMemory) assertLeadMemoryChanges(changes, described);
+  else if (leadBoundedExtraction) assertLeadBoundedExtractionChanges(changes, described);
   else assertFullChanges(changes, packet);
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(changeSetRecordPath, `${JSON.stringify({ approvalToken: packet.approvalToken,
@@ -628,6 +732,10 @@ async function executeFull(options, packet) {
   if (!options.applyReviewedChangeSet) return { outcome: activation ? "ACTIVATION_CHANGE_SET_REVIEWED" :
     code ? "CODE_CHANGE_SET_REVIEWED" : engine ? "ENGINE_CHANGE_SET_REVIEWED" :
       artifactAccess ? "ARTIFACT_ACCESS_CHANGE_SET_REVIEWED" :
+        providerIdentity ? "PROVIDER_IDENTITY_CHANGE_SET_REVIEWED" :
+          leadWorkResume ? "LEAD_WORK_RESUME_CHANGE_SET_REVIEWED" :
+            leadMemory ? "LEAD_MEMORY_CHANGE_SET_REVIEWED" :
+              leadBoundedExtraction ? "LEAD_BOUNDED_EXTRACTION_CHANGE_SET_REVIEWED" :
       "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
@@ -637,6 +745,10 @@ async function executeFull(options, packet) {
   aws(options, ["cloudformation", "wait", "stack-update-complete", "--stack-name", options.stack], { json: false });
   return { outcome: activation ? "ACTIVE_STACK_COMPLETE" : code ? "CODE_STACK_COMPLETE" :
     engine ? "ENGINE_STACK_COMPLETE" : artifactAccess ? "ARTIFACT_ACCESS_STACK_COMPLETE" :
+      providerIdentity ? "PROVIDER_IDENTITY_STACK_COMPLETE" :
+        leadWorkResume ? "LEAD_WORK_RESUME_STACK_COMPLETE" :
+          leadMemory ? "LEAD_MEMORY_STACK_COMPLETE" :
+            leadBoundedExtraction ? "LEAD_BOUNDED_EXTRACTION_STACK_COMPLETE" :
       "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 

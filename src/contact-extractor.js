@@ -241,8 +241,9 @@ function emailEvidence(
 
 function rawValueIndexes(html, value) {
   const indexes = [];
-  const lowerHtml = html.toLowerCase();
   const lowerValue = value.toLowerCase();
+  if (!lowerValue) return indexes;
+  const lowerHtml = html.toLowerCase();
   let start = 0;
   while (start < lowerHtml.length) {
     const index = lowerHtml.indexOf(lowerValue, start);
@@ -288,6 +289,7 @@ function associatedMailtoEvidence(html, sourceUrl, route) {
   for (const match of html.matchAll(/\bhref\s*=\s*(?:"(mailto:[^"]*)"|'(mailto:[^']*)'|(mailto:[^\s"'=<>]+))/gi)) {
     const href = decodeHtml(match[1] ?? match[2] ?? match[3] ?? "");
     const email = normalizeEmail(href);
+    if (!email) continue;
     const validationReason = emailAssociation(html, email, route, { explicitMailto: true });
     evidence.push(emailEvidence(href, sourceUrl, "mailto", 96, route, validationReason));
   }

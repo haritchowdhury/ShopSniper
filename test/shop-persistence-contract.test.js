@@ -7,7 +7,8 @@ import {
   parseRunStoreCandidate,
   parseShopLeadProfile,
   runStoreCandidateFromDiscovery,
-  stableShopIdentity
+  stableShopIdentity,
+  trafficProviderIdentities
 } from "../src/shop-persistence-contract.js";
 import { materializeLeadFromProfile } from "../src/pipeline.js";
 
@@ -115,6 +116,22 @@ test("verified identity and candidate persistence strip transient documents", ()
   assert.equal("initialFetch" in payload, false);
   assert.doesNotMatch(JSON.stringify(payload), /must not persist|must-not-persist/u);
   assert.deepEqual(parseRunStoreCandidate(payload), payload);
+});
+
+test("traffic provider identities use the verified hostname when canonical URL is absent", () => {
+  const input = candidate();
+  input.canonicalUrl = "";
+  const identity = stableShopIdentity(input);
+  assert.deepEqual(trafficProviderIdentities(identity), {
+    hostname: "fixture.example",
+    origin: "https://fixture.example"
+  });
+
+  identity.resolvedDomain = null;
+  assert.deepEqual(trafficProviderIdentities(identity), {
+    hostname: "fixture.myshopify.com",
+    origin: "https://fixture.myshopify.com"
+  });
 });
 
 test("unverified identities, raw documents, secrets, and run-owned profile data fail closed", () => {

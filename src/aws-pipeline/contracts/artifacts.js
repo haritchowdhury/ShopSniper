@@ -1,7 +1,8 @@
 import { z } from "zod";
 import {
   parseRunStoreCandidate, parseShopLeadProfile, parseStableShopIdentity,
-  runStoreCandidateSchema, shopLeadProfileSchema, runStoreId, shopIdForStableKey
+  runStoreCandidateSchema, shopLeadProfileSchema, runStoreId, shopIdForStableKey,
+  trafficProviderIdentities
 } from "../../shop-persistence-contract.js";
 import { leadRecordToCreate, leadTrafficEnrichmentRecordToCreate, trafficCacheRecordToUpsert } from
   "../../api-serializer.js";
@@ -146,13 +147,13 @@ export const domainStageManifestSchema = z.object({ contractVersion: z.literal("
         [entry.sourceKeys.cruxRest, "crux-rest"], [entry.sourceKeys.cruxBigQuery, "crux-bigquery"]
       ];
       const expectedIdentity = expected?.identity;
-      let expectedOrigin = null;
-      try { expectedOrigin = expectedIdentity?.canonicalUrl ? new URL(expectedIdentity.canonicalUrl).origin : null; } catch {}
+      let expectedProviderIdentity = null;
+      try { expectedProviderIdentity = expectedIdentity ? trafficProviderIdentities(expectedIdentity) : null; } catch {}
       for (const [key, source] of expectedSources) {
         const sourceMatches = key.source.replaceAll("_", "-") === source;
         const identityMatches = source === "dataforseo"
-          ? key.identity === expectedIdentity?.resolvedDomain
-          : expectedOrigin != null && key.identity === expectedOrigin;
+          ? key.identity === expectedProviderIdentity?.hostname
+          : key.identity === expectedProviderIdentity?.origin;
         if (!sourceMatches || !identityMatches) context.addIssue({ code: "custom", message: "source key" });
       }
     }

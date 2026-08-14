@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertCodeChanges, assertEngineChanges,
+  assertLeadBoundedExtractionChanges, assertLeadMemoryChanges, assertLeadWorkResumeChanges,
+  assertProviderIdentityChanges,
   buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
@@ -68,12 +70,13 @@ function validate(candidate) {
     assert.equal(dlq.SqsManagedSseEnabled, true);
   }
 
-  const functions = { DiscoveryWorker: [300, 1], DomainAggregator: [300, 2], LeadWorker: [90, 2],
-    LeadAggregator: [300, 2], TrafficWorker: [900, 1], FinalAggregator: [300, 2], Recovery: [300, 1] };
-  for (const [id, [timeout, reservedConcurrency]] of Object.entries(functions)) {
+  const functions = { DiscoveryWorker: [300, 1, 512], DomainAggregator: [300, 2, 512],
+    LeadWorker: [90, 2, 512], LeadAggregator: [300, 2, 512], TrafficWorker: [900, 1, 512],
+    FinalAggregator: [300, 2, 512], Recovery: [300, 1, 512] };
+  for (const [id, [timeout, reservedConcurrency, memorySize]] of Object.entries(functions)) {
     const fn = resources[id].Properties;
     assert.equal(fn.Runtime, "nodejs24.x");
-    assert.equal(fn.MemorySize, 512);
+    assert.equal(fn.MemorySize, memorySize);
     assert.equal(fn.Timeout, timeout);
     assert.equal(fn.ReservedConcurrentExecutions, reservedConcurrency);
     assert.equal(fn.EphemeralStorage.Size, 512);
@@ -232,7 +235,8 @@ test("deployment constants stay aligned with the packet", () => {
   assert.deepEqual(DEPLOYMENT, {
     profile: "storesignal-dev", region: "ap-south-2", stack: "storesignal-production-pipeline",
     environment: "production",
-    phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access"],
+    phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
+      "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -324,6 +328,58 @@ test("G-R13 change-set guard allows only code and the two Recovery dependencies"
     Target: { Name: "ReservedConcurrentExecutions", RequiresRecreation: "Never" }
   });
   assert.throws(() => assertEngineChanges(changes, unexpectedConcurrency), /Engine code detail drift/u);
+  assert.doesNotThrow(() => assertProviderIdentityChanges(changes, description));
+  assert.throws(() => assertProviderIdentityChanges(changes, unexpectedConcurrency),
+    /Provider-identity code detail drift/u);
+  assert.doesNotThrow(() => assertLeadWorkResumeChanges(changes, description));
+  assert.throws(() => assertLeadWorkResumeChanges(changes, unexpectedConcurrency),
+    /Lead-work-resume code detail drift/u);
+});
+
+test("G-R18 change-set guard allows only LeadWorker memory", () => {
+  const changes = [{ action: "Modify", logicalId: "LeadWorker",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  const description = { Changes: [{ ResourceChange: { LogicalResourceId: "LeadWorker", Details: [{
+    Evaluation: "Static", ChangeSource: "DirectModification",
+    Target: { Name: "MemorySize", RequiresRecreation: "Never" }
+  }] } }] };
+  assert.doesNotThrow(() => assertLeadMemoryChanges(changes, description));
+  const extra = clone(changes);
+  extra.push({ action: "Modify", logicalId: "Recovery",
+    type: "AWS::Lambda::Function", replacement: "False" });
+  assert.throws(() => assertLeadMemoryChanges(extra, description), /Lead-memory change-set inventory/u);
+  const wrongDetail = clone(description);
+  wrongDetail.Changes[0].ResourceChange.Details[0].Target.Name = "Timeout";
+  assert.throws(() => assertLeadMemoryChanges(changes, wrongDetail), /Lead-memory change detail drift/u);
+});
+
+test("G-R19 guard allows only affected code and LeadWorker memory", () => {
+  const changes = ["DiscoveryWorker", "LeadWorker"].map((logicalId) => ({
+    action: "Modify", logicalId, type: "AWS::Lambda::Function", replacement: "False"
+  })).sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const description = { Changes: ["DiscoveryWorker", "LeadWorker"].map((logicalId) => ({ ResourceChange: {
+    LogicalResourceId: logicalId,
+    Details: [
+      { Evaluation: "Static", ChangeSource: "ParameterReference",
+        CausingEntity: `${logicalId}CodeKey`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Static", ChangeSource: "ParameterReference",
+        CausingEntity: `${logicalId}CodeVersion`, Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+        Target: { Name: "Code", RequiresRecreation: "Never" } },
+      ...(logicalId === "LeadWorker" ? [{ Evaluation: "Static", ChangeSource: "DirectModification",
+        Target: { Name: "MemorySize", RequiresRecreation: "Never" } }] : [])
+    ]
+  } })) };
+  assert.doesNotThrow(() => assertLeadBoundedExtractionChanges(changes, description));
+  const missingMemory = clone(description);
+  missingMemory.Changes.find(({ ResourceChange }) =>
+    ResourceChange.LogicalResourceId === "LeadWorker").ResourceChange.Details.pop();
+  assert.throws(() => assertLeadBoundedExtractionChanges(changes, missingMemory),
+    /Lead-bounded-extraction detail drift/u);
+  const extra = clone(changes);
+  extra.push({ action: "Modify", logicalId: "LeadWorkerRole", type: "AWS::IAM::Role", replacement: "False" });
+  assert.throws(() => assertLeadBoundedExtractionChanges(extra, description),
+    /Lead-bounded-extraction inventory/u);
 });
 
 test("G-R14 change-set guard allows only shared adapter code, scoped artifact policies, and dependencies", () => {

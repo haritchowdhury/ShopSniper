@@ -59,7 +59,8 @@ import {
   parseStableShopIdentity,
   runStoreId,
   shopIdForStableKey,
-  shopWorkId
+  shopWorkId,
+  trafficProviderIdentities
 } from "./shop-persistence-contract.js";
 
 const ACTIVE_STATES = ["queued", "running"];
@@ -1325,19 +1326,20 @@ export class PrismaRunRepository {
       const awsProviderConfig = parseAwsProviderConfig(owned.run.awsProviderConfig);
       const shopIds = input.domains.map((domain) => domain.shopId);
       const exactKeys = input.domains.flatMap((domain) => {
-        const origin = new URL(domain.identity.canonicalUrl).origin;
+        const providerIdentity = trafficProviderIdentities(domain.identity);
         return [
           ...trafficSnapshot.dataForSeo.scopes.map((scope) => ({ source: "dataforseo",
-            identity: domain.identity.resolvedDomain,
+            identity: providerIdentity.hostname,
             scopeKey: typeof scope === "string" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}`,
             metricSetKey: trafficSnapshot.dataForSeo.metricSetKey,
             contractVersion: trafficSnapshot.dataForSeo.contractVersion })),
-          { source: "crux_rest", identity: origin, scopeKey: "current",
+          { source: "crux_rest", identity: providerIdentity.origin, scopeKey: "current",
             metricSetKey: trafficSnapshot.crux.rest.metricSetKey,
             contractVersion: trafficSnapshot.crux.rest.contractVersion }
         ];
       });
-      const bigQueryOrigins = input.domains.map((domain) => new URL(domain.identity.canonicalUrl).origin);
+      const bigQueryOrigins = input.domains.map((domain) =>
+        trafficProviderIdentities(domain.identity).origin);
       const profiles = await transaction.shopLeadProfile.findMany({
         where: { shopId: { in: shopIds }, state: "completed", updatedAt: { lte: input.evaluatedAt } },
         orderBy: { shopId: "asc" }
@@ -1938,6 +1940,8 @@ export class PrismaRunRepository {
       if (work.state === "ambiguous") return { outcome: "ambiguous", safeErrorCode: work.safeErrorCode };
       if (work.state === "failed" && work.processingRunId === runIdentifier)
         return { outcome: "failed", safeErrorCode: work.safeErrorCode };
+      if (work.state === "processing" && work.processingPipelineTaskId === taskId)
+        return { outcome: "owned" };
       let active = false;
       if (work.state === "processing" && work.processingPipelineTaskId) {
         const ownerTask = await transaction.pipelineTask.findUnique({ where: { id: work.processingPipelineTaskId },

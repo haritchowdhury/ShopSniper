@@ -102,6 +102,8 @@ test("zero-domain aggregation writes the deterministic manifest and advances an 
 test("one-domain aggregation writes strict candidate and work-plan artifacts before checkpoint dispatch", async () => {
   const confirmed = await load("confirmed-query-manifest.valid.json");
   const discovery = await load("per-query-discovery.valid.json");
+  discovery.stores[0].identity.canonicalUrl = null;
+  discovery.stores[0].candidatePayload.canonicalUrl = "";
   confirmed.queries = [confirmed.queries.find((query) => query.id === discovery.queryId) || confirmed.queries[0]];
   confirmed.queries[0].id = discovery.queryId;
   confirmed.queries[0].sequence = 0;
@@ -147,6 +149,12 @@ test("one-domain aggregation writes strict candidate and work-plan artifacts bef
   assert.equal(writes[1].contractVersion, "domain-stage-manifest-v1");
   assert.equal(writes[1].value.workPlan.domains.length, 1);
   assert.equal(writes[1].value.workPlan.domains[0].needsLead, true);
+  assert.equal(writes[1].value.workPlan.domains[0].sourceKeys.dataForSeo[0].identity,
+    discovery.stores[0].candidatePayload.resolvedDomain);
+  assert.equal(writes[1].value.workPlan.domains[0].sourceKeys.cruxRest.identity,
+    `https://${discovery.stores[0].candidatePayload.resolvedDomain}`);
+  assert.equal(writes[1].value.workPlan.domains[0].sourceKeys.cruxBigQuery.identity,
+    `https://${discovery.stores[0].candidatePayload.resolvedDomain}`);
   assert.equal(checkpoint.domains.length, 1);
   assert.equal(checkpoint.leadTasks.length, 1);
 });

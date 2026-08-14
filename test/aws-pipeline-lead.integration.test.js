@@ -48,6 +48,25 @@ test("G9 atomically claims global lead work for the live PipelineTask and fences
       assert.equal(await prisma.shopLeadProfile.count({ where: { shopId } }), 0);
       assert.deepEqual(await repository.claimAwsLeadWork({ runId, generation: 1,
         taskId: claimed.task.id, taskToken: token, shopId }, new Date(now.getTime() + 3)),
+      { outcome: "owned" });
+      await assert.rejects(repository.claimAwsLeadWork({ runId, generation: 1,
+        taskId: claimed.task.id, taskToken: randomUUID(), shopId }, new Date(now.getTime() + 4)),
+      (error) => error.code === "PIPELINE_LEASE_LOST");
+
+      const competingRunId = "run_g9_lead_competing_fixture";
+      await prisma.run.create({ data: { id: competingRunId, ownerId: "g9_competitor", state: "running",
+        phase: "scraping", stage: "aws_lead", normalizedShopTypes: [], progress: {},
+        executionBackend: "aws", pipelineGeneration: 1, resultsAvailable: false } });
+      await coordinator.registerStage({ runId: competingRunId, stage: "lead", generation: 1,
+        manifestS3Key: `runs/${competingRunId}/domains-manifest.json`, manifestFingerprint: fp("c"),
+        manifestProducedAt: now, tasks: [{ itemKey: shopId, inputFingerprint: fp("d") }] }, now);
+      const competingToken = randomUUID();
+      const competing = await coordinator.claimTask({ runId: competingRunId, stage: "lead", generation: 1,
+        itemKey: shopId, inputFingerprint: fp("d"), owner: "g9-competing-worker", token: competingToken,
+        leaseDurationMs: 60000 }, new Date(now.getTime() + 5));
+      assert.equal(competing.outcome, "owned");
+      assert.deepEqual(await repository.claimAwsLeadWork({ runId: competingRunId, generation: 1,
+        taskId: competing.task.id, taskToken: competingToken, shopId }, new Date(now.getTime() + 6)),
       { outcome: "busy" });
     } finally {
       await prisma?.$disconnect();

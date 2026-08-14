@@ -3,7 +3,7 @@ import { trafficCacheRecordToUpsert } from "../../api-serializer.js";
 import { mergeRunStoreCandidatePayloads } from "../../discovery-aggregation.js";
 import {
   parseRunStoreCandidate, parseShopLeadProfile, runStoreId, shopIdForStableKey,
-  stableShopIdentity
+  stableShopIdentity, trafficProviderIdentities
 } from "../../shop-persistence-contract.js";
 import {
   confirmedQueryManifestSchema, domainCandidateArtifactSchema, domainStageManifestSchema,
@@ -103,7 +103,9 @@ export async function processDomainAggregation(message, runtime, {
     }
     const traffic = reuse.trafficSnapshot;
     const bigRows = reuse.latestCruxMonth;
-    const origins = domains.map((domain) => new URL(domain.identity.canonicalUrl).origin);
+    const providerIdentities = new Map(domains.map((domain) =>
+      [domain.shopId, trafficProviderIdentities(domain.identity)]));
+    const origins = domains.map((domain) => providerIdentities.get(domain.shopId).origin);
     const monthCounts = new Map();
     for (const row of bigRows) {
       if (!origins.includes(row.identity)) continue;
@@ -113,10 +115,11 @@ export async function processDomainAggregation(message, runtime, {
     const latestMonth = [...monthCounts].filter(([, found]) => found.size === new Set(origins).size)
       .map(([month]) => month).sort().at(-1) || null;
     const planned = domains.map((domain) => {
-      const origin = new URL(domain.identity.canonicalUrl).origin;
+      const providerIdentity = providerIdentities.get(domain.shopId);
+      const origin = providerIdentity.origin;
       const dataForSeo = traffic.dataForSeo.scopes.map((scope) => {
         const scopeKey = typeof scope === "string" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}`;
-        const key = { source: "dataforseo", identity: domain.identity.resolvedDomain, scopeKey,
+        const key = { source: "dataforseo", identity: providerIdentity.hostname, scopeKey,
           metricSetKey: traffic.dataForSeo.metricSetKey, contractVersion: traffic.dataForSeo.contractVersion };
         return { ...key, reuse: cache.get(exactKey(key)) || null };
       });

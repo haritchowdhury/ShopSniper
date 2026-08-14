@@ -221,6 +221,17 @@ export function parseStableShopIdentity(value) {
   return parsed;
 }
 
+export function trafficProviderIdentities(value) {
+  const identity = parseStableShopIdentity(value);
+  const hostname = identity.resolvedDomain || identity.stableKey;
+  let origin = null;
+  if (identity.canonicalUrl) {
+    const canonical = new URL(identity.canonicalUrl);
+    if (canonical.protocol === "https:") origin = canonical.origin;
+  }
+  return Object.freeze({ hostname, origin: origin || `https://${hostname}` });
+}
+
 export function runStoreCandidateFromDiscovery(candidate, assessments = []) {
   const intents = candidate.categoryIntents?.length
     ? candidate.categoryIntents

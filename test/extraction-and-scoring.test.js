@@ -52,6 +52,30 @@ test("normalizers reject implausible values", () => {
   assert.equal(validateEmailCandidate("noreply@fictional-shop.dev").accepted, false);
 });
 
+test("invalid mailto values terminate without evidence while valid mailto remains unchanged", () => {
+  for (const href of ["mailto:", "mailto:?subject=hello", "mailto:not-an-email"]) {
+    const page = extractContactEvidence({
+      url: "https://fictional-shop.dev/pages/contact",
+      html: `<main><a href="${href}">Email</a></main>`
+    });
+    assert.deepEqual(page.emails, []);
+    assert.deepEqual(page.evidence.emails, []);
+  }
+  const valid = extractContactEvidence({
+    url: "https://fictional-shop.dev/pages/contact",
+    html: '<main><a href="mailto:Hello@Fictional-Shop.dev?subject=Hi">Email</a></main>'
+  });
+  assert.equal(valid.evidence.emails.length, 1);
+  assert.deepEqual(valid.evidence.emails[0], {
+    kind: "email",
+    value: "hello@fictional-shop.dev",
+    sourceUrl: "https://fictional-shop.dev/pages/contact",
+    method: "mailto",
+    confidence: 100,
+    validationReason: "store_owned_contact_page_mailto"
+  });
+});
+
 test("contact routes reject keyword-bearing commerce and asset paths", () => {
   const rejected = [
     "/products/customer-support-widget",
