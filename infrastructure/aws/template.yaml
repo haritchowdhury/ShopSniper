@@ -1,0 +1,3234 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::Serverless-2016-10-31",
+  "Description": "StoreSignal production Lambda-SQS-S3 pipeline; all sources disabled at G14.",
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "AllowedValues": [
+        "production"
+      ],
+      "Default": "production"
+    },
+    "ArtifactBucketName": {
+      "Type": "String",
+      "AllowedPattern": "^storesignal-prod-pipeline-[0-9]{12}-ap-south-2$"
+    },
+    "DiscoveryWorkerCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/discovery-worker\\.zip$"
+    },
+    "DiscoveryWorkerCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "DomainAggregatorCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/domain-aggregator\\.zip$"
+    },
+    "DomainAggregatorCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "LeadWorkerCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/lead-worker\\.zip$"
+    },
+    "LeadWorkerCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "LeadAggregatorCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/lead-aggregator\\.zip$"
+    },
+    "LeadAggregatorCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "TrafficWorkerCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/traffic-worker\\.zip$"
+    },
+    "TrafficWorkerCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "FinalAggregatorCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/final-aggregator\\.zip$"
+    },
+    "FinalAggregatorCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "RecoveryCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/recovery\\.zip$"
+    },
+    "RecoveryCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    }
+  },
+  "Resources": {
+    "ArtifactBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BucketName": {
+          "Ref": "ArtifactBucketName"
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              },
+              "BucketKeyEnabled": false
+            }
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "IgnorePublicAcls": true,
+          "BlockPublicPolicy": true,
+          "RestrictPublicBuckets": true
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "Id": "AbortIncompleteMultipartUploads",
+              "Status": "Enabled",
+              "AbortIncompleteMultipartUpload": {
+                "DaysAfterInitiation": 7
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "DataClassification",
+            "Value": "private"
+          }
+        ],
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        }
+      }
+    },
+    "ArtifactBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "ArtifactBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyInsecureTransport",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ArtifactBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ArtifactBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            },
+            {
+              "Sid": "DenyIncorrectEncryption",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:PutObject",
+              "Resource": {
+                "Fn::Sub": "${ArtifactBucket.Arn}/*"
+              },
+              "Condition": {
+                "StringNotEquals": {
+                  "s3:x-amz-server-side-encryption": "AES256"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "DiscoveryDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "DiscoveryCheckDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-check-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "LeadDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-lead-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "LeadCheckDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-lead-check-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "TrafficDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "TrafficCheckDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-check-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "DiscoveryQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-discovery"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 1800,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DiscoveryDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "DiscoveryCheckQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-check"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 1800,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DiscoveryCheckDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "LeadQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-lead"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 540,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "LeadDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "LeadCheckQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-lead-check"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 1800,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "LeadCheckDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "TrafficQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-traffic"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 5410,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "TrafficDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "TrafficCheckQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-check"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 1800,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "TrafficCheckDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
+          }
+        ]
+      }
+    },
+    "PipelineSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Name": "/storesignal/production/aws-pipeline",
+        "Description": "Empty G14 secret container; G15 installs the strict pipeline JSON value.",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryWorkerLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-discovery-worker"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "DiscoveryWorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-discovery-worker:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "DiscoveryQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "DiscoveryCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/queries/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/queries/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "DomainAggregatorLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-domain-aggregator"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "DomainAggregatorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-domain-aggregator:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "DiscoveryCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "LeadQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "LeadCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/queries/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "LeadWorkerLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-lead-worker"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "LeadWorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-lead-worker:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "LeadQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "LeadCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "LeadAggregatorLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-lead-aggregator"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "LeadAggregatorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-lead-aggregator:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "LeadCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "TrafficWorkerLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-traffic-worker"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "TrafficWorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-traffic-worker:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/traffic-batches/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/traffic-batches/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "FinalAggregatorLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-final-aggregator"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "FinalAggregatorRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-final-aggregator:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains-manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/domains/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/traffic-batches/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "RecoveryLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-recovery"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "RecoveryRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-recovery:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "DiscoveryQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DiscoveryCheckQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "LeadQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "LeadCheckQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "TrafficCheckQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "ControlPlanePolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Unattached least-privilege policy for the existing StoreSignal control plane.",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ReadPipelineSecret",
+              "Effect": "Allow",
+              "Action": [
+                "secretsmanager:GetSecretValue"
+              ],
+              "Resource": {
+                "Ref": "PipelineSecret"
+              }
+            },
+            {
+              "Sid": "ReadWriteQueryArtifacts",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/queries/*"
+                },
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/*/query-probes/*"
+                }
+              ]
+            },
+            {
+              "Sid": "StartDiscoveryOnly",
+              "Effect": "Allow",
+              "Action": [
+                "sqs:SendMessage"
+              ],
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DiscoveryQueue",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "DiscoveryCheckQueue",
+                    "Arn"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "DiscoveryWorker": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "DiscoveryWorkerLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-worker"
+        },
+        "Description": "StoreSignal discovery-worker pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "DiscoveryWorkerCodeKey"
+          },
+          "Version": {
+            "Ref": "DiscoveryWorkerCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 300,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "DiscoveryWorkerRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "DomainAggregator": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "DomainAggregatorLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-domain-aggregator"
+        },
+        "Description": "StoreSignal domain-aggregator pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "DomainAggregatorCodeKey"
+          },
+          "Version": {
+            "Ref": "DomainAggregatorCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 300,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 2,
+        "Role": {
+          "Fn::GetAtt": [
+            "DomainAggregatorRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "LeadWorker": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "LeadWorkerLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-lead-worker"
+        },
+        "Description": "StoreSignal lead-worker pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "LeadWorkerCodeKey"
+          },
+          "Version": {
+            "Ref": "LeadWorkerCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 90,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 2,
+        "Role": {
+          "Fn::GetAtt": [
+            "LeadWorkerRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "LeadAggregator": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "LeadAggregatorLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-lead-aggregator"
+        },
+        "Description": "StoreSignal lead-aggregator pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "LeadAggregatorCodeKey"
+          },
+          "Version": {
+            "Ref": "LeadAggregatorCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 300,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 2,
+        "Role": {
+          "Fn::GetAtt": [
+            "LeadAggregatorRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "TrafficWorker": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "TrafficWorkerLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-worker"
+        },
+        "Description": "StoreSignal traffic-worker pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "TrafficWorkerCodeKey"
+          },
+          "Version": {
+            "Ref": "TrafficWorkerCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 900,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "TrafficWorkerRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "FinalAggregator": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "FinalAggregatorLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-final-aggregator"
+        },
+        "Description": "StoreSignal final-aggregator pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "FinalAggregatorCodeKey"
+          },
+          "Version": {
+            "Ref": "FinalAggregatorCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 300,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 2,
+        "Role": {
+          "Fn::GetAtt": [
+            "FinalAggregatorRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "Recovery": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "RecoveryLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-recovery"
+        },
+        "Description": "StoreSignal recovery pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "RecoveryCodeKey"
+          },
+          "Version": {
+            "Ref": "RecoveryCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 512,
+        "Timeout": 300,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "RecoveryRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "DiscoveryMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "DiscoveryQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "DiscoveryWorker"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ]
+      }
+    },
+    "DomainAggregationMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "DiscoveryCheckQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "DomainAggregator"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "LeadMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "LeadQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "LeadWorker"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "LeadAggregationMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "LeadCheckQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "LeadAggregator"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "TrafficMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "TrafficQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "TrafficWorker"
+        },
+        "BatchSize": 1000,
+        "MaximumBatchingWindowInSeconds": 10,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ]
+      }
+    },
+    "FinalAggregationMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": false,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "TrafficCheckQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "FinalAggregator"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "RecoverySchedule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${AWS::StackName}-recovery"
+        },
+        "Description": "Disabled five-minute StoreSignal pipeline recovery scan.",
+        "ScheduleExpression": "rate(5 minutes)",
+        "State": "DISABLED",
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "Recovery",
+                "Arn"
+              ]
+            },
+            "Id": "RecoveryLambda",
+            "Input": "{\"limit\":100}"
+          }
+        ]
+      }
+    },
+    "RecoveryInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "Recovery"
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "RecoverySchedule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "DiscoveryDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DiscoveryDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DiscoveryQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryCheckDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-check-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DiscoveryCheckDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryCheckOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-check-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DiscoveryCheckQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LeadDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "LeadDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LeadOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "LeadQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LeadCheckDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-check-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "LeadCheckDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LeadCheckOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-check-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "LeadCheckQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TrafficDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "TrafficDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TrafficOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "TrafficQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TrafficCheckDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-check-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "TrafficCheckDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TrafficCheckOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-check-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "TrafficCheckQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryWorkerErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-worker-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "DiscoveryWorker"
+            }
+          }
+        ]
+      }
+    },
+    "DiscoveryWorkerThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-discovery-worker-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "DiscoveryWorker"
+            }
+          }
+        ]
+      }
+    },
+    "DomainAggregatorErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-domain-aggregator-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "DomainAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "DomainAggregatorThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-domain-aggregator-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "DomainAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "LeadWorkerErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-worker-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "LeadWorker"
+            }
+          }
+        ]
+      }
+    },
+    "LeadWorkerThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-worker-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "LeadWorker"
+            }
+          }
+        ]
+      }
+    },
+    "LeadAggregatorErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-aggregator-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "LeadAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "LeadAggregatorThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-lead-aggregator-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "LeadAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "TrafficWorkerErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-worker-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "TrafficWorker"
+            }
+          }
+        ]
+      }
+    },
+    "TrafficWorkerThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-traffic-worker-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "TrafficWorker"
+            }
+          }
+        ]
+      }
+    },
+    "FinalAggregatorErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-final-aggregator-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "FinalAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "FinalAggregatorThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-final-aggregator-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "FinalAggregator"
+            }
+          }
+        ]
+      }
+    },
+    "RecoveryErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-recovery-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "Recovery"
+            }
+          }
+        ]
+      }
+    },
+    "RecoveryThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-recovery-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "Recovery"
+            }
+          }
+        ]
+      }
+    },
+    "RecoveryRuleFailureAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-recovery-rule-failed-invocations"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "FailedInvocations",
+        "Namespace": "AWS/Events",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "RuleName",
+            "Value": {
+              "Ref": "RecoverySchedule"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ArtifactBucketName": {
+      "Value": {
+        "Ref": "ArtifactBucket"
+      }
+    },
+    "ArtifactBucketArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ArtifactBucket",
+          "Arn"
+        ]
+      }
+    },
+    "PipelineSecretArn": {
+      "Value": {
+        "Ref": "PipelineSecret"
+      }
+    },
+    "ControlPlanePolicyArn": {
+      "Value": {
+        "Ref": "ControlPlanePolicy"
+      }
+    },
+    "RecoveryScheduleName": {
+      "Value": {
+        "Ref": "RecoverySchedule"
+      }
+    },
+    "DiscoveryQueueUrl": {
+      "Value": {
+        "Ref": "DiscoveryQueue"
+      }
+    },
+    "DiscoveryQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DiscoveryQueue",
+          "Arn"
+        ]
+      }
+    },
+    "DiscoveryDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DiscoveryDlq",
+          "Arn"
+        ]
+      }
+    },
+    "DiscoveryCheckQueueUrl": {
+      "Value": {
+        "Ref": "DiscoveryCheckQueue"
+      }
+    },
+    "DiscoveryCheckQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DiscoveryCheckQueue",
+          "Arn"
+        ]
+      }
+    },
+    "DiscoveryCheckDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DiscoveryCheckDlq",
+          "Arn"
+        ]
+      }
+    },
+    "LeadQueueUrl": {
+      "Value": {
+        "Ref": "LeadQueue"
+      }
+    },
+    "LeadQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadQueue",
+          "Arn"
+        ]
+      }
+    },
+    "LeadDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadDlq",
+          "Arn"
+        ]
+      }
+    },
+    "LeadCheckQueueUrl": {
+      "Value": {
+        "Ref": "LeadCheckQueue"
+      }
+    },
+    "LeadCheckQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadCheckQueue",
+          "Arn"
+        ]
+      }
+    },
+    "LeadCheckDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadCheckDlq",
+          "Arn"
+        ]
+      }
+    },
+    "TrafficQueueUrl": {
+      "Value": {
+        "Ref": "TrafficQueue"
+      }
+    },
+    "TrafficQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "TrafficQueue",
+          "Arn"
+        ]
+      }
+    },
+    "TrafficDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "TrafficDlq",
+          "Arn"
+        ]
+      }
+    },
+    "TrafficCheckQueueUrl": {
+      "Value": {
+        "Ref": "TrafficCheckQueue"
+      }
+    },
+    "TrafficCheckQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "TrafficCheckQueue",
+          "Arn"
+        ]
+      }
+    },
+    "TrafficCheckDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "TrafficCheckDlq",
+          "Arn"
+        ]
+      }
+    },
+    "DiscoveryWorkerFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DiscoveryWorker",
+          "Arn"
+        ]
+      }
+    },
+    "DomainAggregatorFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "DomainAggregator",
+          "Arn"
+        ]
+      }
+    },
+    "LeadWorkerFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadWorker",
+          "Arn"
+        ]
+      }
+    },
+    "LeadAggregatorFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "LeadAggregator",
+          "Arn"
+        ]
+      }
+    },
+    "TrafficWorkerFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "TrafficWorker",
+          "Arn"
+        ]
+      }
+    },
+    "FinalAggregatorFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "FinalAggregator",
+          "Arn"
+        ]
+      }
+    },
+    "RecoveryFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Recovery",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

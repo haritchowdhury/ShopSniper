@@ -2334,7 +2334,7 @@ export class PrismaRunRepository {
       if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return { run: await transaction.run.findUnique({ where: { id: input.runId } }),
         stage: await transaction.pipelineStage.findUnique({ where: { id: input.stageId } }), resultFingerprint };
-    });
+    }, { maxWait: 5_000, timeout: 90_000 });
   }
 
   async claimShopWork(

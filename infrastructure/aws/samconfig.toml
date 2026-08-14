@@ -1,0 +1,16 @@
+version = 0.1
+
+[production.validate.parameters]
+template_file = "infrastructure/aws/template.yaml"
+lint = true
+region = "ap-south-2"
+profile = "storesignal-dev"
+
+[production.build.parameters]
+template_file = "infrastructure/aws/template.yaml"
+build_dir = ".aws-sam/build"
+cached = false
+parallel = true
+
+# Deployment is intentionally absent. G14 uses the guarded change-set script;
+# `sam deploy` is not an authorized production mutation path.

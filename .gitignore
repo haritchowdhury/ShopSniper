@@ -9,4 +9,6 @@ data/*.tmp
 /My workflow 3.json
 /My workflow 4.json
 .lambda-build/
+.aws-sam/
 dist/lambda/
+dist/aws-deployment/
