@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createPrismaClient } from "../src/prisma-client.js";
+import { pipelineStageId, pipelineTaskId } from "../src/aws-pipeline/core/keys.js";
 import { PipelineCoordinatorRepository } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
 import { PrismaRunRepository, awsProviderConfigSnapshot,
   trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
@@ -11,6 +12,7 @@ import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { processTrafficBatch, trafficInputFingerprint } from "../src/aws-pipeline/services/traffic-worker.js";
 import { leadRecordToCreate } from "../src/api-serializer.js";
 import { runStoreId } from "../src/shop-persistence-contract.js";
+import { shopWorkId } from "../src/shop-persistence-contract.js";
 import { assertMigrationStayedInSchema, createIsolatedTestSchema,
   deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
@@ -154,6 +156,131 @@ test("G11 Run lease loads the complete task set and task-fences non-unique traff
       assert.ok(source.requestEvidence.every((evidence) => evidence.batchArtifactFingerprint ===
         ledgerByRequest.get(evidence.requestFingerprint)?.resultFingerprint));
       assert.equal((await prisma.pipelineTask.findUnique({ where: { id: registered.tasks[0].id } })).state, "succeeded");
+    } finally {
+      await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+    }
+  });
+
+test("G-R20 claims a positional mixed 1,000-row traffic corpus within the default transaction timeout",
+  { skip: !enabled, timeout: 180000 }, async () => {
+    const schema = `gr20_traffic_scale_${Date.now()}_${process.pid}`;
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    let prisma;
+    try {
+      deployPrismaMigrations(scopedUrl); prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
+      const repository = new PrismaRunRepository(prisma);
+      const now = new Date("2026-08-14T00:00:00.000Z");
+      const runId = "run_gr20_traffic_scale_0001";
+      const leaseToken = randomUUID();
+      const stageId = pipelineStageId(runId, "traffic_crux", 1);
+      const ownerKinds = ["fresh", "expired", "ambiguous", "failed", "pending", "same_task",
+        "live_task", "cancelled_task", "inactive_task", "live_legacy", "expired_legacy"];
+      const shops = Array.from({ length: 1000 }, (_, index) => ({
+        id: `shop_gr20_scale_${String(index).padStart(4, "0")}`,
+        stableKey: `domain:gr20-${index}.example`, canonicalUrl: `https://gr20-${index}.example`,
+        resolvedDomain: `gr20-${index}.example`
+      }));
+      const tasks = shops.map((shop) => ({ id: pipelineTaskId(stageId, shop.id), stageId,
+        itemKey: shop.id, inputFingerprint: fingerprintJson({ index: shop.id }) }));
+      await prisma.run.create({ data: { id: runId, state: "running", phase: "scraping",
+        stage: "aws_traffic_crux", normalizedShopTypes: [], progress: {}, executionBackend: "aws",
+        pipelineGeneration: 1, trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({}),
+        awsProviderConfig: {}, leaseOwner: "gr20", leaseToken, leaseAcquiredAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 60000), lastHeartbeatAt: now } });
+      await prisma.pipelineStage.create({ data: { id: stageId, runId, stage: "traffic_crux", generation: 1,
+        manifestS3Key: `runs/${runId}/domains-manifest.json`, manifestFingerprint: "a".repeat(64),
+        manifestProducedAt: now, expectedCount: shops.length } });
+      await prisma.shop.createMany({ data: shops });
+      await prisma.pipelineTask.createMany({ data: tasks });
+
+      const ownerRuns = [
+        { id: "run_gr20_live_task_owner_01", state: "running" },
+        { id: "run_gr20_cancelled_owner_01", state: "running" },
+        { id: "run_gr20_inactive_owner_01", state: "completed" }
+      ];
+      await prisma.run.createMany({ data: ownerRuns.map(({ id, state }) => ({ id, state, phase: state === "running"
+        ? "scraping" : "finished", stage: state === "running" ? "aws_traffic_crux" : "completed",
+      normalizedShopTypes: [], progress: {}, executionBackend: "aws", pipelineGeneration: 1 })) });
+      const ownerStages = ownerRuns.map(({ id }, index) => ({ id: pipelineStageId(id, "traffic_crux", 1), runId: id,
+        stage: "traffic_crux", generation: 1, manifestS3Key: `runs/${id}/domains-manifest.json`,
+        manifestFingerprint: String(index + 1).repeat(64), manifestProducedAt: now, expectedCount: 1 }));
+      await prisma.pipelineStage.createMany({ data: ownerStages });
+      const ownerTasks = ownerStages.map((stage, index) => ({ id: pipelineTaskId(stage.id, `owner_${index}`),
+        stageId: stage.id, itemKey: `owner_${index}`, inputFingerprint: String(index + 4).repeat(64),
+        state: index === 1 ? "cancelled" : "pending", ...(index === 1 ? { terminalAt: now } : {}) }));
+      await prisma.pipelineTask.createMany({ data: ownerTasks });
+      await prisma.run.createMany({ data: [
+        { id: "run_gr20_live_legacy_0001", state: "running", phase: "scraping", stage: "local",
+          normalizedShopTypes: [], progress: {}, leaseToken: "legacy-live", leaseExpiresAt: new Date(now.getTime() + 60000) },
+        { id: "run_gr20_expired_legacy_01", state: "running", phase: "scraping", stage: "local",
+          normalizedShopTypes: [], progress: {}, leaseToken: "legacy-expired", leaseExpiresAt: new Date(now.getTime() - 1) }
+      ] });
+
+      const selections = shops.map((shop) => ({ source: "crux_rest", identity: `https://${shop.resolvedDomain}`,
+        scopeKey: "current", metricSetKey: "gr20-metrics", contractVersion: "crux-origin-metrics-v1", reuse: null }));
+      const workRows = shops.map((shop, index) => {
+        const kind = ownerKinds[index % ownerKinds.length];
+        const base = { id: shopWorkId(shop.id, "crux_rest", "current"), shopId: shop.id,
+          workType: "crux_rest", scopeKey: "current", state: "pending" };
+        if (kind === "fresh" || kind === "expired") return { ...base, state: "completed", completedAt: now };
+        if (kind === "ambiguous") return { ...base, state: "ambiguous" };
+        if (kind === "failed") return { ...base, state: "failed" };
+        if (kind === "same_task") return { ...base, state: "processing", processingRunId: runId,
+          processingPipelineTaskId: tasks[index].id, startedAt: now };
+        if (kind === "live_task" || kind === "cancelled_task" || kind === "inactive_task") {
+          const ownerIndex = { live_task: 0, cancelled_task: 1, inactive_task: 2 }[kind];
+          return { ...base, state: "processing", processingRunId: ownerRuns[ownerIndex].id,
+            processingPipelineTaskId: ownerTasks[ownerIndex].id, startedAt: now };
+        }
+        if (kind === "live_legacy") return { ...base, state: "processing",
+          processingRunId: "run_gr20_live_legacy_0001", processingLeaseToken: "legacy-live", startedAt: now };
+        if (kind === "expired_legacy") return { ...base, state: "processing",
+          processingRunId: "run_gr20_expired_legacy_01", processingLeaseToken: "legacy-expired", startedAt: now };
+        return base;
+      });
+      await prisma.shopWork.createMany({ data: workRows });
+      const cacheRows = shops.flatMap((shop, index) => ["fresh", "expired"].includes(ownerKinds[index % ownerKinds.length])
+        ? [{ id: `cache_gr20_${index}`, source: "crux_rest", identity: selections[index].identity,
+          scopeKey: "current", metricSetKey: "gr20-metrics", contractVersion: "crux-origin-metrics-v1",
+          state: "available", normalizedPayload: { index }, fetchedAt: new Date(now.getTime() - 1000),
+          expiresAt: ownerKinds[index % ownerKinds.length] === "fresh" ? new Date(now.getTime() + 60000)
+            : new Date(now.getTime() - 1) }] : []);
+      await prisma.trafficEnrichmentCache.createMany({ data: cacheRows });
+      const claims = shops.map((shop, index) => ({ shopId: shop.id, pipelineTaskId: tasks[index].id,
+        selection: selections[index] }));
+      const expected = ownerKinds.map((kind) => kind === "fresh" ? "completed" : kind === "ambiguous"
+        ? "ambiguous" : ["live_task", "live_legacy"].includes(kind) ? "busy" : "owned");
+      const before = Date.now();
+      const outcomes = await repository.claimAwsTrafficWorkBatch({ runId, generation: 1,
+        runLease: { token: leaseToken }, claims }, now);
+      assert.ok(Date.now() - before < 5000);
+      assert.deepEqual(outcomes.map(({ outcome }) => outcome),
+        shops.map((_, index) => expected[index % ownerKinds.length]));
+      assert.deepEqual(outcomes.map(({ shopId }) => shopId), shops.map(({ id }) => id));
+      assert.equal(outcomes.filter(({ outcome }) => outcome === "completed").every(({ cacheRows: rows }) =>
+        rows.length === 1 && rows[0].expiresAt > now), true);
+      const afterRows = await prisma.shopWork.findMany({ where: { shopId: { in: shops.map(({ id }) => id) } } });
+      const afterByShop = new Map(afterRows.map((row) => [row.shopId, row]));
+      const updatedIds = new Set(shops.filter((_, index) => ["expired", "failed", "pending", "cancelled_task",
+        "inactive_task", "expired_legacy"].includes(ownerKinds[index % ownerKinds.length]))
+      .map(({ id }) => shopWorkId(id, "crux_rest", "current")));
+      assert.deepEqual(new Set(afterRows.filter((row) => row.processingPipelineTaskId ===
+        tasks[shops.findIndex(({ id }) => id === row.shopId)]?.id && updatedIds.has(row.id)).map(({ id }) => id)), updatedIds);
+      for (let index = 0; index < shops.length; index += 1) {
+        const kind = ownerKinds[index % ownerKinds.length]; const row = afterByShop.get(shops[index].id);
+        if (kind === "live_task") assert.equal(row.processingPipelineTaskId, ownerTasks[0].id);
+        if (kind === "live_legacy") assert.equal(row.processingLeaseToken, "legacy-live");
+      }
+      const replay = await repository.claimAwsTrafficWorkBatch({ runId, generation: 1,
+        runLease: { token: leaseToken }, claims }, new Date(now.getTime() + 1));
+      assert.deepEqual(replay.map(({ outcome }) => outcome), outcomes.map(({ outcome }) => outcome));
+      await prisma.run.update({ where: { id: runId }, data: { leaseExpiresAt: now } });
+      await assert.rejects(repository.claimAwsTrafficWorkBatch({ runId, generation: 1,
+        runLease: { token: leaseToken }, claims: [claims[0]] }, new Date(now.getTime() + 2)),
+      /PIPELINE_LEASE_LOST/u);
     } finally {
       await prisma?.$disconnect();
       await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

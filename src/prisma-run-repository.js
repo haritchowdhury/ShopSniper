@@ -704,7 +704,7 @@ function dataForSeoScoringEnabled(run) {
   return run?.trafficEnrichmentConfig?.dataForSeo?.enabled === true;
 }
 
-export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run) {
+export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run, { captureLeads } = {}) {
   if (!dataForSeoScoringEnabled(run)) return 2;
   const [storedLeads, trafficEnrichments] = await Promise.all([
     transaction.lead.findMany({
@@ -750,6 +750,10 @@ export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, 
   if (updated.length !== storedLeads.length ||
       new Set(updated.map(({ id }) => id)).size !== storedLeads.length) {
     throw new Error("V3 score finalization row count did not reconcile every lead");
+  }
+  if (Array.isArray(captureLeads)) {
+    const updateById = new Map(updates.map((update) => [update.id, update]));
+    captureLeads.push(...storedLeads.map((lead) => ({ ...lead, ...updateById.get(lead.id) })));
   }
   return 3;
 }
@@ -2379,6 +2383,8 @@ export class PrismaRunRepository {
         FOR UPDATE
       ` : [];
       const existingProfileByShop = new Map(existingProfiles.map((profile) => [profile.shopId, profile]));
+      const existingProfileFingerprintByShop = new Map(existingProfiles.map((profile) => [profile.shopId,
+        profile.state === "completed" ? fingerprintJson(parseShopLeadProfile(profile.profilePayload)) : null]));
       const workProfileOutcomes = input.leadProfileOutcomes.filter(({ state }) => state !== "existing");
       const profileWorkRows = workProfileOutcomes.length ? await transaction.$queryRaw`
         WITH input AS (
@@ -2392,6 +2398,8 @@ export class PrismaRunRepository {
       ` : [];
       if (profileWorkRows.length !== workProfileOutcomes.length)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const profileWorkByShop = new Map(workProfileOutcomes.map((outcome, index) =>
+        [outcome.shopId, profileWorkRows[index]]));
       const missingProfiles = [];
       const profileWorkUpdates = [];
       for (let index = 0; index < input.leadProfileOutcomes.length; index += 1) {
@@ -2399,12 +2407,12 @@ export class PrismaRunRepository {
         const existingProfile = existingProfileByShop.get(outcome.shopId);
         if (outcome.state === "new") {
           if (existingProfile && (existingProfile.state !== "completed" ||
-              fingerprintJson(parseShopLeadProfile(existingProfile.profilePayload)) !== outcome.profileFingerprint))
+              existingProfileFingerprintByShop.get(outcome.shopId) !== outcome.profileFingerprint))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           if (!existingProfile) missingProfiles.push({ shopId: outcome.shopId, state: "completed",
             profilePayload: parsedProfiles.get(outcome.shopId), processingRunId: null,
             safeErrorCode: null, safeErrorMessage: null });
-          const work = profileWorkRows[workProfileOutcomes.indexOf(outcome)];
+          const work = profileWorkByShop.get(outcome.shopId);
           if (work.state !== "completed" && (work.state !== "processing" ||
               work.processingRunId !== input.runId || work.processingPipelineTaskId !== outcome.sourceTaskId))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -2413,10 +2421,10 @@ export class PrismaRunRepository {
             safeErrorMessage: null });
         } else if (outcome.state === "existing") {
           if (!existingProfile || existingProfile.state !== "completed" ||
-              fingerprintJson(parseShopLeadProfile(existingProfile.profilePayload)) !== outcome.profileFingerprint)
+              existingProfileFingerprintByShop.get(outcome.shopId) !== outcome.profileFingerprint)
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         } else if (outcome.state === "failed") {
-          const work = profileWorkRows[workProfileOutcomes.indexOf(outcome)];
+          const work = profileWorkByShop.get(outcome.shopId);
           if (!work || (work.state === "processing" && (work.processingRunId !== input.runId ||
               work.processingPipelineTaskId !== outcome.sourceTaskId)))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -2433,8 +2441,9 @@ export class PrismaRunRepository {
       const requiredProfileByShop = new Map(requiredProfiles.map((profile) => [profile.shopId, profile]));
       for (const outcome of input.leadProfileOutcomes.filter(({ state }) => state !== "failed")) {
         const profile = requiredProfileByShop.get(outcome.shopId);
-        if (!profile || profile.state !== "completed" ||
-            fingerprintJson(parseShopLeadProfile(profile.profilePayload)) !== outcome.profileFingerprint)
+        const verifiedFingerprint = existingProfileFingerprintByShop.get(outcome.shopId) ||
+          (profile ? fingerprintJson(parseShopLeadProfile(profile.profilePayload)) : null);
+        if (!profile || profile.state !== "completed" || verifiedFingerprint !== outcome.profileFingerprint)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
       const linked = profileShopIds.length ? await transaction.$queryRaw`
@@ -2470,9 +2479,12 @@ export class PrismaRunRepository {
       if ((await bulkUpsertDiagnostics(transaction, diagnosticRows)).length !== diagnosticRows.length)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       await afterStep("diagnostics_written");
-      const scoringVersion = await finalizePersistedLeadScoresV3(transaction, input.runId, owned.run);
+      const scoredLeads = [];
+      const scoringVersion = await finalizePersistedLeadScoresV3(transaction, input.runId, owned.run,
+        { captureLeads: scoredLeads });
       await afterStep("scores_finalized");
-      const leads = await transaction.lead.findMany({ where: { runId: input.runId }, orderBy: { id: "asc" } });
+      const leads = scoredLeads.length ? scoredLeads : await transaction.lead.findMany({
+        where: { runId: input.runId }, orderBy: { id: "asc" } });
       const leadSummary = leads.reduce((summary, lead) => { summary.total += 1;
         if (lead.status in summary) summary[lead.status] += 1; return summary; },
       { total: 0, qualified: 0, rejected: 0, failed: 0 });

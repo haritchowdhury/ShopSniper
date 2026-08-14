@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createPrismaClient } from "../src/prisma-client.js";
-import { pipelineStageId } from "../src/aws-pipeline/core/keys.js";
+import { pipelineStageId, pipelineTaskId } from "../src/aws-pipeline/core/keys.js";
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { leadRecordToCreate } from "../src/api-serializer.js";
+import { shopWorkId } from "../src/shop-persistence-contract.js";
 import { PipelineCoordinatorRepository } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
 import { PrismaRunRepository, awsProviderConfigSnapshot,
   trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
@@ -141,4 +142,108 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
         batchFingerprint);
     } finally { await prisma?.$disconnect(); await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await base.$disconnect(); }
+  });
+
+test("G-R20 publishes 1,000 domains and 12,000 work outcomes within the locked transaction timeout",
+  { skip: !enabled, timeout: 180000 }, async () => {
+    const schema = `gr20_final_scale_${Date.now()}_${process.pid}`;
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    let prisma;
+    try {
+      deployPrismaMigrations(scopedUrl); prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
+      const repository = new PrismaRunRepository(prisma);
+      const now = new Date("2026-08-14T01:00:00.000Z");
+      const runId = "run_gr20_final_scale_00001";
+      const stageId = pipelineStageId(runId, "traffic_crux", 1); const aggregationToken = randomUUID();
+      const leadFixture = (await load("lead-results.valid.json")).success.lead;
+      const shops = Array.from({ length: 1000 }, (_, index) => ({
+        id: `shop_gr20_final_${String(index).padStart(4, "0")}`,
+        stableKey: `domain:gr20-final-${index}.example`, canonicalUrl: `https://gr20-final-${index}.example`,
+        resolvedDomain: `gr20-final-${index}.example`
+      }));
+      const tasks = shops.map((shop) => ({ id: pipelineTaskId(stageId, shop.id), stageId, itemKey: shop.id,
+        inputFingerprint: fingerprintJson({ shopId: shop.id }), state: "succeeded", terminalAt: now,
+        artifactS3Key: `runs/${runId}/domains/${shop.id}/traffic-crux.json`,
+        artifactFingerprint: fingerprintJson({ artifact: shop.id }) }));
+      await prisma.run.create({ data: { id: runId, state: "running", phase: "scraping",
+        stage: "aws_traffic_crux", normalizedShopTypes: [], progress: {}, executionBackend: "aws",
+        pipelineGeneration: 1, trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({
+          dataForSeoEnrichmentEnabled: true }),
+        awsProviderConfig: {}, resultsAvailable: false } });
+      await prisma.pipelineStage.create({ data: { id: stageId, runId, stage: "traffic_crux", generation: 1,
+        manifestS3Key: `runs/${runId}/domains-manifest.json`, manifestFingerprint: "a".repeat(64),
+        manifestProducedAt: now, expectedCount: 1000, terminalCount: 1000, succeededCount: 1000,
+        state: "aggregating", aggregationOwner: "gr20", aggregationLeaseToken: aggregationToken,
+        aggregationLeaseAcquiredAt: now, aggregationLeaseExpiresAt: new Date(now.getTime() + 120000) } });
+      await prisma.shop.createMany({ data: shops });
+      await prisma.pipelineTask.createMany({ data: tasks });
+      await prisma.lead.createMany({ data: shops.map((shop, index) => ({ ...leadRecordToCreate(runId,
+        `lead_gr20_final_${String(index).padStart(4, "0")}`, { ...leadFixture,
+          resolved_domain: shop.resolvedDomain, final_url: shop.canonicalUrl, canonical_url: shop.canonicalUrl }),
+      shopId: shop.id })) });
+      const scopes = ["worldwide", ...Array.from({ length: 9 }, (_, index) => `country:G${index}:${1000 + index}`)];
+      const workKeys = [
+        ...scopes.map((scopeKey) => ({ workType: "dataforseo", scopeKey })),
+        { workType: "crux_rest", scopeKey: "current" },
+        { workType: "crux_bigquery", scopeKey: "202607" }
+      ];
+      const outcomeStates = ["available", "no_coverage", "ambiguous", "failed"];
+      const trafficWork = shops.flatMap((shop, shopIndex) => workKeys.map((key, workIndex) => {
+        const outcomeState = workIndex === 11 ? "reused" : outcomeStates[workIndex % 4];
+        const targetState = ["available", "no_coverage", "reused"].includes(outcomeState) ? "completed"
+          : outcomeState === "ambiguous" ? "ambiguous" : "failed";
+        return { id: shopWorkId(shop.id, key.workType, key.scopeKey), shopId: shop.id, ...key,
+          state: workIndex === 0 ? "processing" : targetState,
+          ...(workIndex === 0 ? { processingRunId: runId, processingPipelineTaskId: tasks[shopIndex].id,
+            startedAt: now, safeErrorCode: "STALE_SAFE_ERROR", safeErrorMessage: "STALE_SAFE_ERROR" } : {}) };
+      }));
+      const profileWork = shops.map((shop, index) => ({ id: shopWorkId(shop.id, "lead_discovery", "current"),
+        shopId: shop.id, workType: "lead_discovery", scopeKey: "current", state: "processing",
+        processingRunId: runId, processingPipelineTaskId: tasks[index].id, startedAt: now }));
+      await prisma.shopWork.createMany({ data: [...trafficWork, ...profileWork] });
+      const workOutcomes = shops.flatMap((shop, shopIndex) => workKeys.map((key, workIndex) => ({
+        shopId: shop.id, ...key, pipelineTaskId: tasks[shopIndex].id,
+        state: workIndex === 11 ? "reused" : outcomeStates[workIndex % 4]
+      })));
+      const input = { runId, generation: 1, stageId, aggregationToken, cacheRows: [], leadTrafficRows: [],
+        leadProfileOutcomes: shops.map((shop, index) => ({ shopId: shop.id, state: "failed",
+          sourceTaskId: tasks[index].id })), workOutcomes, dataForSeoLedgerEvidence: [],
+        diagnostics: [], trafficSummary: { version: "traffic-enrichment-summary-v1" }, status: {} };
+      let visibleBeforeFinalWrite = null; const started = Date.now(); const timings = [];
+      let published;
+      try {
+        published = await repository.publishAwsFinalResults(input, now, { async afterStep(step) {
+          timings.push([step, Date.now() - started]);
+          if (step === "before_run_visibility") {
+            const [observed] = await base.$queryRawUnsafe(
+              `SELECT "resultsAvailable" FROM "${schema}"."Run" WHERE "id" = $1`, runId);
+            visibleBeforeFinalWrite = observed.resultsAvailable;
+          }
+        } });
+      } catch (error) {
+        throw new Error(`maximum publication failed at ${JSON.stringify(timings)}`, { cause: error });
+      }
+      assert.ok(Date.now() - started < 15000);
+      assert.equal(visibleBeforeFinalWrite, false);
+      assert.equal(published.run.resultsAvailable, true); assert.equal(published.run.state, "completed");
+      assert.equal(published.stage.state, "completed"); assert.match(published.resultFingerprint, /^[a-f0-9]{64}$/u);
+      assert.equal(await prisma.shopWork.count({ where: { shopId: { in: shops.map(({ id }) => id) },
+        workType: { in: ["dataforseo", "crux_rest", "crux_bigquery"] } } }), 12000);
+      assert.equal(await prisma.shopWork.count({ where: { workType: "lead_discovery", state: "failed" } }), 1000);
+      assert.equal(await prisma.shopWork.count({ where: { state: "completed", workType: { in:
+        ["dataforseo", "crux_rest", "crux_bigquery"] } } }), 7000);
+      assert.equal(await prisma.shopWork.count({ where: { state: "ambiguous" } }), 3000);
+      assert.equal(await prisma.shopWork.count({ where: { state: "failed", workType: { in:
+        ["dataforseo", "crux_rest", "crux_bigquery"] } } }), 2000);
+      assert.equal(await prisma.shopLeadProfile.count(), 0);
+      assert.equal(await prisma.lead.count({ where: { runId, shopLeadProfileId: null, scoringVersion: 3 } }), 1000);
+      assert.equal(await prisma.userShop.count(), 0);
+      assert.equal(await prisma.userShopDiscovery.count(), 0);
+      assert.equal((await prisma.pipelineStage.findUnique({ where: { id: stageId } })).state, "completed");
+    } finally {
+      await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+    }
   });
