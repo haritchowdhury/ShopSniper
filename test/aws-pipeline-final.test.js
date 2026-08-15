@@ -37,7 +37,7 @@ test("zero-task final aggregation validates the shared manifest and publishes at
       contentFingerprint: fingerprint }; } },
     repository: {
       async readAwsFinalReuseRows(input) { events.push("reuse"); assert.deepEqual(input.selections, []);
-        return { trafficRows: [], leadStage: { id: "lead_stage" }, leadTasks: [] }; },
+        return { trafficRows: [], leadStage: { id: "lead_stage" }, leadTasks: [], leads: [] }; },
       async publishAwsFinalResults(input) { events.push("publish"); published = input; return { resultFingerprint: "a".repeat(64) }; }
     }
   };
@@ -60,7 +60,7 @@ test("publication not-ready and cancellation outcomes remain terminal and privac
       async getCompleteStage() { return { stage: { id: "s", manifestS3Key: workPlan.domainManifestKey,
         manifestFingerprint: fingerprint, manifestProducedAt: new Date(workPlan.evaluatedAt) }, tasks: [] }; } },
     artifactStore: { async getValidated() { return { value: manifest }; } }, repository: {
-      async readAwsFinalReuseRows() { return { trafficRows: [], leadTasks: [] }; },
+      async readAwsFinalReuseRows() { return { trafficRows: [], leadTasks: [], leads: [] }; },
       async publishAwsFinalResults() { throw error; } } };
     assert.deepEqual(await processFinalAggregation(message, runtime, { createLeaseMonitorFn: () => ({
       async renewNow() {}, async stop() {} }) }), { terminal: true, outcome });
@@ -104,7 +104,9 @@ async function oneDomainFinalHarness(mutator = () => {}) {
     artifactS3Key: `runs/${message.runId}/domains/${plan.shopId}/lead.json`,
     artifactFingerprint: fingerprintJson(leadResult), createdAt: new Date(workPlan.evaluatedAt) };
   const batchArtifacts = {};
-  const state = { manifest, combined, sourceArtifacts, batchArtifacts, leadResult, trafficTask, leadTask };
+  const reuseResult = { trafficRows: [], leadStage: {}, leadTasks: [leadTask], leads: [] };
+  const state = { manifest, combined, sourceArtifacts, batchArtifacts, leadResult, trafficTask, leadTask,
+    reuseResult };
   mutator(state);
   let published;
   const runtime = { coordinator: {
@@ -120,7 +122,7 @@ async function oneDomainFinalHarness(mutator = () => {}) {
     if (!sourceArtifacts[source]) throw Object.assign(new Error("missing"), { code: "PIPELINE_ARTIFACT_INVALID" });
     return { value: sourceArtifacts[source], contentFingerprint: fingerprintJson(sourceArtifacts[source]) };
   } }, repository: {
-    async readAwsFinalReuseRows() { return { trafficRows: [], leadStage: {}, leadTasks: [leadTask] }; },
+    async readAwsFinalReuseRows() { return reuseResult; },
     async readAwsAmbiguousDataForSeoTargets({ candidates }) { return candidates; },
     async readAwsAmbiguousCruxBigQueryWork({ candidates }) {
       return candidates.map((candidate) => ({ ...candidate, scopeKey: "month:202607" }));
@@ -139,6 +141,39 @@ test("final aggregator reconstructs all independent source and lead artifacts", 
   assert.deepEqual(published.workOutcomes.map(({ workType }) => workType).sort(),
     ["crux_bigquery", "crux_rest"]);
   assert.deepEqual(published.leadProfileOutcomes.map(({ state }) => state), ["new"]);
+});
+
+test("final aggregator publishes an all-scope DataForSEO cache reuse skipped by provider work", async () => {
+  const scopes = ["worldwide", "country:AE:2784", "country:AU:2036", "country:CA:2124",
+    "country:DE:2276", "country:FR:2250", "country:GB:2826", "country:IN:2356",
+    "country:NZ:2554", "country:US:2840"].sort();
+  const { published } = await oneDomainFinalHarness(({ manifest, combined, reuseResult }) => {
+    const plan = manifest.workPlan.domains[0];
+    const template = plan.sourceKeys.dataForSeo[0];
+    plan.needsTraffic = false;
+    plan.sourceKeys.dataForSeo = scopes.map((scopeKey, index) => ({ ...template, scopeKey,
+      reuse: { cacheId: `cache_reuse_${index}`, cacheFingerprint: `${index}`.padStart(64, "a").slice(-64) } }));
+    combined.components.dataforseo = { state: "skipped", contractVersion: "dataforseo-traffic-v1" };
+    reuseResult.leads = [{ id: "lead_fixture_final_0001", shopId: plan.shopId }];
+    reuseResult.trafficRows = plan.sourceKeys.dataForSeo.map((selection, index) => {
+      const country = /^country:([A-Z]{2}):(\d+)$/u.exec(selection.scopeKey);
+      const fetchedAt = new Date(Date.UTC(2026, 7, 1, 0, index)).toISOString();
+      return { id: selection.reuse.cacheId, source: "dataforseo", identity: selection.identity,
+        scopeKey: selection.scopeKey, metricSetKey: selection.metricSetKey,
+        contractVersion: selection.contractVersion, state: "available",
+        normalizedPayload: { contractVersion: "dataforseo-traffic-v1", target: selection.identity,
+          scope: country ? { countryIsoCode: country[1], locationCode: Number(country[2]) } : "worldwide",
+          languageScope: "all_available", metrics: {
+            organic: { etv: 1, count: 1 }, paid: { etv: 0, count: 0 },
+            featuredSnippet: { etv: 0, count: 0 }, localPack: { etv: 0, count: 0 }
+          }, fetchedAt }, fetchedAt: new Date(fetchedAt), expiresAt: new Date("2026-09-01T00:00:00.000Z") };
+    });
+  });
+  const row = published.leadTrafficRows.find(({ source }) => source === "dataforseo");
+  assert.equal(row.state, "available");
+  assert.equal(row.normalizedPayload.records.length, 10);
+  assert.equal(published.trafficSummary.dataforseo.cacheHits, 10);
+  assert.equal(published.trafficSummary.dataforseo.externalTasks, 0);
 });
 
 test("final aggregator accepts a terminal pre-month BigQuery artifact at the frozen latest scope", async () => {

@@ -2242,7 +2242,7 @@ export class PrismaRunRepository {
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
-      await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
+      const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
         stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
       const selections = [...input.selections].sort((a, b) => a.cacheId.localeCompare(b.cacheId));
       requireUniqueBatchKeys("AWS final reuse selections", selections, ({ cacheId }) => cacheId);
@@ -2266,7 +2266,13 @@ export class PrismaRunRepository {
         orderBy: [{ itemKey: "asc" }, { id: "asc" }] });
       if (leadTasks.length !== leadStage.expectedCount || leadTasks.some(({ state }) =>
         !["succeeded", "failed", "skipped"].includes(state))) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-      return { trafficRows, leadStage, leadTasks };
+      const trafficShopIds = owned.tasks.map(({ itemKey }) => itemKey).sort();
+      const leads = trafficShopIds.length ? await transaction.lead.findMany({ where: {
+        runId: input.runId, status: "qualified", shopId: { in: trafficShopIds }
+      }, select: { id: true, shopId: true }, orderBy: [{ shopId: "asc" }, { id: "asc" }] }) : [];
+      if (leads.length !== trafficShopIds.length || leads.some((lead, index) =>
+        lead.shopId !== trafficShopIds[index])) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return { trafficRows, leadStage, leadTasks, leads };
     });
   }
 

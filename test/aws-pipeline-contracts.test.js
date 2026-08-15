@@ -142,6 +142,14 @@ test("attempt and batch contracts reject cross-field drift, ordering, duplicates
   rejects(() => parseProviderSourceArtifact(wrongBatchKey), "PIPELINE_ARTIFACT_INVALID");
   const privateEvidence = clone(source); privateEvidence.requestEvidence[0].targets = ["private.example"];
   rejects(() => parseProviderSourceArtifact(privateEvidence), "PIPELINE_ARTIFACT_INVALID");
+  const paidContractMismatch = clone(source);
+  paidContractMismatch.state = "contract_mismatch";
+  paidContractMismatch.scopeStates = paidContractMismatch.scopeStates
+    .map(({ scopeKey }) => ({ scopeKey, state: "contract_mismatch" }));
+  paidContractMismatch.requestEvidence = paidContractMismatch.requestEvidence
+    .map(({ scopeKey, requestFingerprint, targetCount }) => ({ scopeKey, disposition: "ledger",
+      requestFingerprint, targetCount, ledgerState: "ambiguous" }));
+  parseProviderSourceArtifact(paidContractMismatch);
   const cruxEvidence = clone(source); cruxEvidence.source = "crux_rest"; cruxEvidence.state = "available";
   cruxEvidence.scopeStates = [{ scopeKey: "current", state: "available" }];
   cruxEvidence.requestEvidence = [source.requestEvidence[0]];

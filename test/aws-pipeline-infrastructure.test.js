@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertBoundedBulkChanges, assertCodeChanges, assertEngineChanges,
   assertFinalRepairChanges,
   assertLeadBoundedExtractionChanges, assertLeadMemoryChanges, assertLeadWorkResumeChanges,
-  assertProviderIdentityChanges, assertTrafficRepairChanges,
+  assertProviderIdentityChanges, assertTrafficPublicationRepairChanges, assertTrafficRepairChanges,
   buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
@@ -238,7 +238,7 @@ test("deployment constants stay aligned with the packet", () => {
     environment: "production",
     phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
       "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
-      "traffic-repair", "final-repair", "final-publication-repair"],
+      "traffic-repair", "final-repair", "final-publication-repair", "traffic-publication-repair"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -398,6 +398,23 @@ test("G-R21 final-repair guard allows only FinalAggregator code", () => {
   const wrongParameter = clone(description);
   wrongParameter.Changes[0].ResourceChange.Details[0].CausingEntity = "TrafficWorkerCodeKey";
   assert.throws(() => assertFinalRepairChanges(changes, wrongParameter), /Final-repair code detail drift/u);
+});
+
+test("G-R24 guard allows exactly TrafficWorker and FinalAggregator code", () => {
+  const changes = ["FinalAggregator", "TrafficWorker"].map((logicalId) => ({ action: "Modify", logicalId,
+    type: "AWS::Lambda::Function", replacement: "False" }));
+  const description = { Changes: changes.map(({ logicalId }) => ({ ResourceChange: { LogicalResourceId: logicalId,
+    Details: [
+      { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: `${logicalId}CodeKey`,
+        Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: `${logicalId}CodeVersion`,
+        Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+        Target: { Name: "Code", RequiresRecreation: "Never" } }
+    ] } })) };
+  assert.doesNotThrow(() => assertTrafficPublicationRepairChanges(changes, description));
+  assert.throws(() => assertTrafficPublicationRepairChanges(changes.slice(1), description),
+    /Traffic-publication-repair inventory/u);
 });
 
 test("G-R19 guard allows only affected code and LeadWorker memory", () => {

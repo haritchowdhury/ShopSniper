@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ENRICHMENT_ERROR_CODES, dataForSeoError } from "../errors.js";
 import {
   DATAFORSEO_ITEM_TYPES,
-  DATAFORSEO_OBSERVED_API_VERSION,
+  DATAFORSEO_API_VERSION_PATTERN,
   normalizeDataForSeoHostname
 } from "./request.js";
 
@@ -43,7 +43,7 @@ const taskSchema = z.object({
   result: z.array(resultSchema).nullable()
 }).passthrough();
 const rootSchema = z.object({
-  version: z.literal(DATAFORSEO_OBSERVED_API_VERSION),
+  version: z.string().regex(DATAFORSEO_API_VERSION_PATTERN),
   status_code: z.number().int(),
   status_message: z.string(),
   cost: finiteNonNegative,

@@ -4,7 +4,8 @@ import { ENRICHMENT_ERROR_CODES, dataForSeoError } from "../errors.js";
 
 export const DATAFORSEO_RESPONSE_CONTRACT_VERSION = "dataforseo-bulk-traffic-v1";
 export const DATAFORSEO_TRAFFIC_CONTRACT_VERSION = "dataforseo-traffic-v1";
-export const DATAFORSEO_OBSERVED_API_VERSION = "0.1.20260731";
+export const DATAFORSEO_OBSERVED_API_VERSION = "0.1.20260806";
+export const DATAFORSEO_API_VERSION_PATTERN = /^0\.1\.20\d{6}$/u;
 export const DATAFORSEO_BULK_TRAFFIC_ENDPOINT =
   "https://api.dataforseo.com/v3/dataforseo_labs/google/bulk_traffic_estimation/live";
 export const DATAFORSEO_TARGET_LIMIT = 1000;

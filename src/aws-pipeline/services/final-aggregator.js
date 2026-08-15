@@ -52,6 +52,70 @@ function aggregateSourceSummaries(values) {
   return output;
 }
 
+const TRAFFIC_STATES = ["available", "partial", "no_coverage", "unavailable", "ambiguous", "contract_mismatch"];
+
+function stateCounts(states) {
+  const counts = Object.fromEntries(TRAFFIC_STATES.map((state) => [state, 0]));
+  for (const state of states) {
+    if (!Object.hasOwn(counts, state)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    counts[state] += 1;
+  }
+  return counts;
+}
+
+function materializeSkippedReuse({ combinedEntries, selections, trafficRows, leads }) {
+  const cacheById = new Map(trafficRows.map((row) => [row.id, row]));
+  const leadByShop = new Map(leads.map((lead) => [lead.shopId, lead]));
+  if (cacheById.size !== trafficRows.length || leadByShop.size !== leads.length)
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  const rows = [];
+  const summary = { dataforseo: { states: [], cacheHits: 0 },
+    cruxRest: { states: [], cacheHits: 0 }, cruxBigQuery: { states: [], cacheHits: 0 } };
+  const definitions = [
+    ["dataforseo", "dataforseo", (plan) => plan.sourceKeys.dataForSeo],
+    ["cruxRest", "crux_rest", (plan) => [plan.sourceKeys.cruxRest]],
+    ["cruxBigQuery", "crux_bigquery", (plan) => [plan.sourceKeys.cruxBigQuery]]
+  ];
+  for (const { task, plan, combined } of combinedEntries) for (const [component, source, planned] of definitions) {
+    if (combined.components[component].state !== "skipped") continue;
+    const sourceSelections = planned(plan).filter(Boolean);
+    const reused = sourceSelections.filter((selection) => selection.reuse);
+    if (!reused.length) continue;
+    if (reused.length !== sourceSelections.length)
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const selected = selections.filter((selection) => selection.shopId === task.itemKey &&
+      selection.source === source).sort((left, right) => left.scopeKey.localeCompare(right.scopeKey));
+    if (selected.length !== reused.length || selected.some((selection, index) =>
+      selection.cacheId !== reused.slice().sort((left, right) => left.scopeKey.localeCompare(right.scopeKey))[index].reuse.cacheId))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const cached = selected.map(({ cacheId }) => cacheById.get(cacheId));
+    const lead = leadByShop.get(task.itemKey);
+    if (!lead || cached.some((row) => !row)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    let publication;
+    if (source === "dataforseo") {
+      if (cached.length !== 10 || cached.some((row) => row.state !== "available" || row.normalizedPayload == null))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      publication = { leadId: lead.id, source, state: "available",
+        contractVersion: selected[0].contractVersion,
+        normalizedPayload: { records: cached.map((row) => row.normalizedPayload) },
+        fetchedAt: new Date(Math.max(...cached.map((row) => new Date(row.fetchedAt).getTime()))).toISOString() };
+    } else {
+      if (cached.length !== 1 || !["available", "no_coverage"].includes(cached[0].state) ||
+          (cached[0].state === "available") !== (cached[0].normalizedPayload != null))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const row = cached[0];
+      publication = { leadId: lead.id, source, state: row.state, contractVersion: selected[0].contractVersion,
+        ...(row.state === "available" && { normalizedPayload: row.normalizedPayload,
+          fetchedAt: new Date(row.fetchedAt).toISOString(),
+          ...(row.coverageStartedAt && { coverageStartedAt: new Date(row.coverageStartedAt).toISOString() }),
+          ...(row.coverageEndedAt && { coverageEndedAt: new Date(row.coverageEndedAt).toISOString() }) }) };
+    }
+    rows.push(publication); summary[component].states.push(publication.state);
+    summary[component].cacheHits += cached.length;
+  }
+  return { rows, summary };
+}
+
 export async function processFinalAggregation(message, runtime, {
   createLeaseMonitorFn = createPipelineLeaseMonitor
 } = {}) {
@@ -260,12 +324,26 @@ export async function processFinalAggregation(message, runtime, {
     }
     const reuseSelections = manifest.workPlan.domains.flatMap((plan) =>
       [...plan.sourceKeys.dataForSeo, plan.sourceKeys.cruxRest, plan.sourceKeys.cruxBigQuery]
-        .filter(({ reuse }) => reuse).map((selection) => ({ ...selection, ...selection.reuse })));
+        .filter(({ reuse }) => reuse).map((selection) => ({ shopId: plan.shopId,
+          ...selection, ...selection.reuse })));
     phase = "reuse_rows";
     const reused = await runtime.repository.readAwsFinalReuseRows({ runId: message.runId,
       generation: message.generation, stageId: complete.stage.id, aggregationToken: token,
       selections: reuseSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) });
     cacheRows.push(...reused.trafficRows);
+    const reusedPublication = materializeSkippedReuse({ combinedEntries, selections: reuseSelections,
+      trafficRows: reused.trafficRows, leads: reused.leads || [] });
+    leadTrafficRows.push(...reusedPublication.rows);
+    for (const [component, externalKey] of [["dataforseo", "externalTasks"],
+      ["cruxRest", "externalCalls"], ["cruxBigQuery", "queryCalls"]]) {
+      const value = reusedPublication.summary[component];
+      if (!summaries[component].length && value.states.length) summaries[component].push({
+        ...stateCounts(value.states), eligible: value.states.length, cacheHits: value.cacheHits,
+        [externalKey]: 0,
+        ...(component === "dataforseo" && { actualCostUsd: 0, budgetStopped: false }),
+        ...(component === "cruxBigQuery" && { tableListCalls: 0 })
+      });
+    }
     phase = "lead_artifacts";
     const leadProfileOutcomes = [];
     const leadTaskByShop = new Map(reused.leadTasks.map((task) => [task.itemKey, task]));

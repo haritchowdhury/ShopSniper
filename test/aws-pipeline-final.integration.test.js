@@ -52,6 +52,7 @@ test("G12 atomically publishes a zero-task AWS run and terminal replay cannot re
       const read = await repository.readAwsFinalReuseRows({ runId, generation: 1,
         stageId: registered.stage.id, aggregationToken: token, selections: [], evaluatedAt: now });
       assert.deepEqual(read.trafficRows, []); assert.deepEqual(read.leadTasks, []);
+      assert.deepEqual(read.leads, []);
       const published = await repository.publishAwsFinalResults({ runId, generation: 1,
         stageId: registered.stage.id, aggregationToken: token, cacheRows: [], leadTrafficRows: [],
         leadProfileOutcomes: [], workOutcomes: [], dataForSeoLedgerEvidence: [], diagnostics: [],

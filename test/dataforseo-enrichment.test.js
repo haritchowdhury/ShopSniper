@@ -224,6 +224,15 @@ test("strict response reconciliation rejects wrong scalars, negatives, duplicate
   );
 });
 
+test("date-stamped DataForSEO patch versions do not change the consumed contract", () => {
+  const value = fixture("bulk-traffic-v1-worldwide-success.json");
+  value.version = "0.1.20260807";
+  assert.equal(parseDataForSeoResponse(value, descriptor()).itemsByTarget.size, 3);
+  value.version = "0.2.20260807";
+  assert.throws(() => parseDataForSeoResponse(value, descriptor()),
+    assertCode("provider_contract_mismatch"));
+});
+
 test("catalogued additive fields are ignored and cannot affect normalized output", () => {
   const baseline = fixture("bulk-traffic-v1-worldwide-success.json");
   const additive = clone(baseline);

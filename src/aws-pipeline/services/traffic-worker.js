@@ -619,7 +619,10 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             .filter(Boolean) || []), ...capturedRows.filter((row) => sourceName === "dataforseo" &&
               plan.sourceKeys.dataForSeo.some(({ identity }) => identity === row.identity)).map(({ scopeKey }) => scopeKey)]);
           const scopeStates = scopeKeys.map((scopeKey) => ({ scopeKey,
-            state: state === "partial" ? (materialScopes.has(scopeKey) ? "available" : "unavailable") : state }));
+            state: component === "dataforseo" &&
+              dataForSeoEvidence.get(`${scopeKey}\0${task.itemKey}`)?.disposition === "reused"
+              ? "reused"
+              : state === "partial" ? (materialScopes.has(scopeKey) ? "available" : "unavailable") : state }));
           if (state === "partial" && !scopeStates.some(({ state: value }) => value === "available"))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           const sourceCandidate = { contractVersion: "provider-source-result-v1",
@@ -630,7 +633,9 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
                   scopeStates[index].state === "ambiguous" ? "work_ambiguous" : "budget_exhausted" }) : [],
             cacheRows: capturedRows.filter((row) => row.source === sourceName &&
               (row.identity === plan.sourceKeys.cruxRest.identity || row.identity === plan.sourceKeys.cruxBigQuery.identity ||
-                plan.sourceKeys.dataForSeo.some((item) => item.identity === row.identity))),
+                plan.sourceKeys.dataForSeo.some((item) => item.identity === row.identity)) &&
+              !(sourceName === "dataforseo" && plan.sourceKeys.dataForSeo.some((item) => item.reuse &&
+                item.identity === row.identity && item.scopeKey === row.scopeKey))),
             leadTrafficRows: record ? [record] : [], summary: sourceOutputs.get(component)?.summary || {}, diagnostics: [] };
           const artifact = parseProviderSourceArtifact(sourceCandidate);
           const sourceKey = providerArtifactKey(message.runId, task.itemKey, keySource);

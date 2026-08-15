@@ -209,7 +209,7 @@ export const providerSourceArtifactSchema = z.object({ contractVersion: z.litera
           : evidence.disposition === "not_dispatched"
             ? [evidence.reason === "work_ambiguous" ? "ambiguous" : "unavailable"]
             : evidence.ledgerState === "succeeded" ? ["available", "unavailable"]
-              : evidence.ledgerState === "ambiguous" ? ["ambiguous"] : ["unavailable"];
+              : evidence.ledgerState === "ambiguous" ? ["ambiguous", "contract_mismatch"] : ["unavailable"];
         if (!allowed.includes(state)) context.addIssue({ code: "custom", message: "evidence state" });
         if (evidence.disposition === "ledger" && evidence.ledgerState === "succeeded" &&
             evidence.batchArtifactKey !== providerBatchArtifactKey(value.runId, "dataforseo", evidence.batchId))
