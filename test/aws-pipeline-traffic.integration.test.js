@@ -163,7 +163,7 @@ test("G11 Run lease loads the complete task set and task-fences non-unique traff
     }
   });
 
-test("G-R20 claims a positional mixed 1,000-row traffic corpus within the default transaction timeout",
+test("AWS traffic claims keep 1,000 mixed rows independent from foreign run owners",
   { skip: !enabled, timeout: 180000 }, async () => {
     const schema = `gr20_traffic_scale_${Date.now()}_${process.pid}`;
     const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
@@ -252,8 +252,7 @@ test("G-R20 claims a positional mixed 1,000-row traffic corpus within the defaul
       await prisma.trafficEnrichmentCache.createMany({ data: cacheRows });
       const claims = shops.map((shop, index) => ({ shopId: shop.id, pipelineTaskId: tasks[index].id,
         selection: selections[index] }));
-      const expected = ownerKinds.map((kind) => kind === "fresh" ? "completed" : kind === "ambiguous"
-        ? "ambiguous" : ["live_task", "live_legacy"].includes(kind) ? "busy" : "owned");
+      const expected = ownerKinds.map((kind) => kind === "fresh" ? "completed" : "owned");
       const before = Date.now();
       const outcomes = await repository.claimAwsTrafficWorkBatch({ runId, generation: 1,
         runLease: { token: leaseToken }, claims }, now);
@@ -265,16 +264,18 @@ test("G-R20 claims a positional mixed 1,000-row traffic corpus within the defaul
         rows.length === 1 && rows[0].expiresAt > now), true);
       const afterRows = await prisma.shopWork.findMany({ where: { shopId: { in: shops.map(({ id }) => id) } } });
       const afterByShop = new Map(afterRows.map((row) => [row.shopId, row]));
-      const updatedIds = new Set(shops.filter((_, index) => ["expired", "identity_changed", "failed", "pending", "cancelled_task",
-        "inactive_task", "expired_legacy"].includes(ownerKinds[index % ownerKinds.length]))
+      const updatedIds = new Set(shops.filter((_, index) => ownerKinds[index % ownerKinds.length] !== "fresh")
       .map(({ id }) => shopWorkId(id, "crux_rest", "current")));
       assert.ok(shops.some((_, index) => ownerKinds[index % ownerKinds.length] === "identity_changed"));
       assert.deepEqual(new Set(afterRows.filter((row) => row.processingPipelineTaskId ===
         tasks[shops.findIndex(({ id }) => id === row.shopId)]?.id && updatedIds.has(row.id)).map(({ id }) => id)), updatedIds);
       for (let index = 0; index < shops.length; index += 1) {
         const kind = ownerKinds[index % ownerKinds.length]; const row = afterByShop.get(shops[index].id);
-        if (kind === "live_task") assert.equal(row.processingPipelineTaskId, ownerTasks[0].id);
-        if (kind === "live_legacy") assert.equal(row.processingLeaseToken, "legacy-live");
+        if (kind !== "fresh") {
+          assert.equal(row.processingPipelineTaskId, tasks[index].id);
+          assert.equal(row.processingRunId, runId);
+          assert.equal(row.processingLeaseToken, null);
+        }
       }
       const replay = await repository.claimAwsTrafficWorkBatch({ runId, generation: 1,
         runLease: { token: leaseToken }, claims }, new Date(now.getTime() + 1));

@@ -1935,51 +1935,33 @@ export class PrismaRunRepository {
         throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
       if (task.stage.run.state !== "running")
         return { outcome: task.stage.run.state === "cancelled" ? "cancelled" : "busy" };
-      const key = { shopId_workType_scopeKey: { shopId, workType: "lead_discovery", scopeKey: "current" } };
-      let work = await transaction.shopWork.findUnique({ where: key });
-      if (!work) {
-        work = await transaction.shopWork.create({ data: { id: shopWorkId(shopId, "lead_discovery", "current"),
-          shopId, workType: "lead_discovery", scopeKey: "current", state: "processing",
-          processingRunId: runIdentifier, processingLeaseToken: null,
-          processingPipelineTaskId: taskId, startedAt: now } });
-        return { outcome: "owned" };
-      }
+      await transaction.shopWork.createMany({ data: [{ id: shopWorkId(shopId, "lead_discovery", "current"),
+        shopId, workType: "lead_discovery", scopeKey: "current", state: "pending" }], skipDuplicates: true });
+      const [work] = await transaction.$queryRaw`
+        SELECT work.* FROM "ShopWork" work
+        WHERE work."shopId" = ${shopId}
+          AND work."workType" = 'lead_discovery'::"ShopWorkType"
+          AND work."scopeKey" = 'current'
+        FOR UPDATE OF work
+      `;
+      if (!work) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       if (work.state === "completed") {
         const profile = await transaction.shopLeadProfile.findUnique({ where: { shopId } });
-        if (!profile || profile.state !== "completed" || profile.profilePayload == null) {
-          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        if (profile?.state === "completed" && profile.profilePayload != null) {
+          const parsed = parseShopLeadProfile(profile.profilePayload);
+          const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { stableKey: true } });
+          if (!shop) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          assertProfileMatchesShop(parsed, shop.stableKey);
+          return { outcome: "completed", profile: parsed };
         }
-        const parsed = parseShopLeadProfile(profile.profilePayload);
-        const shop = await transaction.shop.findUnique({ where: { id: shopId }, select: { stableKey: true } });
-        if (!shop) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        assertProfileMatchesShop(parsed, shop.stableKey);
-        return { outcome: "completed", profile: parsed };
       }
-      if (work.state === "ambiguous") return { outcome: "ambiguous", safeErrorCode: work.safeErrorCode };
-      if (work.state === "failed" && work.processingRunId === runIdentifier)
-        return { outcome: "failed", safeErrorCode: work.safeErrorCode };
       if (work.state === "processing" && work.processingPipelineTaskId === taskId)
         return { outcome: "owned" };
-      let active = false;
-      if (work.state === "processing" && work.processingPipelineTaskId) {
-        const ownerTask = await transaction.pipelineTask.findUnique({ where: { id: work.processingPipelineTaskId },
-          include: { stage: { include: { run: { select: { state: true } } } } } });
-        active = ownerTask?.stage?.run?.state === "running" && ownerTask.state !== "cancelled";
-      } else if (work.state === "processing" && work.processingRunId) {
-        const owner = await transaction.run.findUnique({ where: { id: work.processingRunId },
-          select: { state: true, leaseToken: true, leaseExpiresAt: true } });
-        active = owner?.state === "running" && owner.leaseToken === work.processingLeaseToken &&
-          owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
-      }
-      if (active) return { outcome: "busy" };
-      const replaced = await transaction.shopWork.updateMany({ where: { id: work.id,
-        state: work.state, processingRunId: work.processingRunId,
-        processingLeaseToken: work.processingLeaseToken,
-        processingPipelineTaskId: work.processingPipelineTaskId }, data: { state: "processing",
+      await transaction.shopWork.update({ where: { id: work.id }, data: { state: "processing",
         processingRunId: runIdentifier, processingLeaseToken: null,
         processingPipelineTaskId: taskId, safeErrorCode: null, safeErrorMessage: null,
         startedAt: now, completedAt: null } });
-      return { outcome: replaced.count === 1 ? "owned" : "busy" };
+      return { outcome: "owned" };
     });
   }
 
@@ -2127,18 +2109,6 @@ export class PrismaRunRepository {
         values.push(row);
         cacheByKey.set(key, values);
       }
-      const taskOwnerIds = [...new Set(rows.filter((row) => row.processingPipelineTaskId)
-        .map((row) => row.processingPipelineTaskId))];
-      const taskOwners = taskOwnerIds.length ? await transaction.pipelineTask.findMany({
-        where: { id: { in: taskOwnerIds } }, include: { stage: { include: { run: { select: { state: true } } } } }
-      }) : [];
-      const taskOwnerById = new Map(taskOwners.map((owner) => [owner.id, owner]));
-      const legacyRunIds = [...new Set(rows.filter((row) => !row.processingPipelineTaskId && row.processingRunId)
-        .map((row) => row.processingRunId))];
-      const legacyRuns = legacyRunIds.length ? await transaction.run.findMany({
-        where: { id: { in: legacyRunIds } }
-      }) : [];
-      const legacyRunById = new Map(legacyRuns.map((owner) => [owner.id, owner]));
       const output = [];
       const reclaimable = [];
       for (const claim of normalized) {
@@ -2158,23 +2128,6 @@ export class PrismaRunRepository {
               cacheRows: [row] }); continue; }
           }
         }
-        if (work.state === "ambiguous") { output.push({ shopId: claim.shopId, workType: claim.workType,
-          scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "ambiguous" }); continue; }
-        if (work.state === "processing" && work.processingPipelineTaskId === claim.pipelineTaskId) {
-          output.push({ shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey,
-            pipelineTaskId: claim.pipelineTaskId, outcome: "owned" }); continue;
-        }
-        let active = false;
-        if (work.state === "processing" && work.processingPipelineTaskId) {
-          const ownerTask = taskOwnerById.get(work.processingPipelineTaskId);
-          active = ownerTask?.stage?.run?.state === "running" && ownerTask.state !== "cancelled";
-        } else if (work.state === "processing" && work.processingRunId) {
-          const owner = legacyRunById.get(work.processingRunId);
-          active = owner?.state === "running" && owner.leaseToken === work.processingLeaseToken &&
-            owner.leaseExpiresAt instanceof Date && owner.leaseExpiresAt > now;
-        }
-        if (active) { output.push({ shopId: claim.shopId, workType: claim.workType, scopeKey: claim.scopeKey,
-          pipelineTaskId: claim.pipelineTaskId, outcome: "busy" }); continue; }
         reclaimable.push({ id: work.id, state: work.state, processingRunId: work.processingRunId,
           processingLeaseToken: work.processingLeaseToken,
           processingPipelineTaskId: work.processingPipelineTaskId, pipelineTaskId: claim.pipelineTaskId });
@@ -2203,8 +2156,9 @@ export class PrismaRunRepository {
       const wonIds = new Set(wonRows.map(({ id }) => id));
       if (wonIds.size !== wonRows.length || wonRows.some(({ id }) => !reclaimable.some((row) => row.id === id)))
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (wonIds.size !== reclaimable.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return output.map(({ workId, ...item }) => item.outcome === "pending_cas"
-        ? { ...item, outcome: wonIds.has(workId) ? "owned" : "busy" }
+        ? { ...item, outcome: "owned" }
         : item);
     });
   }
@@ -2304,30 +2258,9 @@ export class PrismaRunRepository {
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
         stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
       const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
-      const rows = candidates.length ? await transaction.$queryRaw`
-        WITH input AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(candidates)}::jsonb) AS value(
-            "shopId" text, "identity" text, "scopeKey" text, "ordinal" integer
-          )
-        )
-        SELECT input."shopId", input."identity", input."scopeKey", input."ordinal",
-          work."processingRunId", work."processingPipelineTaskId"
-        FROM input JOIN "ShopWork" work
-          ON work."shopId" = input."shopId"
-          AND work."workType" = 'dataforseo'::"ShopWorkType"
-          AND work."scopeKey" = input."scopeKey"
-        WHERE work."state" = 'ambiguous'::"ShopWorkState"
-        ORDER BY input."ordinal" ASC
-      ` : [];
-      const selected = [];
-      for (const row of rows) {
-        if (row.processingRunId !== input.runId) continue;
-        const task = taskByShop.get(row.shopId);
-        if (!task || row.processingPipelineTaskId !== task.id)
-          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        selected.push({ shopId: row.shopId, identity: row.identity, scopeKey: row.scopeKey });
-      }
-      return selected;
+      for (const candidate of candidates) if (!taskByShop.has(candidate.shopId))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return candidates.map(({ ordinal: _ordinal, ...candidate }) => candidate);
     });
   }
 
@@ -2352,23 +2285,18 @@ export class PrismaRunRepository {
             "shopId" text, "pipelineTaskId" text, "state" text, "ordinal" integer
           )
         )
-        SELECT input."shopId", input."pipelineTaskId", input."state", input."ordinal", work."scopeKey"
-        FROM input JOIN "ShopWork" work
-          ON work."shopId" = input."shopId"
-          AND work."workType" = 'crux_bigquery'::"ShopWorkType"
-          AND work."state" = 'processing'::"ShopWorkState"
-          AND work."processingRunId" = ${input.runId}
-          AND work."processingPipelineTaskId" = input."pipelineTaskId"
-        ORDER BY input."ordinal" ASC, work."scopeKey" ASC
+        SELECT input."shopId", input."pipelineTaskId", input."state", input."ordinal",
+          COALESCE(work."scopeKey", 'latest') AS "scopeKey"
+        FROM input LEFT JOIN LATERAL (
+          SELECT candidate."scopeKey" FROM "ShopWork" candidate
+          WHERE candidate."shopId" = input."shopId"
+            AND candidate."workType" = 'crux_bigquery'::"ShopWorkType"
+            AND candidate."scopeKey" LIKE 'month:%'
+          ORDER BY candidate."scopeKey" DESC LIMIT 1
+        ) work ON TRUE
+        ORDER BY input."ordinal" ASC
       ` : [];
-      const counts = new Map();
-      for (const row of rows) {
-        if (!/^(?:latest|month:20\d{4})$/u.test(row.scopeKey))
-          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        counts.set(row.shopId, (counts.get(row.shopId) || 0) + 1);
-      }
-      if ([...counts.values()].some((count) => count !== 1))
-        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (rows.length !== candidates.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return rows.map(({ ordinal: _ordinal, ...row }) => row);
     });
   }
@@ -2436,6 +2364,9 @@ export class PrismaRunRepository {
       if (writtenTraffic.length !== trafficRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       await afterStep("traffic_written");
       const workOutcomes = input.workOutcomes || [];
+      const trafficTaskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
+      for (const outcome of workOutcomes) if (trafficTaskByShop.get(outcome.shopId)?.id !== outcome.pipelineTaskId)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const lockedWork = workOutcomes.length ? await transaction.$queryRaw`
         WITH input AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(workOutcomes.map((outcome, ordinal) =>
@@ -2448,23 +2379,19 @@ export class PrismaRunRepository {
           AND work."scopeKey" = input."scopeKey"
         ORDER BY input."ordinal" ASC FOR UPDATE OF work
       ` : [];
-      if (lockedWork.length !== workOutcomes.length)
-        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const lockedWorkByKey = new Map(lockedWork.map((work) =>
+        [`${work.shopId}\0${work.workType}\0${work.scopeKey}`, work]));
       const mutableWork = [];
       for (let index = 0; index < workOutcomes.length; index += 1) {
         const outcome = workOutcomes[index];
         const targetState = ["available", "no_coverage"].includes(outcome.state) ? "completed" :
           outcome.state === "ambiguous" ? "ambiguous" : outcome.state === "reused" ? "reused" : "failed";
-        const work = lockedWork[index];
-        if (!work) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        if (targetState === "reused") {
-          if (work.state !== "completed") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          continue;
-        }
+        const work = lockedWorkByKey.get(`${outcome.shopId}\0${outcome.workType}\0${outcome.scopeKey}`);
+        if (!work) continue;
+        if (targetState === "reused") continue;
         if (work.state === targetState) continue;
         if (work.state !== "processing" || work.processingRunId !== input.runId ||
-            work.processingPipelineTaskId !== outcome.pipelineTaskId)
-          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            work.processingPipelineTaskId !== outcome.pipelineTaskId) continue;
         mutableWork.push({ id: work.id, pipelineTaskId: outcome.pipelineTaskId, targetState,
           safeErrorCode: targetState === "completed" ? null : targetState === "ambiguous"
             ? "WORK_OUTCOME_AMBIGUOUS" : "PIPELINE_PROVIDER_UNAVAILABLE",
@@ -2507,6 +2434,27 @@ export class PrismaRunRepository {
       const existingProfileByShop = new Map(existingProfiles.map((profile) => [profile.shopId, profile]));
       const existingProfileFingerprintByShop = new Map(existingProfiles.map((profile) => [profile.shopId,
         profile.state === "completed" ? fingerprintJson(parseShopLeadProfile(profile.profilePayload)) : null]));
+      const materialProfiles = input.leadProfileOutcomes.filter(({ state }) => state === "new")
+        .map(({ shopId }) => ({ shopId, profilePayload: parsedProfiles.get(shopId) }));
+      if (materialProfiles.length) await transaction.$queryRaw`
+        INSERT INTO "ShopLeadProfile" (
+          "shopId", "state", "profilePayload", "processingRunId",
+          "safeErrorCode", "safeErrorMessage", "createdAt", "updatedAt"
+        )
+        SELECT input."shopId", 'completed'::"ShopLeadProfileState", input."profilePayload",
+          NULL, NULL, NULL, ${now}, ${now}
+        FROM jsonb_to_recordset(${JSON.stringify(materialProfiles)}::jsonb)
+          AS input("shopId" text, "profilePayload" jsonb)
+        ON CONFLICT ("shopId") DO UPDATE SET
+          "state" = 'completed'::"ShopLeadProfileState",
+          "profilePayload" = EXCLUDED."profilePayload",
+          "processingRunId" = NULL,
+          "safeErrorCode" = NULL,
+          "safeErrorMessage" = NULL,
+          "updatedAt" = EXCLUDED."updatedAt"
+        WHERE "ShopLeadProfile"."state" <> 'completed'::"ShopLeadProfileState"
+        RETURNING "shopId"
+      `;
       const workProfileOutcomes = input.leadProfileOutcomes.filter(({ state }) => state !== "existing");
       const profileWorkRows = workProfileOutcomes.length ? await transaction.$queryRaw`
         WITH input AS (
@@ -2518,27 +2466,15 @@ export class PrismaRunRepository {
           AND work."workType" = 'lead_discovery'::"ShopWorkType" AND work."scopeKey" = 'current'
         ORDER BY input."ordinal" FOR UPDATE OF work
       ` : [];
-      if (profileWorkRows.length !== workProfileOutcomes.length)
-        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-      const profileWorkByShop = new Map(workProfileOutcomes.map((outcome, index) =>
-        [outcome.shopId, profileWorkRows[index]]));
-      const missingProfiles = [];
+      const profileWorkByShop = new Map(profileWorkRows.map((work) => [work.shopId, work]));
       const profileWorkUpdates = [];
       for (let index = 0; index < input.leadProfileOutcomes.length; index += 1) {
         const outcome = input.leadProfileOutcomes[index];
         const existingProfile = existingProfileByShop.get(outcome.shopId);
         if (outcome.state === "new") {
-          if (existingProfile && (existingProfile.state !== "completed" ||
-              existingProfileFingerprintByShop.get(outcome.shopId) !== outcome.profileFingerprint))
-            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          if (!existingProfile) missingProfiles.push({ shopId: outcome.shopId, state: "completed",
-            profilePayload: parsedProfiles.get(outcome.shopId), processingRunId: null,
-            safeErrorCode: null, safeErrorMessage: null });
           const work = profileWorkByShop.get(outcome.shopId);
-          if (work.state !== "completed" && (work.state !== "processing" ||
-              work.processingRunId !== input.runId || work.processingPipelineTaskId !== outcome.sourceTaskId))
-            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          if (work.state === "processing") profileWorkUpdates.push({ id: work.id,
+          if (work?.state === "processing" && work.processingRunId === input.runId &&
+              work.processingPipelineTaskId === outcome.sourceTaskId) profileWorkUpdates.push({ id: work.id,
             pipelineTaskId: outcome.sourceTaskId, targetState: "completed", safeErrorCode: null,
             safeErrorMessage: null });
         } else if (outcome.state === "existing") {
@@ -2547,25 +2483,22 @@ export class PrismaRunRepository {
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         } else if (outcome.state === "failed") {
           const work = profileWorkByShop.get(outcome.shopId);
-          if (!work || (work.state === "processing" && (work.processingRunId !== input.runId ||
-              work.processingPipelineTaskId !== outcome.sourceTaskId)))
-            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          if (work.state === "processing") profileWorkUpdates.push({ id: work.id,
+          if (work?.state === "processing" && work.processingRunId === input.runId &&
+              work.processingPipelineTaskId === outcome.sourceTaskId) profileWorkUpdates.push({ id: work.id,
             pipelineTaskId: outcome.sourceTaskId, targetState: "failed",
             safeErrorCode: "LEAD_DISCOVERY_FAILED", safeErrorMessage: "LEAD_DISCOVERY_FAILED" });
         }
       }
-      if (missingProfiles.length) await transaction.shopLeadProfile.createMany({ data: missingProfiles,
-        skipDuplicates: true });
       const requiredProfiles = profileShopIds.length ? await transaction.shopLeadProfile.findMany({
         where: { shopId: { in: profileShopIds } }
       }) : [];
       const requiredProfileByShop = new Map(requiredProfiles.map((profile) => [profile.shopId, profile]));
       for (const outcome of input.leadProfileOutcomes.filter(({ state }) => state !== "failed")) {
         const profile = requiredProfileByShop.get(outcome.shopId);
-        const verifiedFingerprint = existingProfileFingerprintByShop.get(outcome.shopId) ||
-          (profile ? fingerprintJson(parseShopLeadProfile(profile.profilePayload)) : null);
-        if (!profile || profile.state !== "completed" || verifiedFingerprint !== outcome.profileFingerprint)
+        const verifiedFingerprint = profile?.state === "completed"
+          ? fingerprintJson(parseShopLeadProfile(profile.profilePayload)) : null;
+        if (!profile || profile.state !== "completed" ||
+            (outcome.state === "existing" && verifiedFingerprint !== outcome.profileFingerprint))
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
       const linked = profileShopIds.length ? await transaction.$queryRaw`

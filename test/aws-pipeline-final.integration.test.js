@@ -157,13 +157,24 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
           id: shopWorkId(shopId, "crux_bigquery", "month:202607") } })).state, "processing");
         assert.equal((await prisma.pipelineStage.findUnique({ where: { id: registered.stage.id } })).state, "aggregating");
       }
+      const competingRunId = "run_gr8_competing_publication_1";
+      await prisma.run.create({ data: { id: competingRunId, state: "running", phase: "scraping",
+        stage: "aws_traffic_crux", normalizedShopTypes: [], progress: {}, executionBackend: "aws",
+        pipelineGeneration: 1, resultsAvailable: false } });
+      await prisma.shopWork.update({ where: {
+        id: shopWorkId(shopId, "crux_bigquery", "month:202607") }, data: {
+        processingRunId: competingRunId,
+        processingPipelineTaskId: "pipeline_task_competing_publication_owner"
+      } });
       const published = await repository.publishAwsFinalResults(input, new Date(now.getTime() + 3));
       assert.equal(published.run.resultsAvailable, true); assert.equal(published.stage.state, "completed");
       assert.equal(await prisma.leadTrafficEnrichment.count({ where: { runId } }), 3);
       assert.equal(await prisma.trafficEnrichmentCache.count(), 1);
       assert.equal(await prisma.userShop.count({ where: { userId: ownerId, shopId } }), 1);
-      assert.equal((await prisma.shopWork.findUnique({ where: {
-        id: shopWorkId(shopId, "crux_bigquery", "month:202607") } })).state, "failed");
+      const sharedWork = await prisma.shopWork.findUnique({ where: {
+        id: shopWorkId(shopId, "crux_bigquery", "month:202607") } });
+      assert.equal(sharedWork.state, "processing");
+      assert.equal(sharedWork.processingRunId, competingRunId);
       assert.equal((await prisma.dataForSeoRequestLedger.findUnique({ where: { requestFingerprint } })).resultFingerprint,
         batchFingerprint);
     } finally { await prisma?.$disconnect(); await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

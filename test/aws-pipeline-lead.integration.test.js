@@ -10,7 +10,7 @@ import { assertMigrationStayedInSchema, createIsolatedTestSchema,
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
 const fp = (value) => value.repeat(64);
 
-test("G9 atomically claims global lead work for the live PipelineTask and fences competitors",
+test("AWS lead work remains independent across runs while preserving cache reuse",
   { skip: !enabled, timeout: 120000 }, async () => {
     const schema = `g9_lead_${Date.now()}_${process.pid}`;
     const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
@@ -67,7 +67,10 @@ test("G9 atomically claims global lead work for the live PipelineTask and fences
       assert.equal(competing.outcome, "owned");
       assert.deepEqual(await repository.claimAwsLeadWork({ runId: competingRunId, generation: 1,
         taskId: competing.task.id, taskToken: competingToken, shopId }, new Date(now.getTime() + 6)),
-      { outcome: "busy" });
+      { outcome: "owned" });
+      assert.equal((await prisma.shopWork.findUnique({ where: {
+        shopId_workType_scopeKey: { shopId, workType: "lead_discovery", scopeKey: "current" }
+      } })).processingPipelineTaskId, competing.task.id);
     } finally {
       await prisma?.$disconnect();
       await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

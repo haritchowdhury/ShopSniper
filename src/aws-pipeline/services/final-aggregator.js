@@ -4,7 +4,7 @@ import { domainStageManifestSchema, leadResultArtifactSchema, parseCombinedTraff
   providerSourceArtifactSchema, providerBatchArtifactSchema, parseProviderBatchArtifact,
   combinedTrafficCruxResultSchema } from "../contracts/artifacts.js";
 import { PipelineInvariantError } from "../contracts/errors.js";
-import { fingerprintJson } from "../core/canonical.js";
+import { awsDataForSeoRequestFingerprint, fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
 import { mapWithConcurrency } from "../core/bounded-concurrency.js";
@@ -309,12 +309,15 @@ export async function processFinalAggregation(message, runtime, {
       for (const targetBatch of batches(targets, DATAFORSEO_TARGET_LIMIT)) {
         const descriptor = buildDataForSeoRequest({ targets: targetBatch,
           scope: dataForSeoScopeInput(scopeKey) });
-        const ledgerEvidence = { requestFingerprint: descriptor.requestFingerprint, scopeKey,
+        const ledgerEvidence = { requestFingerprint: awsDataForSeoRequestFingerprint({
+          runId: message.runId, generation: message.generation,
+          providerRequestFingerprint: descriptor.requestFingerprint
+        }), scopeKey,
           targetCount: descriptor.targets.length, state: "ambiguous", resultFingerprint: null };
-        const prior = ledgerEvidenceByRequest.get(descriptor.requestFingerprint);
+        const prior = ledgerEvidenceByRequest.get(ledgerEvidence.requestFingerprint);
         if (prior && fingerprintJson(prior) !== fingerprintJson(ledgerEvidence))
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-        ledgerEvidenceByRequest.set(descriptor.requestFingerprint, ledgerEvidence);
+        ledgerEvidenceByRequest.set(ledgerEvidence.requestFingerprint, ledgerEvidence);
       }
     }
     if (terminalLatestCruxBigQueryCandidates.length) {

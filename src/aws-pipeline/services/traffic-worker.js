@@ -14,7 +14,7 @@ import { parseDomainStageManifest, domainStageManifestSchema,
   providerBatchArtifactSchema, providerBatchAttemptSchema } from "../contracts/artifacts.js";
 import { parseWorkMessage, aggregationCheckMessageSchema } from "../contracts/messages.js";
 import { PipelineInvariantError } from "../contracts/errors.js";
-import { fingerprintJson } from "../core/canonical.js";
+import { awsDataForSeoRequestFingerprint, fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey, providerBatchArtifactKey, providerBatchAttemptKey,
   providerSourceAttemptArtifactKey, trafficArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
@@ -420,7 +420,11 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         runSnapshot: loaded.run.trafficEnrichmentConfig, runtimeConfig, leads: providerLeads,
         repository: adapterRepository, assertLeaseActive: () => monitor.assertActive(),
         dependencyOverrides: { buildDataForSeoRequest: (input) => {
-          const descriptor = dependencies.buildDataForSeoRequestFn(input);
+          const providerDescriptor = dependencies.buildDataForSeoRequestFn(input);
+          const descriptor = { ...providerDescriptor, requestFingerprint: awsDataForSeoRequestFingerprint({
+            runId: message.runId, generation: message.generation,
+            providerRequestFingerprint: providerDescriptor.requestFingerprint
+          }) };
           requestDescriptors.set(descriptor.requestFingerprint, descriptor);
           return descriptor;
         },

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
-import { canonicalJson, fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
+import { awsDataForSeoRequestFingerprint, canonicalJson,
+  fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import * as keys from "../src/aws-pipeline/core/keys.js";
 import { safePipelineError } from "../src/aws-pipeline/contracts/errors.js";
 import { parseAggregationCheckMessage, parseWorkMessage } from "../src/aws-pipeline/contracts/messages.js";
@@ -34,6 +35,18 @@ test("canonical JSON is deterministic and rejects unsafe JavaScript values", () 
     rejects(() => canonicalJson(value), "PIPELINE_ARTIFACT_INVALID");
   const cycle = {}; cycle.self = cycle;
   rejects(() => canonicalJson(cycle), "PIPELINE_ARTIFACT_INVALID");
+});
+
+test("AWS DataForSEO paid identities are stable within a run and isolated across runs", () => {
+  const providerRequestFingerprint = "a".repeat(64);
+  const first = awsDataForSeoRequestFingerprint({ runId: "run_paid_owner_one", generation: 1,
+    providerRequestFingerprint });
+  assert.equal(first, awsDataForSeoRequestFingerprint({ runId: "run_paid_owner_one", generation: 1,
+    providerRequestFingerprint }));
+  assert.notEqual(first, awsDataForSeoRequestFingerprint({ runId: "run_paid_owner_two", generation: 1,
+    providerRequestFingerprint }));
+  assert.notEqual(first, awsDataForSeoRequestFingerprint({ runId: "run_paid_owner_one", generation: 2,
+    providerRequestFingerprint }));
 });
 
 test("keys and deterministic IDs implement the locked grammar", () => {

@@ -43,3 +43,20 @@ export function sha256Hex(bytesOrString) {
 export function fingerprintJson(value) {
   return sha256Hex(canonicalJson(value));
 }
+
+export function awsDataForSeoRequestFingerprint({
+  runId,
+  generation,
+  providerRequestFingerprint
+}) {
+  if (typeof runId !== "string" || !runId || !Number.isInteger(generation) || generation < 1 ||
+      !/^[a-f0-9]{64}$/u.test(providerRequestFingerprint)) {
+    throw new PipelineContractError("PIPELINE_ARTIFACT_INVALID");
+  }
+  return fingerprintJson({
+    contractVersion: "aws-dataforseo-run-request-v1",
+    runId,
+    generation,
+    providerRequestFingerprint
+  });
+}
