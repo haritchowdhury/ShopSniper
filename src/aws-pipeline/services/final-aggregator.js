@@ -8,8 +8,24 @@ import { fingerprintJson } from "../core/canonical.js";
 import { providerArtifactKey } from "../core/keys.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
 import { mapWithConcurrency } from "../core/bounded-concurrency.js";
+import { buildDataForSeoRequest, DATAFORSEO_COUNTRY_LOCATION_CODES,
+  DATAFORSEO_TARGET_LIMIT } from "../../enrichment/dataforseo/request.js";
 
 const S3_IO_CONCURRENCY = 8;
+
+function dataForSeoScopeInput(scopeKey) {
+  if (scopeKey === "worldwide") return "worldwide";
+  const match = /^country:([A-Z]{2}):([1-9]\d*)$/u.exec(scopeKey);
+  if (!match || DATAFORSEO_COUNTRY_LOCATION_CODES[match[1]] !== Number(match[2]))
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  return { countryIsoCode: match[1] };
+}
+
+function batches(values, limit) {
+  const output = [];
+  for (let index = 0; index < values.length; index += limit) output.push(values.slice(index, index + limit));
+  return output;
+}
 
 function producedAt(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -41,6 +57,7 @@ export async function processFinalAggregation(message, runtime, {
 } = {}) {
   let phase = "claim";
   let reconciliationContext = null;
+  let publicationStep = null;
   const token = randomUUID();
   const claim = await runtime.coordinator.claimAggregator({ runId: message.runId, stage: "traffic_crux",
     generation: message.generation, owner: `final-aggregation-${randomUUID()}`, token,
@@ -69,6 +86,8 @@ export async function processFinalAggregation(message, runtime, {
     const workOutcomes = [];
     const diagnostics = [];
     const ledgerEvidenceByRequest = new Map();
+    const ambiguousDataForSeoCandidates = [];
+    const ambiguousCruxBigQueryCandidates = [];
     const summaries = { dataforseo: [], cruxRest: [], cruxBigQuery: [] };
     phase = "combined_artifacts";
     const combinedEntries = await mapWithConcurrency(complete.tasks, S3_IO_CONCURRENCY, async (task) => {
@@ -155,7 +174,15 @@ export async function processFinalAggregation(message, runtime, {
         if (artifact.leadTrafficRows.length !== 1 || artifact.leadTrafficRows[0].source !== source)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         if (source === "dataforseo") for (const evidence of artifact.requestEvidence) {
-          if (evidence.disposition !== "ledger") continue;
+          if (evidence.disposition !== "ledger") {
+            if (evidence.disposition === "not_dispatched" && evidence.reason === "work_ambiguous") {
+              const selection = plan.sourceKeys.dataForSeo.find(({ scopeKey }) => scopeKey === evidence.scopeKey);
+              if (!selection || selection.reuse) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+              ambiguousDataForSeoCandidates.push({ shopId: task.itemKey, identity: selection.identity,
+                scopeKey: evidence.scopeKey });
+            }
+            continue;
+          }
           let ledgerEvidence;
           if (evidence.ledgerState === "succeeded") {
             reconciliationContext.check = "batch_presence";
@@ -186,12 +213,50 @@ export async function processFinalAggregation(message, runtime, {
         for (const scope of artifact.scopeStates) {
           if (source === "dataforseo" && evidenceByScope.get(scope.scopeKey)?.disposition === "not_dispatched")
             continue;
+          if (source === "crux_bigquery" && scope.scopeKey === "latest" && scope.state === "ambiguous") {
+            ambiguousCruxBigQueryCandidates.push({ shopId: task.itemKey, pipelineTaskId: task.id,
+              state: scope.state });
+            continue;
+          }
           workOutcomes.push({ shopId: task.itemKey, workType,
             scopeKey: scope.scopeKey, state: scope.state, pipelineTaskId: task.id });
         }
         diagnostics.push(...artifact.diagnostics.map((value) => ({ source, shopId: task.itemKey, value })));
         summaries[component].push(artifact.summary);
       }
+    }
+    const ownedAmbiguousDataForSeo = ambiguousDataForSeoCandidates.length
+      ? await runtime.repository.readAwsAmbiguousDataForSeoTargets({ runId: message.runId,
+        generation: message.generation, aggregationToken: token,
+        candidates: ambiguousDataForSeoCandidates }) : [];
+    const ambiguousDataForSeoTargetsByScope = new Map();
+    for (const candidate of ownedAmbiguousDataForSeo) {
+      const targets = ambiguousDataForSeoTargetsByScope.get(candidate.scopeKey) || new Map();
+      const priorShop = targets.get(candidate.identity);
+      if (priorShop && priorShop !== candidate.shopId)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      targets.set(candidate.identity, candidate.shopId);
+      ambiguousDataForSeoTargetsByScope.set(candidate.scopeKey, targets);
+    }
+    for (const [scopeKey, targetsByIdentity] of [...ambiguousDataForSeoTargetsByScope.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))) {
+      const targets = [...targetsByIdentity.keys()].sort();
+      for (const targetBatch of batches(targets, DATAFORSEO_TARGET_LIMIT)) {
+        const descriptor = buildDataForSeoRequest({ targets: targetBatch,
+          scope: dataForSeoScopeInput(scopeKey) });
+        const ledgerEvidence = { requestFingerprint: descriptor.requestFingerprint, scopeKey,
+          targetCount: descriptor.targets.length, state: "ambiguous", resultFingerprint: null };
+        const prior = ledgerEvidenceByRequest.get(descriptor.requestFingerprint);
+        if (prior && fingerprintJson(prior) !== fingerprintJson(ledgerEvidence))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        ledgerEvidenceByRequest.set(descriptor.requestFingerprint, ledgerEvidence);
+      }
+    }
+    if (ambiguousCruxBigQueryCandidates.length) {
+      const resolved = await runtime.repository.readAwsAmbiguousCruxBigQueryWork({ runId: message.runId,
+        generation: message.generation, aggregationToken: token,
+        candidates: ambiguousCruxBigQueryCandidates });
+      workOutcomes.push(...resolved.map((item) => ({ ...item, workType: "crux_bigquery" })));
     }
     const reuseSelections = manifest.workPlan.domains.flatMap((plan) =>
       [...plan.sourceKeys.dataForSeo, plan.sourceKeys.cruxRest, plan.sourceKeys.cruxBigQuery]
@@ -240,7 +305,9 @@ export async function processFinalAggregation(message, runtime, {
       leadProfileOutcomes, workOutcomes,
       dataForSeoLedgerEvidence: [...ledgerEvidenceByRequest.values()].sort((a, b) =>
         a.requestFingerprint < b.requestFingerprint ? -1 : a.requestFingerprint > b.requestFingerprint ? 1 : 0),
-      diagnostics, trafficSummary, status: {} }, new Date());
+      diagnostics, trafficSummary, status: {} }, new Date(), {
+      afterStep(step) { publicationStep = step; }
+    });
     return { terminal: true, outcome: "completed" };
   } catch (error) {
     if (error?.code === "PIPELINE_NOT_READY") return { terminal: true, outcome: "not_ready" };
@@ -248,6 +315,7 @@ export async function processFinalAggregation(message, runtime, {
     console.error(JSON.stringify({ timestamp: new Date().toISOString(), event: "final_aggregation_failed",
       runId: message.runId, stage: "traffic_crux", generation: message.generation, phase,
       ...(phase === "source_reconciliation" && reconciliationContext ? reconciliationContext : {}),
+      ...(phase === "publication" && publicationStep ? { publicationStep } : {}),
       safeCode: typeof error?.code === "string" ? error.code : "PIPELINE_UNEXPECTED" }));
     throw error;
   } finally { await monitor.stop().catch(() => {}); }

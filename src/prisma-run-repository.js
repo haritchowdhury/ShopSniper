@@ -2270,9 +2270,91 @@ export class PrismaRunRepository {
     });
   }
 
+  async readAwsAmbiguousDataForSeoTargets(input) {
+    if (!Array.isArray(input?.candidates)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const candidates = input.candidates.map((candidate, ordinal) => ({ ...candidate, ordinal }));
+    requireUniqueBatchKeys("AWS ambiguous DataForSEO candidates", candidates,
+      ({ shopId, scopeKey }) => `${shopId}\0${scopeKey}`);
+    if (candidates.some(({ shopId, identity, scopeKey }) => typeof shopId !== "string" || !shopId ||
+        typeof identity !== "string" || !identity || typeof scopeKey !== "string" || !scopeKey))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+      const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
+      const rows = candidates.length ? await transaction.$queryRaw`
+        WITH input AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(candidates)}::jsonb) AS value(
+            "shopId" text, "identity" text, "scopeKey" text, "ordinal" integer
+          )
+        )
+        SELECT input."shopId", input."identity", input."scopeKey", input."ordinal",
+          work."processingRunId", work."processingPipelineTaskId"
+        FROM input JOIN "ShopWork" work
+          ON work."shopId" = input."shopId"
+          AND work."workType" = 'dataforseo'::"ShopWorkType"
+          AND work."scopeKey" = input."scopeKey"
+        WHERE work."state" = 'ambiguous'::"ShopWorkState"
+        ORDER BY input."ordinal" ASC
+      ` : [];
+      const selected = [];
+      for (const row of rows) {
+        if (row.processingRunId !== input.runId) continue;
+        const task = taskByShop.get(row.shopId);
+        if (!task || row.processingPipelineTaskId !== task.id)
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        selected.push({ shopId: row.shopId, identity: row.identity, scopeKey: row.scopeKey });
+      }
+      return selected;
+    });
+  }
+
+  async readAwsAmbiguousCruxBigQueryWork(input) {
+    if (!Array.isArray(input?.candidates)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    const candidates = input.candidates.map((candidate, ordinal) => ({ ...candidate, ordinal }));
+    requireUniqueBatchKeys("AWS ambiguous CrUX BigQuery candidates", candidates, ({ shopId }) => shopId);
+    if (candidates.some(({ shopId, pipelineTaskId, state }) => typeof shopId !== "string" || !shopId ||
+        typeof pipelineTaskId !== "string" || !pipelineTaskId || state !== "ambiguous"))
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    return this.prisma.$transaction(async (transaction) => {
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+      const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
+      for (const candidate of candidates) if (taskByShop.get(candidate.shopId)?.id !== candidate.pipelineTaskId)
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const rows = candidates.length ? await transaction.$queryRaw`
+        WITH input AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(candidates)}::jsonb) AS value(
+            "shopId" text, "pipelineTaskId" text, "state" text, "ordinal" integer
+          )
+        )
+        SELECT input."shopId", input."pipelineTaskId", input."state", input."ordinal", work."scopeKey"
+        FROM input JOIN "ShopWork" work
+          ON work."shopId" = input."shopId"
+          AND work."workType" = 'crux_bigquery'::"ShopWorkType"
+          AND work."state" = 'processing'::"ShopWorkState"
+          AND work."processingRunId" = ${input.runId}
+          AND work."processingPipelineTaskId" = input."pipelineTaskId"
+        ORDER BY input."ordinal" ASC, work."scopeKey" ASC
+      ` : [];
+      const counts = new Map();
+      for (const row of rows) {
+        if (!/^month:20\d{4}$/u.test(row.scopeKey))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        counts.set(row.shopId, (counts.get(row.shopId) || 0) + 1);
+      }
+      if ([...counts.values()].some((count) => count !== 1))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      return rows.map(({ ordinal: _ordinal, ...row }) => row);
+    });
+  }
+
   async publishAwsFinalResults(input, now = new Date(), { afterStep = async () => {} } = {}) {
     if (typeof afterStep !== "function" || !Array.isArray(input.dataForSeoLedgerEvidence))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    await afterStep("input_shape_validated");
     const ledgerEvidence = [...input.dataForSeoLedgerEvidence];
     requireUniqueBatchKeys("AWS final DataForSEO ledger evidence", ledgerEvidence,
       ({ requestFingerprint }) => requestFingerprint);
@@ -2282,6 +2364,7 @@ export class PrismaRunRepository {
         (entry.state === "succeeded") !== /^[a-f0-9]{64}$/u.test(entry.resultFingerprint || "") ||
         (index > 0 && entry.requestFingerprint <= ledgerEvidence[index - 1].requestFingerprint)))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    await afterStep("ledger_evidence_validated");
     const cacheRows = input.cacheRows.map((row) => trafficCacheRecordToUpsert(cacheId(row), row));
     const trafficRows = input.leadTrafficRows.map((row) => leadTrafficEnrichmentRecordToCreate(
       childId("lead_traffic", input.runId, `${row.leadId}:${row.source}`), input.runId, row.leadId, row));
@@ -2292,11 +2375,13 @@ export class PrismaRunRepository {
       (row) => `${row.shopId}\0${row.workType}\0${row.scopeKey}`);
     requireUniqueBatchKeys("AWS final lead profile outcomes", input.leadProfileOutcomes,
       (row) => row.shopId);
+    await afterStep("publication_input_validated");
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
         stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
       if (owned.run.resultsAvailable) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      await afterStep("publication_ownership_validated");
       const ledgers = await transaction.$queryRaw`
         SELECT "runId", "requestFingerprint", "scopeKey", "targetCount", "state", "resultFingerprint"
         FROM "DataForSeoRequestLedger" WHERE "runId" = ${input.runId}
@@ -2310,6 +2395,7 @@ export class PrismaRunRepository {
             row.state !== evidence.state || (row.resultFingerprint ?? null) !== evidence.resultFingerprint)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
+      await afterStep("ledger_rows_validated");
       const writtenCache = await bulkUpsertTrafficCache(transaction, cacheRows, now);
       if (writtenCache.length !== cacheRows.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       await afterStep("cache_written");

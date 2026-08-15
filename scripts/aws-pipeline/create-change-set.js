@@ -11,7 +11,7 @@ export const DEPLOYMENT = Object.freeze({
   environment: "production",
   phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
     "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
-    "traffic-repair", "final-repair"]),
+    "traffic-repair", "final-repair", "final-publication-repair"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -90,7 +90,7 @@ export function parseArguments(argv) {
   if (result.applyReviewedChangeSet &&
       (!result.execute || !["full", "activate", "code", "engine", "artifact-access", "provider-identity",
         "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk", "traffic-repair",
-        "final-repair"]
+        "final-repair", "final-publication-repair"]
         .includes(result.phase))) {
     fail("--apply-reviewed-change-set requires a reviewed update phase with --execute");
   }
@@ -243,6 +243,9 @@ async function requireApproval(packet, options) {
   if (options.phase === "final-repair" && !/^current_window:\s*G-R21\s*$/mu.test(state)) {
     fail("G-R21 is not the active window");
   }
+  if (options.phase === "final-publication-repair" && !/^current_window:\s*G-R24\s*$/mu.test(state)) {
+    fail("G-R24 is not the active window");
+  }
   return true;
 }
 
@@ -251,9 +254,15 @@ function parameterArguments(options, packet, manifest = null) {
     ["Environment", options.environment], ["ArtifactBucketName", packet.bucket]
   ];
   if (manifest) for (const item of manifest.objects) {
-    values.push([`${item.logicalId}CodeKey`, item.key], [`${item.logicalId}CodeVersion`, item.versionId]);
+    if (options.phase === "final-publication-repair" && item.logicalId !== "FinalAggregator") {
+      values.push([`${item.logicalId}CodeKey`, null], [`${item.logicalId}CodeVersion`, null]);
+    } else {
+      values.push([`${item.logicalId}CodeKey`, item.key], [`${item.logicalId}CodeVersion`, item.versionId]);
+    }
   }
-  return values.map(([key, value]) => `ParameterKey=${key},ParameterValue=${value}`);
+  return values.map(([key, value]) => value == null
+    ? `ParameterKey=${key},UsePreviousValue=true`
+    : `ParameterKey=${key},ParameterValue=${value}`);
 }
 
 function normalizedChanges(description) {
@@ -632,7 +641,8 @@ function changeSetName(kind, packet) {
     kind === "engine" ? "gr13" : kind === "artifact-access" ? "gr14" :
       kind === "provider-identity" ? "gr15" : kind === "lead-work-resume" ? "gr17" :
         kind === "lead-memory" ? "gr18" : kind === "lead-bounded-extraction" ? "gr19" :
-          ["bounded-bulk", "traffic-repair", "final-repair"].includes(kind) ? "gr21" : "g14";
+          ["bounded-bulk", "traffic-repair", "final-repair"].includes(kind) ? "gr21" :
+            kind === "final-publication-repair" ? "gr24" : "g14";
   return `${prefix}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
@@ -764,11 +774,13 @@ async function executeFull(options, packet) {
   const boundedBulk = options.phase === "bounded-bulk";
   const trafficRepair = options.phase === "traffic-repair";
   const finalRepair = options.phase === "final-repair";
+  const finalPublicationRepair = options.phase === "final-publication-repair";
   const name = changeSetName(activation ? "activate" : code ? "code" : engine ? "engine" :
     artifactAccess ? "artifact-access" : providerIdentity ? "provider-identity" :
       leadWorkResume ? "lead-work-resume" : leadMemory ? "lead-memory" :
         leadBoundedExtraction ? "lead-bounded-extraction" : boundedBulk ? "bounded-bulk" :
-          trafficRepair ? "traffic-repair" : finalRepair ? "final-repair" : "full", packet);
+          trafficRepair ? "traffic-repair" : finalRepair ? "final-repair" :
+            finalPublicationRepair ? "final-publication-repair" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
@@ -785,6 +797,7 @@ async function executeFull(options, packet) {
                       boundedBulk ? "Approved G-R21 guarded G-R20 bounded-bulk deployment" :
                         trafficRepair ? "Approved G-R21 TrafficWorker diagnostic repair" :
                           finalRepair ? "Approved G-R21 FinalAggregator diagnostic repair" :
+                            finalPublicationRepair ? "Approved G-R24 final publication recovery repair" :
                 "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
@@ -803,6 +816,7 @@ async function executeFull(options, packet) {
   else if (boundedBulk) assertBoundedBulkChanges(changes, described);
   else if (trafficRepair) assertTrafficRepairChanges(changes, described);
   else if (finalRepair) assertFinalRepairChanges(changes, described);
+  else if (finalPublicationRepair) assertFinalRepairChanges(changes, described);
   else assertFullChanges(changes, packet);
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(changeSetRecordPath, `${JSON.stringify({ approvalToken: packet.approvalToken,
@@ -817,6 +831,7 @@ async function executeFull(options, packet) {
                 boundedBulk ? "BOUNDED_BULK_CHANGE_SET_REVIEWED" :
                   trafficRepair ? "TRAFFIC_REPAIR_CHANGE_SET_REVIEWED" :
                     finalRepair ? "FINAL_REPAIR_CHANGE_SET_REVIEWED" :
+                      finalPublicationRepair ? "FINAL_PUBLICATION_REPAIR_CHANGE_SET_REVIEWED" :
       "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
@@ -833,6 +848,7 @@ async function executeFull(options, packet) {
           boundedBulk ? "BOUNDED_BULK_STACK_COMPLETE" :
             trafficRepair ? "TRAFFIC_REPAIR_STACK_COMPLETE" :
               finalRepair ? "FINAL_REPAIR_STACK_COMPLETE" :
+                finalPublicationRepair ? "FINAL_PUBLICATION_REPAIR_STACK_COMPLETE" :
       "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 

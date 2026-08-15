@@ -238,7 +238,7 @@ test("deployment constants stay aligned with the packet", () => {
     environment: "production",
     phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
       "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
-      "traffic-repair", "final-repair"],
+      "traffic-repair", "final-repair", "final-publication-repair"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],

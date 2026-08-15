@@ -121,6 +121,10 @@ async function oneDomainFinalHarness(mutator = () => {}) {
     return { value: sourceArtifacts[source], contentFingerprint: fingerprintJson(sourceArtifacts[source]) };
   } }, repository: {
     async readAwsFinalReuseRows() { return { trafficRows: [], leadStage: {}, leadTasks: [leadTask] }; },
+    async readAwsAmbiguousDataForSeoTargets({ candidates }) { return candidates; },
+    async readAwsAmbiguousCruxBigQueryWork({ candidates }) {
+      return candidates.map((candidate) => ({ ...candidate, scopeKey: "month:202607" }));
+    },
     async publishAwsFinalResults(input) { published = input; return { resultFingerprint: "d".repeat(64) }; }
   } };
   const result = await processFinalAggregation(message, runtime, { createLeaseMonitorFn: () => ({
@@ -146,7 +150,7 @@ test("final aggregator accepts a terminal pre-month BigQuery artifact at the fro
   });
   assert.deepEqual(result, { terminal: true, outcome: "completed" });
   assert.ok(published.workOutcomes.some(({ workType, scopeKey, state }) =>
-    workType === "crux_bigquery" && scopeKey === "latest" && state === "ambiguous"));
+    workType === "crux_bigquery" && scopeKey === "month:202607" && state === "ambiguous"));
 });
 
 test("final aggregator rejects BigQuery no-coverage at latest before a month was resolved", async () => {
@@ -176,6 +180,21 @@ test("final aggregator validates a succeeded paid batch reference and emits uniq
     scopeKey: "worldwide", targetCount: 1, state: "succeeded", resultFingerprint:
     published.dataForSeoLedgerEvidence[0].resultFingerprint }]);
   assert.match(published.dataForSeoLedgerEvidence[0].resultFingerprint, /^[a-f0-9]{64}$/u);
+});
+
+test("final aggregator reconstructs ambiguous paid ledgers after work settled before artifacts", async () => {
+  const { published } = await oneDomainFinalHarness(({ combined, sourceArtifacts }) => {
+    combined.components.dataforseo.state = "ambiguous";
+    sourceArtifacts.dataforseo.state = "ambiguous";
+    sourceArtifacts.dataforseo.scopeStates = sourceArtifacts.dataforseo.scopeStates
+      .map(({ scopeKey }) => ({ scopeKey, state: "ambiguous" }));
+    sourceArtifacts.dataforseo.requestEvidence = sourceArtifacts.dataforseo.scopeStates
+      .map(({ scopeKey }) => ({ scopeKey, disposition: "not_dispatched", reason: "work_ambiguous" }));
+    sourceArtifacts.dataforseo.leadTrafficRows[0].state = "ambiguous";
+  });
+  assert.equal(published.dataForSeoLedgerEvidence.length, 1);
+  assert.ok(published.dataForSeoLedgerEvidence.every((entry) => entry.state === "ambiguous" &&
+    entry.targetCount === 1 && entry.resultFingerprint === null && /^[a-f0-9]{64}$/u.test(entry.requestFingerprint)));
 });
 
 for (const [name, mutate] of [
