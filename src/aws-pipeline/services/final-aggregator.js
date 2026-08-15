@@ -39,6 +39,8 @@ function aggregateSourceSummaries(values) {
 export async function processFinalAggregation(message, runtime, {
   createLeaseMonitorFn = createPipelineLeaseMonitor
 } = {}) {
+  let phase = "claim";
+  let reconciliationContext = null;
   const token = randomUUID();
   const claim = await runtime.coordinator.claimAggregator({ runId: message.runId, stage: "traffic_crux",
     generation: message.generation, owner: `final-aggregation-${randomUUID()}`, token,
@@ -48,10 +50,12 @@ export async function processFinalAggregation(message, runtime, {
     renew: (now) => runtime.coordinator.renewAggregator({ stageId: claim.stage.id, token,
       leaseDurationMs: 120000 }, now) });
   try {
+    phase = "load_complete_stage";
     const complete = await runtime.coordinator.getCompleteStage({ runId: message.runId,
       stage: "traffic_crux", generation: message.generation, token });
     if (complete.tasks.some(({ state }) => state !== "succeeded"))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    phase = "domain_manifest";
     const manifestTime = producedAt(complete.stage.manifestProducedAt);
     const storedManifest = await runtime.artifactStore.getValidated({ key: complete.stage.manifestS3Key,
       expected: { contractVersion: "domain-stage-manifest-v1", runId: message.runId, stage: "domain",
@@ -66,6 +70,7 @@ export async function processFinalAggregation(message, runtime, {
     const diagnostics = [];
     const ledgerEvidenceByRequest = new Map();
     const summaries = { dataforseo: [], cruxRest: [], cruxBigQuery: [] };
+    phase = "combined_artifacts";
     const combinedEntries = await mapWithConcurrency(complete.tasks, S3_IO_CONCURRENCY, async (task) => {
       const plan = planByShop.get(task.itemKey);
       if (!plan || !task.artifactS3Key || !task.artifactFingerprint)
@@ -77,6 +82,7 @@ export async function processFinalAggregation(message, runtime, {
       if (combined.shopId !== task.itemKey) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return { task, plan, combined };
     });
+    phase = "source_artifacts";
     const sourcePlan = combinedEntries.flatMap(({ task, combined }) =>
       [["dataforseo", "dataforseo", "dataforseo"], ["cruxRest", "crux_rest", "crux-rest"],
         ["cruxBigQuery", "crux_bigquery", "crux-bigquery"]].flatMap(([component, source, keySource]) => {
@@ -111,41 +117,52 @@ export async function processFinalAggregation(message, runtime, {
         batchReferences.set(reference.key, reference);
       }
     }
+    phase = "batch_artifacts";
     const batchEntries = await mapWithConcurrency([...batchReferences.values()].sort((a, b) =>
       a.key.localeCompare(b.key)), S3_IO_CONCURRENCY, async (reference) => {
       const stored = await runtime.artifactStore.getValidated({ key: reference.key,
         expected: reference.expected, schema: providerBatchArtifactSchema });
       return [reference.key, { stored, batch: parseProviderBatchArtifact(stored.value) }];
     });
+    phase = "source_reconciliation";
     const batchByKey = new Map(batchEntries);
     for (const { task, plan, combined } of combinedEntries) {
       for (const [component, source, keySource] of [["dataforseo", "dataforseo", "dataforseo"],
         ["cruxRest", "crux_rest", "crux-rest"], ["cruxBigQuery", "crux_bigquery", "crux-bigquery"]]) {
+        reconciliationContext = { itemId: task.itemKey, source, check: "component" };
         const part = combined.components[component];
         if (part.state === "skipped") continue;
         const entry = sourceByTaskComponent.get(`${task.itemKey}\0${component}`);
         const artifact = entry?.artifact;
         if (!artifact) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        reconciliationContext.check = "source_identity";
         if (artifact.shopId !== task.itemKey || artifact.source !== source || artifact.state !== part.state)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        reconciliationContext.check = "scope_keys";
         const actualScopes = artifact.scopeStates.map(({ scopeKey }) => scopeKey);
         const plannedScopes = source === "dataforseo" ? plan.sourceKeys.dataForSeo.map(({ scopeKey }) => scopeKey).sort() :
           source === "crux_rest" ? [plan.sourceKeys.cruxRest.scopeKey] : [plan.sourceKeys.cruxBigQuery.scopeKey];
         if (source === "crux_bigquery" && plannedScopes[0] === "latest") {
-          if (actualScopes.length !== 1 || !/^month:20\d{4}$/u.test(actualScopes[0]))
+          const preMonthTerminal = actualScopes[0] === "latest" &&
+            ["ambiguous", "unavailable", "contract_mismatch"].includes(artifact.state);
+          if (actualScopes.length !== 1 ||
+              (!/^month:20\d{4}$/u.test(actualScopes[0]) && !preMonthTerminal))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         } else if (actualScopes.length !== plannedScopes.length ||
             actualScopes.some((scope, index) => scope !== plannedScopes[index]))
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        reconciliationContext.check = "lead_traffic_row";
         if (artifact.leadTrafficRows.length !== 1 || artifact.leadTrafficRows[0].source !== source)
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         if (source === "dataforseo") for (const evidence of artifact.requestEvidence) {
           if (evidence.disposition !== "ledger") continue;
           let ledgerEvidence;
           if (evidence.ledgerState === "succeeded") {
+            reconciliationContext.check = "batch_presence";
             const memoized = batchByKey.get(evidence.batchArtifactKey);
             if (!memoized) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
             const { stored: batchStored, batch } = memoized;
+            reconciliationContext.check = "batch_contract";
             if (batch.source !== "dataforseo" || batch.runId !== message.runId ||
                 batch.generation !== message.generation || batch.scopeKey !== evidence.scopeKey ||
                 batch.providerRequestFingerprint !== evidence.requestFingerprint ||
@@ -158,6 +175,7 @@ export async function processFinalAggregation(message, runtime, {
           } else ledgerEvidence = { requestFingerprint: evidence.requestFingerprint, scopeKey: evidence.scopeKey,
             targetCount: evidence.targetCount, state: evidence.ledgerState, resultFingerprint: null };
           const prior = ledgerEvidenceByRequest.get(evidence.requestFingerprint);
+          reconciliationContext.check = "ledger_consistency";
           if (prior && fingerprintJson(prior) !== fingerprintJson(ledgerEvidence))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           ledgerEvidenceByRequest.set(evidence.requestFingerprint, ledgerEvidence);
@@ -178,10 +196,12 @@ export async function processFinalAggregation(message, runtime, {
     const reuseSelections = manifest.workPlan.domains.flatMap((plan) =>
       [...plan.sourceKeys.dataForSeo, plan.sourceKeys.cruxRest, plan.sourceKeys.cruxBigQuery]
         .filter(({ reuse }) => reuse).map((selection) => ({ ...selection, ...selection.reuse })));
+    phase = "reuse_rows";
     const reused = await runtime.repository.readAwsFinalReuseRows({ runId: message.runId,
       generation: message.generation, stageId: complete.stage.id, aggregationToken: token,
       selections: reuseSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) });
     cacheRows.push(...reused.trafficRows);
+    phase = "lead_artifacts";
     const leadProfileOutcomes = [];
     const leadTaskByShop = new Map(reused.leadTasks.map((task) => [task.itemKey, task]));
     const leadPlans = [...manifest.workPlan.domains].sort((a, b) => a.shopId.localeCompare(b.shopId))
@@ -213,6 +233,7 @@ export async function processFinalAggregation(message, runtime, {
       ...(summaries.dataforseo.length && { dataforseo: aggregateSourceSummaries(summaries.dataforseo) }),
       ...(summaries.cruxRest.length && { cruxRest: aggregateSourceSummaries(summaries.cruxRest) }),
       ...(summaries.cruxBigQuery.length && { cruxBigQuery: aggregateSourceSummaries(summaries.cruxBigQuery) }) };
+    phase = "publication";
     await monitor.renewNow(); await monitor.stop();
     await runtime.repository.publishAwsFinalResults({ runId: message.runId, generation: message.generation,
       stageId: complete.stage.id, aggregationToken: token, cacheRows, leadTrafficRows,
@@ -224,6 +245,10 @@ export async function processFinalAggregation(message, runtime, {
   } catch (error) {
     if (error?.code === "PIPELINE_NOT_READY") return { terminal: true, outcome: "not_ready" };
     if (error?.code === "PIPELINE_CANCELLED") return { terminal: true, outcome: "cancelled" };
+    console.error(JSON.stringify({ timestamp: new Date().toISOString(), event: "final_aggregation_failed",
+      runId: message.runId, stage: "traffic_crux", generation: message.generation, phase,
+      ...(phase === "source_reconciliation" && reconciliationContext ? reconciliationContext : {}),
+      safeCode: typeof error?.code === "string" ? error.code : "PIPELINE_UNEXPECTED" }));
     throw error;
   } finally { await monitor.stop().catch(() => {}); }
 }

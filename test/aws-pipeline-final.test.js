@@ -137,6 +137,27 @@ test("final aggregator reconstructs all independent source and lead artifacts", 
   assert.deepEqual(published.leadProfileOutcomes.map(({ state }) => state), ["new"]);
 });
 
+test("final aggregator accepts a terminal pre-month BigQuery artifact at the frozen latest scope", async () => {
+  const { result, published } = await oneDomainFinalHarness(({ combined, sourceArtifacts }) => {
+    combined.components.cruxBigQuery.state = "ambiguous";
+    sourceArtifacts["crux-bigquery"].state = "ambiguous";
+    sourceArtifacts["crux-bigquery"].scopeStates = [{ scopeKey: "latest", state: "ambiguous" }];
+    sourceArtifacts["crux-bigquery"].leadTrafficRows[0].state = "ambiguous";
+  });
+  assert.deepEqual(result, { terminal: true, outcome: "completed" });
+  assert.ok(published.workOutcomes.some(({ workType, scopeKey, state }) =>
+    workType === "crux_bigquery" && scopeKey === "latest" && state === "ambiguous"));
+});
+
+test("final aggregator rejects BigQuery no-coverage at latest before a month was resolved", async () => {
+  await assert.rejects(oneDomainFinalHarness(({ combined, sourceArtifacts }) => {
+    combined.components.cruxBigQuery.state = "no_coverage";
+    sourceArtifacts["crux-bigquery"].state = "no_coverage";
+    sourceArtifacts["crux-bigquery"].scopeStates = [{ scopeKey: "latest", state: "no_coverage" }];
+    sourceArtifacts["crux-bigquery"].leadTrafficRows[0].state = "no_coverage";
+  }), (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+});
+
 test("final aggregator validates a succeeded paid batch reference and emits unique ledger evidence", async () => {
   const { published } = await oneDomainFinalHarness(({ sourceArtifacts, batchArtifacts }) => {
     const scopeKey = sourceArtifacts.dataforseo.scopeStates[0].scopeKey;

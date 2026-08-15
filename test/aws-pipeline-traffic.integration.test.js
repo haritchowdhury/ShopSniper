@@ -176,7 +176,7 @@ test("G-R20 claims a positional mixed 1,000-row traffic corpus within the defaul
       const runId = "run_gr20_traffic_scale_0001";
       const leaseToken = randomUUID();
       const stageId = pipelineStageId(runId, "traffic_crux", 1);
-      const ownerKinds = ["fresh", "expired", "ambiguous", "failed", "pending", "same_task",
+      const ownerKinds = ["fresh", "expired", "identity_changed", "ambiguous", "failed", "pending", "same_task",
         "live_task", "cancelled_task", "inactive_task", "live_legacy", "expired_legacy"];
       const shops = Array.from({ length: 1000 }, (_, index) => ({
         id: `shop_gr20_scale_${String(index).padStart(4, "0")}`,
@@ -225,7 +225,8 @@ test("G-R20 claims a positional mixed 1,000-row traffic corpus within the defaul
         const kind = ownerKinds[index % ownerKinds.length];
         const base = { id: shopWorkId(shop.id, "crux_rest", "current"), shopId: shop.id,
           workType: "crux_rest", scopeKey: "current", state: "pending" };
-        if (kind === "fresh" || kind === "expired") return { ...base, state: "completed", completedAt: now };
+        if (kind === "fresh" || kind === "expired" || kind === "identity_changed")
+          return { ...base, state: "completed", completedAt: now };
         if (kind === "ambiguous") return { ...base, state: "ambiguous" };
         if (kind === "failed") return { ...base, state: "failed" };
         if (kind === "same_task") return { ...base, state: "processing", processingRunId: runId,
@@ -264,9 +265,10 @@ test("G-R20 claims a positional mixed 1,000-row traffic corpus within the defaul
         rows.length === 1 && rows[0].expiresAt > now), true);
       const afterRows = await prisma.shopWork.findMany({ where: { shopId: { in: shops.map(({ id }) => id) } } });
       const afterByShop = new Map(afterRows.map((row) => [row.shopId, row]));
-      const updatedIds = new Set(shops.filter((_, index) => ["expired", "failed", "pending", "cancelled_task",
+      const updatedIds = new Set(shops.filter((_, index) => ["expired", "identity_changed", "failed", "pending", "cancelled_task",
         "inactive_task", "expired_legacy"].includes(ownerKinds[index % ownerKinds.length]))
       .map(({ id }) => shopWorkId(id, "crux_rest", "current")));
+      assert.ok(shops.some((_, index) => ownerKinds[index % ownerKinds.length] === "identity_changed"));
       assert.deepEqual(new Set(afterRows.filter((row) => row.processingPipelineTaskId ===
         tasks[shops.findIndex(({ id }) => id === row.shopId)]?.id && updatedIds.has(row.id)).map(({ id }) => id)), updatedIds);
       for (let index = 0; index < shops.length; index += 1) {

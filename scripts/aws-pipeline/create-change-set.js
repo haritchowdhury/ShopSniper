@@ -10,7 +10,8 @@ export const DEPLOYMENT = Object.freeze({
   stack: "storesignal-production-pipeline",
   environment: "production",
   phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
-    "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction"]),
+    "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
+    "traffic-repair", "final-repair"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -88,7 +89,8 @@ export function parseArguments(argv) {
   }
   if (result.applyReviewedChangeSet &&
       (!result.execute || !["full", "activate", "code", "engine", "artifact-access", "provider-identity",
-        "lead-work-resume", "lead-memory", "lead-bounded-extraction"]
+        "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk", "traffic-repair",
+        "final-repair"]
         .includes(result.phase))) {
     fail("--apply-reviewed-change-set requires a reviewed update phase with --execute");
   }
@@ -231,6 +233,15 @@ async function requireApproval(packet, options) {
   }
   if (options.phase === "lead-bounded-extraction" && !/^current_window:\s*G-R19\s*$/mu.test(state)) {
     fail("G-R19 is not the active window");
+  }
+  if (options.phase === "bounded-bulk" && !/^current_window:\s*G-R21\s*$/mu.test(state)) {
+    fail("G-R21 is not the active window");
+  }
+  if (options.phase === "traffic-repair" && !/^current_window:\s*G-R21\s*$/mu.test(state)) {
+    fail("G-R21 is not the active window");
+  }
+  if (options.phase === "final-repair" && !/^current_window:\s*G-R21\s*$/mu.test(state)) {
+    fail("G-R21 is not the active window");
   }
   return true;
 }
@@ -435,6 +446,62 @@ export function assertLeadWorkResumeChanges(changes, description) {
   }
 }
 
+export function assertBoundedBulkChanges(changes, description) {
+  try {
+    assertEngineChanges(changes, description);
+  } catch (error) {
+    fail(String(error?.message || "Bounded-bulk code detail drift").replaceAll("Engine", "Bounded-bulk"));
+  }
+}
+
+export function assertTrafficRepairChanges(changes, description) {
+  const expected = [{ action: "Modify", logicalId: "TrafficWorker",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Traffic-repair change-set inventory differs from the approved TrafficWorker-only update");
+  }
+  const change = description.Changes?.[0]?.ResourceChange;
+  const details = change?.Details || [];
+  const parameterNames = new Set(["TrafficWorkerCodeKey", "TrafficWorkerCodeVersion"]);
+  const parameterCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+    detail.ChangeSource === "ParameterReference");
+  const dynamicCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+    detail.ChangeSource === "DirectModification");
+  if (change?.LogicalResourceId !== "TrafficWorker" || parameterCode.length !== 2 ||
+      dynamicCode.length !== 1 || details.length !== 3 ||
+      new Set(parameterCode.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+      parameterCode.some((detail) => detail.Evaluation !== "Static" ||
+        !parameterNames.has(detail.CausingEntity) || detail.Target?.RequiresRecreation !== "Never") ||
+      dynamicCode.some((detail) => detail.Evaluation !== "Dynamic" ||
+        detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never")) {
+    fail("Traffic-repair code detail drift");
+  }
+}
+
+export function assertFinalRepairChanges(changes, description) {
+  const expected = [{ action: "Modify", logicalId: "FinalAggregator",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  if (canonical(changes) !== canonical(expected)) {
+    fail("Final-repair change-set inventory differs from the approved FinalAggregator-only update");
+  }
+  const change = description.Changes?.[0]?.ResourceChange;
+  const details = change?.Details || [];
+  const parameterNames = new Set(["FinalAggregatorCodeKey", "FinalAggregatorCodeVersion"]);
+  const parameterCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+    detail.ChangeSource === "ParameterReference");
+  const dynamicCode = details.filter((detail) => detail.Target?.Name === "Code" &&
+    detail.ChangeSource === "DirectModification");
+  if (change?.LogicalResourceId !== "FinalAggregator" || parameterCode.length !== 2 ||
+      dynamicCode.length !== 1 || details.length !== 3 ||
+      new Set(parameterCode.map(({ CausingEntity }) => CausingEntity)).size !== 2 ||
+      parameterCode.some((detail) => detail.Evaluation !== "Static" ||
+        !parameterNames.has(detail.CausingEntity) || detail.Target?.RequiresRecreation !== "Never") ||
+      dynamicCode.some((detail) => detail.Evaluation !== "Dynamic" ||
+        detail.CausingEntity != null || detail.Target?.RequiresRecreation !== "Never")) {
+    fail("Final-repair code detail drift");
+  }
+}
+
 export function assertLeadMemoryChanges(changes, description) {
   const expected = [{ action: "Modify", logicalId: "LeadWorker",
     type: "AWS::Lambda::Function", replacement: "False" }];
@@ -564,7 +631,8 @@ function changeSetName(kind, packet) {
   const prefix = kind === "activate" ? "g15" : kind === "code" ? "gr12" :
     kind === "engine" ? "gr13" : kind === "artifact-access" ? "gr14" :
       kind === "provider-identity" ? "gr15" : kind === "lead-work-resume" ? "gr17" :
-        kind === "lead-memory" ? "gr18" : kind === "lead-bounded-extraction" ? "gr19" : "g14";
+        kind === "lead-memory" ? "gr18" : kind === "lead-bounded-extraction" ? "gr19" :
+          ["bounded-bulk", "traffic-repair", "final-repair"].includes(kind) ? "gr21" : "g14";
   return `${prefix}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
@@ -693,10 +761,14 @@ async function executeFull(options, packet) {
   const leadWorkResume = options.phase === "lead-work-resume";
   const leadMemory = options.phase === "lead-memory";
   const leadBoundedExtraction = options.phase === "lead-bounded-extraction";
+  const boundedBulk = options.phase === "bounded-bulk";
+  const trafficRepair = options.phase === "traffic-repair";
+  const finalRepair = options.phase === "final-repair";
   const name = changeSetName(activation ? "activate" : code ? "code" : engine ? "engine" :
     artifactAccess ? "artifact-access" : providerIdentity ? "provider-identity" :
       leadWorkResume ? "lead-work-resume" : leadMemory ? "lead-memory" :
-        leadBoundedExtraction ? "lead-bounded-extraction" : "full", packet);
+        leadBoundedExtraction ? "lead-bounded-extraction" : boundedBulk ? "bounded-bulk" :
+          trafficRepair ? "traffic-repair" : finalRepair ? "final-repair" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
@@ -710,6 +782,9 @@ async function executeFull(options, packet) {
                 leadWorkResume ? "Approved G-R17 same-task lead-work recovery correction" :
                   leadMemory ? "Approved G-R18 lead-worker memory correction" :
                     leadBoundedExtraction ? "Approved G-R19 bounded invalid-mailto extraction correction" :
+                      boundedBulk ? "Approved G-R21 guarded G-R20 bounded-bulk deployment" :
+                        trafficRepair ? "Approved G-R21 TrafficWorker diagnostic repair" :
+                          finalRepair ? "Approved G-R21 FinalAggregator diagnostic repair" :
                 "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
@@ -725,6 +800,9 @@ async function executeFull(options, packet) {
   else if (leadWorkResume) assertLeadWorkResumeChanges(changes, described);
   else if (leadMemory) assertLeadMemoryChanges(changes, described);
   else if (leadBoundedExtraction) assertLeadBoundedExtractionChanges(changes, described);
+  else if (boundedBulk) assertBoundedBulkChanges(changes, described);
+  else if (trafficRepair) assertTrafficRepairChanges(changes, described);
+  else if (finalRepair) assertFinalRepairChanges(changes, described);
   else assertFullChanges(changes, packet);
   await mkdir(deploymentRoot, { recursive: true });
   await writeFile(changeSetRecordPath, `${JSON.stringify({ approvalToken: packet.approvalToken,
@@ -736,6 +814,9 @@ async function executeFull(options, packet) {
           leadWorkResume ? "LEAD_WORK_RESUME_CHANGE_SET_REVIEWED" :
             leadMemory ? "LEAD_MEMORY_CHANGE_SET_REVIEWED" :
               leadBoundedExtraction ? "LEAD_BOUNDED_EXTRACTION_CHANGE_SET_REVIEWED" :
+                boundedBulk ? "BOUNDED_BULK_CHANGE_SET_REVIEWED" :
+                  trafficRepair ? "TRAFFIC_REPAIR_CHANGE_SET_REVIEWED" :
+                    finalRepair ? "FINAL_REPAIR_CHANGE_SET_REVIEWED" :
       "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
@@ -747,8 +828,11 @@ async function executeFull(options, packet) {
     engine ? "ENGINE_STACK_COMPLETE" : artifactAccess ? "ARTIFACT_ACCESS_STACK_COMPLETE" :
       providerIdentity ? "PROVIDER_IDENTITY_STACK_COMPLETE" :
         leadWorkResume ? "LEAD_WORK_RESUME_STACK_COMPLETE" :
-          leadMemory ? "LEAD_MEMORY_STACK_COMPLETE" :
-            leadBoundedExtraction ? "LEAD_BOUNDED_EXTRACTION_STACK_COMPLETE" :
+      leadMemory ? "LEAD_MEMORY_STACK_COMPLETE" :
+        leadBoundedExtraction ? "LEAD_BOUNDED_EXTRACTION_STACK_COMPLETE" :
+          boundedBulk ? "BOUNDED_BULK_STACK_COMPLETE" :
+            trafficRepair ? "TRAFFIC_REPAIR_STACK_COMPLETE" :
+              finalRepair ? "FINAL_REPAIR_STACK_COMPLETE" :
       "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 

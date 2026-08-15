@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertCodeChanges, assertEngineChanges,
+import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertBoundedBulkChanges, assertCodeChanges, assertEngineChanges,
+  assertFinalRepairChanges,
   assertLeadBoundedExtractionChanges, assertLeadMemoryChanges, assertLeadWorkResumeChanges,
-  assertProviderIdentityChanges,
+  assertProviderIdentityChanges, assertTrafficRepairChanges,
   buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
@@ -236,7 +237,8 @@ test("deployment constants stay aligned with the packet", () => {
     profile: "storesignal-dev", region: "ap-south-2", stack: "storesignal-production-pipeline",
     environment: "production",
     phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
-      "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction"],
+      "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
+      "traffic-repair", "final-repair"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -334,6 +336,9 @@ test("G-R13 change-set guard allows only code and the two Recovery dependencies"
   assert.doesNotThrow(() => assertLeadWorkResumeChanges(changes, description));
   assert.throws(() => assertLeadWorkResumeChanges(changes, unexpectedConcurrency),
     /Lead-work-resume code detail drift/u);
+  assert.doesNotThrow(() => assertBoundedBulkChanges(changes, description));
+  assert.throws(() => assertBoundedBulkChanges(changes, unexpectedConcurrency),
+    /Bounded-bulk code detail drift/u);
 });
 
 test("G-R18 change-set guard allows only LeadWorker memory", () => {
@@ -351,6 +356,48 @@ test("G-R18 change-set guard allows only LeadWorker memory", () => {
   const wrongDetail = clone(description);
   wrongDetail.Changes[0].ResourceChange.Details[0].Target.Name = "Timeout";
   assert.throws(() => assertLeadMemoryChanges(changes, wrongDetail), /Lead-memory change detail drift/u);
+});
+
+test("G-R21 traffic-repair guard allows only TrafficWorker code", () => {
+  const changes = [{ action: "Modify", logicalId: "TrafficWorker",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  const description = { Changes: [{ ResourceChange: { LogicalResourceId: "TrafficWorker", Details: [
+    { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: "TrafficWorkerCodeKey",
+      Target: { Name: "Code", RequiresRecreation: "Never" } },
+    { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: "TrafficWorkerCodeVersion",
+      Target: { Name: "Code", RequiresRecreation: "Never" } },
+    { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+      Target: { Name: "Code", RequiresRecreation: "Never" } }
+  ] } }] };
+  assert.doesNotThrow(() => assertTrafficRepairChanges(changes, description));
+  const extra = clone(changes);
+  extra.push({ action: "Modify", logicalId: "TrafficWorkerRole",
+    type: "AWS::IAM::Role", replacement: "False" });
+  assert.throws(() => assertTrafficRepairChanges(extra, description), /Traffic-repair change-set inventory/u);
+  const wrongParameter = clone(description);
+  wrongParameter.Changes[0].ResourceChange.Details[0].CausingEntity = "LeadWorkerCodeKey";
+  assert.throws(() => assertTrafficRepairChanges(changes, wrongParameter), /Traffic-repair code detail drift/u);
+});
+
+test("G-R21 final-repair guard allows only FinalAggregator code", () => {
+  const changes = [{ action: "Modify", logicalId: "FinalAggregator",
+    type: "AWS::Lambda::Function", replacement: "False" }];
+  const description = { Changes: [{ ResourceChange: { LogicalResourceId: "FinalAggregator", Details: [
+    { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: "FinalAggregatorCodeKey",
+      Target: { Name: "Code", RequiresRecreation: "Never" } },
+    { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: "FinalAggregatorCodeVersion",
+      Target: { Name: "Code", RequiresRecreation: "Never" } },
+    { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+      Target: { Name: "Code", RequiresRecreation: "Never" } }
+  ] } }] };
+  assert.doesNotThrow(() => assertFinalRepairChanges(changes, description));
+  const extra = clone(changes);
+  extra.push({ action: "Modify", logicalId: "FinalAggregatorRole",
+    type: "AWS::IAM::Role", replacement: "False" });
+  assert.throws(() => assertFinalRepairChanges(extra, description), /Final-repair change-set inventory/u);
+  const wrongParameter = clone(description);
+  wrongParameter.Changes[0].ResourceChange.Details[0].CausingEntity = "TrafficWorkerCodeKey";
+  assert.throws(() => assertFinalRepairChanges(changes, wrongParameter), /Final-repair code detail drift/u);
 });
 
 test("G-R19 guard allows only affected code and LeadWorker memory", () => {

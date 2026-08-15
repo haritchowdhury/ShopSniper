@@ -58,6 +58,20 @@ function persistedLead(row) {
     identity_evidence: row.identityEvidence };
 }
 
+export function bindTrafficProviderIdentities(runId, lead, plan) {
+  const dataForSeoIdentities = new Set(plan?.sourceKeys?.dataForSeo?.map(({ identity }) => identity) || []);
+  const cruxIdentities = new Set([plan?.sourceKeys?.cruxRest?.identity,
+    plan?.sourceKeys?.cruxBigQuery?.identity].filter(Boolean));
+  if (dataForSeoIdentities.size > 1 || cruxIdentities.size > 1)
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  const bound = { ...lead,
+    ...(dataForSeoIdentities.size && { resolved_domain: [...dataForSeoIdentities][0] }),
+    ...(cruxIdentities.size && { final_url: [...cruxIdentities][0] }) };
+  if (stableLeadId(runId, bound) !== stableLeadId(runId, lead))
+    throw new PipelineInvariantError("PIPELINE_IDENTITY_MISMATCH");
+  return bound;
+}
+
 function sourceSelection(plan, workType, scopeKey) {
   if (workType === "dataforseo") return plan.sourceKeys.dataForSeo.find((entry) => entry.scopeKey === scopeKey);
   if (workType === "crux_rest") return plan.sourceKeys.cruxRest;
@@ -120,9 +134,24 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       renew: (now) => runtime.repository.renewAwsRunLease({ runId: message.runId,
         generation: message.generation, token, leaseDurationMs: 60000 }, now) });
     let released = false;
+    let executionPhase = "load_stage";
     try {
       const loaded = await runtime.repository.loadAwsTrafficStage({ runId: message.runId,
         generation: message.generation, runLease: claim.lease }, new Date());
+      if (["ready", "aggregating"].includes(loaded.stage.state)) {
+        await monitor.stop();
+        await runtime.repository.releaseAwsRunLease({ runId: message.runId,
+          generation: message.generation, token }, new Date());
+        released = true;
+        await runtime.dispatcher.sendOne(runtime.config.awsPipelineFinalAggregationQueueUrl,
+          { version: 1, type: "aggregation.check", runId: message.runId, stage: "traffic_crux",
+            generation: message.generation, reason: "terminal_task_recorded", attempt: 1 },
+          aggregationCheckMessageSchema);
+        results.push(...group.map(({ recordId }) =>
+          ({ recordId, terminal: true, outcome: "replayed" })));
+        continue;
+      }
+      executionPhase = "load_manifest";
       const stored = await runtime.artifactStore.getValidated({ key: message.manifestKey,
         expected: { contractVersion: "domain-stage-manifest-v1", runId: message.runId,
           stage: "domain", generation: message.generation, itemId: "manifest",
@@ -134,6 +163,8 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
       const planByShop = new Map(manifest.workPlan.domains.map((entry) => [entry.shopId, entry]));
       const taskByShop = new Map(loaded.tasks.map((entry) => [entry.itemKey, entry]));
       const leads = loaded.leads.map(persistedLead);
+      const providerLeads = leads.map((lead) => bindTrafficProviderIdentities(
+        message.runId, lead, planByShop.get(lead.shop_id)));
       const leadByShop = new Map(loaded.leads.map((entry) => [entry.shopId, entry]));
       if (loaded.tasks.some((task) => !planByShop.has(task.itemKey) || !leadByShop.has(task.itemKey)))
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -163,6 +194,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         monitor.assertActive();
         return { entry, found: await runtime.artifactStore.getOptionalValidated(entry.request) };
       });
+      executionPhase = "provider_enrichment";
       for (const { entry, found } of readResults) if (found.outcome === "found")
         (entry.combined ? durableCombined : durableSources).set(entry.mapKey, found.value);
       const runtimeConfig = providerRuntimeConfig(loaded.run.trafficEnrichmentConfig,
@@ -207,8 +239,10 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             inputFingerprint: identity.batchInputFingerprint, producedAt: message.manifestProducedAt } };
       };
       const adapterRepository = {
-        getDataForSeoRunCostUsd: (...args) => runtime.repository.getDataForSeoRunCostUsd(...args),
+        getDataForSeoRunCostUsd: (...args) => { executionPhase = "dataforseo_cost";
+          return runtime.repository.getDataForSeoRunCostUsd(...args); },
         planDataForSeoRequest: async (...args) => {
+          executionPhase = "dataforseo_plan";
           const ledger = args[2];
           const descriptor = requestDescriptors.get(ledger.requestFingerprint);
           if (!descriptor) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -243,6 +277,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           return planned;
         },
         claimDataForSeoRequest: async (...args) => {
+          executionPhase = "dataforseo_ledger_claim";
           const claimed = await runtime.repository.claimDataForSeoRequest(...args);
           const metadata = ledgerMetadata.get(args[2]);
           if (metadata && !claimed.networkAllowed) setDataForSeoEvidence(metadata,
@@ -253,6 +288,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           return claimed;
         },
         readReusableTrafficCache: async (_runId, _lease, keys) => {
+          executionPhase = "reusable_traffic_cache";
           const materialized = keys.flatMap((key) => capturedRows.filter((row) =>
             row.source === key.source && row.identity === key.identity && row.scopeKey === key.scopeKey &&
             row.metricSetKey === key.metricSetKey && row.contractVersion === key.contractVersion));
@@ -266,9 +302,13 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           return [...new Map([...materialized, ...storedRows].map((row) =>
             [`${row.source}:${row.identity}:${row.scopeKey}:${row.metricSetKey}:${row.contractVersion}`, row])).values()];
         },
-        readReusableLatestCruxBigQueryCache: (_runId, _lease, identities) =>
-          runtime.repository.readReusableLatestCruxBigQueryCache(message.runId, claim.lease, identities, evaluatedAt),
+        readReusableLatestCruxBigQueryCache: (_runId, _lease, identities) => {
+          executionPhase = "crux_bigquery_latest_cache";
+          return runtime.repository.readReusableLatestCruxBigQueryCache(
+            message.runId, claim.lease, identities, evaluatedAt);
+        },
         claimShopWorkBatch: async (_runId, _lease, claims) => {
+          executionPhase = `claim_${claims[0]?.workType || "traffic"}`;
           const alreadyTerminal = new Map(claims.map((item) => {
             const plan = planByShop.get(item.shopId);
             const source = item.workType === "dataforseo" ? "dataforseo" : item.workType;
@@ -354,7 +394,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         finishShopWorkClaims: async () => ({ count: 0 })
       };
       const output = await enrichTraffic({ runId: message.runId, lease: claim.lease,
-        runSnapshot: loaded.run.trafficEnrichmentConfig, runtimeConfig, leads,
+        runSnapshot: loaded.run.trafficEnrichmentConfig, runtimeConfig, leads: providerLeads,
         repository: adapterRepository, assertLeaseActive: () => monitor.assertActive(),
         dependencyOverrides: { buildDataForSeoRequest: (input) => {
           const descriptor = dependencies.buildDataForSeoRequestFn(input);
@@ -363,6 +403,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         },
           fetchDataForSeoTraffic: (input) => dependencies.fetchDataForSeoTrafficFn(input),
           fetchCruxOriginMetrics: async (input) => {
+            executionPhase = "crux_rest_live";
             const plan = manifest.workPlan.domains.find((entry) =>
               entry.sourceKeys.cruxRest?.identity === input.origin);
             if (!plan) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -395,6 +436,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             }
           },
           fetchCruxLatestDatasetMonth: async (input) => {
+            executionPhase = "crux_bigquery_latest_month";
             if ((claim.lease.leaseAttempt ?? loaded.run.leaseAttempt ?? 1) > 3)
               throw new EnrichmentError("PIPELINE_PROVIDER_AMBIGUOUS", { code: ENRICHMENT_ERROR_CODES.ambiguousRequest,
                 provider: "crux", contractVersion: loaded.run.trafficEnrichmentConfig.crux.bigQuery.contractVersion });
@@ -416,6 +458,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             return month;
           },
           dryRunCruxPopularity: async (input) => {
+            executionPhase = "crux_bigquery_dry_run";
             const scopeKey = `month:${input.datasetMonth}`;
             const items = manifest.workPlan.domains.flatMap((plan) =>
               input.origins.includes(plan.sourceKeys.cruxBigQuery.identity)
@@ -456,6 +499,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             }
           },
           fetchCruxPopularityForMonth: async (input) => {
+            executionPhase = "crux_bigquery_live";
             const batch = bigQueryState.batch;
             if (!batch || batch.scopeKey !== `month:${input.datasetMonth}`)
               throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -520,7 +564,14 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
               value, schema: providerBatchArtifactSchema });
             return response;
           } },
-        onSourceComplete: async (source) => { sourceOutputs.set(source.sourceKey, source); } });
+        onBatchTelemetry: ({ source, operation }) => {
+          executionPhase = `after_${source}_${operation}`;
+        },
+        onSourceComplete: async (source) => {
+          sourceOutputs.set(source.sourceKey, source);
+          executionPhase = `after_${source.sourceKey}`;
+        } });
+      executionPhase = "source_artifacts";
       const recordByLead = new Map(output.trafficEnrichments.map((entry) => [`${entry.leadId}:${entry.source}`, entry]));
       let terminalCount = 0;
       let recordedCount = 0;
@@ -551,11 +602,14 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const record = recordByLead.get(`${stableLeadId(message.runId, persistedLead(lead))}:${keySource.replaceAll("-", "_")}`);
           const state = record?.state || "unavailable";
           const sourceName = keySource.replaceAll("-", "_");
+          const resolvedBigQueryScope = capturedRows.find((row) => row.source === "crux_bigquery" &&
+            row.identity === plan.sourceKeys.cruxBigQuery.identity)?.scopeKey;
           const bigQueryScope = plan.sourceKeys.cruxBigQuery.scopeKey === "latest"
-            ? capturedRows.find((row) => row.source === "crux_bigquery" &&
-              row.identity === plan.sourceKeys.cruxBigQuery.identity)?.scopeKey
+            ? resolvedBigQueryScope || (["ambiguous", "unavailable", "contract_mismatch"].includes(state)
+              ? "latest" : null)
             : plan.sourceKeys.cruxBigQuery.scopeKey;
-          if (component === "cruxBigQuery" && (!bigQueryScope || !/^month:20\d{4}$/u.test(bigQueryScope)))
+          if (component === "cruxBigQuery" && (!bigQueryScope ||
+              !/^(?:latest|month:20\d{4})$/u.test(bigQueryScope)))
             throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
           const scopeKeys = component === "dataforseo"
             ? plan.sourceKeys.dataForSeo.map(({ scopeKey }) => scopeKey).sort()
@@ -594,6 +648,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         monitor.assertActive();
         return runtime.artifactStore.putImmutable(write);
       });
+      executionPhase = "combined_artifacts";
       const combinedWrites = taskPlans.map(({ task, components }) => {
         const value = durableCombined.get(task.itemKey) || parseCombinedTrafficCruxResult({
           contractVersion: "combined-traffic-crux-result-v1", runId: message.runId,
@@ -606,6 +661,7 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         monitor.assertActive();
         return { ...entry, written: await runtime.artifactStore.putImmutable(entry.request) };
       });
+      executionPhase = "task_settlement";
       const settlements = await mapWithConcurrency(writtenCombined, TASK_SETTLEMENT_CONCURRENCY,
         async ({ task, request, written }) => {
         monitor.assertActive();
@@ -630,7 +686,12 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           generation: message.generation, reason: "terminal_task_recorded", attempt: 1 }, aggregationCheckMessageSchema);
       results.push(...group.map(({ recordId }) => ({ recordId, terminal: terminalCount > 0,
         outcome: terminalCount === 0 ? "busy" : recordedCount > 0 ? "recorded" : "replayed" })));
-    } catch { results.push(...group.map(({ recordId }) => ({ recordId, terminal: false, outcome: "retryable" }))); }
+    } catch (error) {
+      runtime.log?.("traffic_group_retryable", { runId: message.runId, stage: "traffic_crux",
+        generation: message.generation, itemId: executionPhase, outcome: "retryable",
+        safeCode: typeof error?.code === "string" ? error.code : "TRAFFIC_WORKER_UNEXPECTED" });
+      results.push(...group.map(({ recordId }) => ({ recordId, terminal: false, outcome: "retryable" })));
+    }
     finally { await monitor.stop().catch(() => {}); if (!released) { /* expiry owns recovery */ } }
   }
   return { results: results.sort((left, right) => left.recordId.localeCompare(right.recordId)) };

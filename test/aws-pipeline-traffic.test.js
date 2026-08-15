@@ -6,7 +6,8 @@ import { runStoreId, shopIdForStableKey } from "../src/shop-persistence-contract
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
 import { buildCruxBigQueryLiveRequest } from "../src/enrichment/crux/bigquery-request.js";
-import { processTrafficBatch, trafficInputFingerprint } from "../src/aws-pipeline/services/traffic-worker.js";
+import { bindTrafficProviderIdentities, processTrafficBatch,
+  trafficInputFingerprint } from "../src/aws-pipeline/services/traffic-worker.js";
 import { EnrichmentError, ENRICHMENT_ERROR_CODES } from "../src/enrichment/errors.js";
 import { assertTrafficCallCeilings, bigQueryAttemptBody, mapProviderError,
   providerBatchIdentity, reconcileBigQueryAttempt, sourceAttemptBody,
@@ -21,7 +22,7 @@ const load = async (name) => JSON.parse(await readFile(new URL(`./fixtures/aws-p
 
 async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"], cancelled = false,
   artifactSeed, sharedState, domainCount = 1, fullScopes = true, adapterOverrides = {},
-  leaseAttempt = 1, secretOverrides = {} } = {}) {
+  leaseAttempt = 1, secretOverrides = {}, stageState = "collecting" } = {}) {
   const domainManifest = await load("domain-manifest.valid.json");
   const workPlan = await load("domain-work-plan.valid.json");
   const leadFixture = (await load("lead-results.valid.json")).success.lead;
@@ -89,7 +90,8 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
         { outcome: "owned", lease: { token: "run-token", attempt: leaseAttempt, leaseAttempt,
           expiresAt: new Date(Date.now() + 60000) } }; },
       async loadAwsTrafficStage() { maybeFail("load-stage"); return { run: { trafficEnrichmentConfig: traffic,
-        awsProviderConfig: workPlan.awsProviderConfig }, stage: { expectedCount: tasks.length }, tasks, leads }; },
+        awsProviderConfig: workPlan.awsProviderConfig }, stage: { expectedCount: tasks.length,
+          state: stageState }, tasks, leads }; },
       async releaseAwsRunLease() { maybeFail("release-run"); return { run: {} }; },
       async renewAwsRunLease() { return { expiresAt: new Date(Date.now() + 60000) }; },
       async getDataForSeoRunCostUsd() { return 0; },
@@ -164,6 +166,20 @@ test("busy stage-wide owner makes every trigger in the group retryable without I
   assert.equal(calls, 1);
   assert.deepEqual(result.results, [{ recordId: "m1", terminal: false, outcome: "busy" },
     { recordId: "m2", terminal: false, outcome: "busy" }]);
+});
+
+test("provider execution stays bound to frozen source identities after a lead URL refinement", async () => {
+  const plan = (await load("domain-work-plan.valid.json")).domains[0];
+  const lead = (await load("lead-results.valid.json")).success.lead;
+  const refined = { ...lead, final_url: "https://refined.example/products/item" };
+  const bound = bindTrafficProviderIdentities("run_traffic_fixture_0001", refined, plan);
+  assert.equal(bound.final_url, plan.sourceKeys.cruxRest.identity);
+  assert.equal(bound.resolved_domain, plan.sourceKeys.dataForSeo[0].identity);
+  assert.deepEqual(bound.identity_evidence, refined.identity_evidence);
+  const conflicting = structuredClone(plan);
+  conflicting.sourceKeys.cruxBigQuery.identity = "https://different.example";
+  assert.throws(() => bindTrafficProviderIdentities("run_traffic_fixture_0001", refined, conflicting),
+    /PIPELINE_INPUT_CONFLICT/u);
 });
 
 test("mixed groups are processed sequentially and one ownership failure does not suppress later groups", async () => {
@@ -299,6 +315,18 @@ test("BigQuery transient dry-run leaves the task nonterminal and retries on a la
   assert.equal(second.calls.dry, 1);
 });
 
+test("BigQuery pre-month ambiguity on lease attempt four produces terminal latest-scope evidence", async () => {
+  const output = await serviceHarness({ leaseAttempt: 4 });
+  assert.equal(output.result.results[0].outcome, "recorded");
+  assert.equal(output.calls.table, 0);
+  assert.equal(output.calls.dry, 0);
+  assert.equal(output.calls.live, 0);
+  const source = [...output.artifacts.values()].find((value) =>
+    value.contractVersion === "provider-source-result-v1" && value.source === "crux_bigquery");
+  assert.equal(source.state, "ambiguous");
+  assert.deepEqual(source.scopeStates, [{ scopeKey: "latest", state: "ambiguous" }]);
+});
+
 test("BigQuery attempt marker retries live only before the strict fifteen-minute boundary", () => {
   const marker = bigQueryAttemptBody({ runId: message.runId, generation: 1, scopeKey: "month:202607",
     batchInputFingerprint: "c".repeat(64), datasetMonth: "202607", dryRunBytesProcessed: 100,
@@ -322,6 +350,16 @@ test("terminal replay still releases the Run lease before exactly one recovery c
   assert.deepEqual(result.results.map(({ outcome }) => outcome), ["replayed", "replayed"]);
   assert.ok(events.indexOf("release-run") < events.indexOf("send-check"));
   assert.equal(events.filter((event) => event === "send-check").length, 1);
+});
+
+test("terminal-stage duplicate releases the Run lease and checks final aggregation without providers", async () => {
+  for (const stageState of ["ready", "aggregating"]) {
+    const { result, events, calls } = await serviceHarness({ stageState, triggers: ["m2", "m1"] });
+    assert.deepEqual(result.results.map(({ outcome }) => outcome), ["replayed", "replayed"]);
+    assert.deepEqual(calls, { dataforseo: 0, rest: 0, table: 0, dry: 0, live: 0 });
+    assert.ok(events.indexOf("release-run") < events.indexOf("send-check"));
+    assert.equal(events.filter((event) => event === "send-check").length, 1);
+  }
 });
 
 test("crash after immutable combined artifact recovers without changing bytes", async () => {

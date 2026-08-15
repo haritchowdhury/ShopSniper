@@ -2042,7 +2042,8 @@ export class PrismaRunRepository {
         throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
       const stage = await transaction.pipelineStage.findUnique({ where: {
         runId_stage_generation: { runId: runIdentifier, stage: "traffic_crux", generation } } });
-      if (!stage || stage.state !== "collecting") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (!stage || !["collecting", "ready", "aggregating"].includes(stage.state))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const tasks = await transaction.pipelineTask.findMany({ where: { stageId: stage.id }, orderBy: { itemKey: "asc" } });
       if (tasks.length !== stage.expectedCount) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const leads = await transaction.lead.findMany({ where: { runId: runIdentifier, status: "qualified" },
@@ -2142,13 +2143,15 @@ export class PrismaRunRepository {
           const key = claim.selection;
           const matching = cacheByKey.get([key.source, key.identity, key.scopeKey,
             key.metricSetKey, key.contractVersion].join("\0")) || [];
-          if (matching.length !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          const row = matching[0];
-          if (!(row.fetchedAt instanceof Date) || row.fetchedAt > now ||
-              !(row.expiresAt instanceof Date)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-          if (row.expiresAt > now) { output.push({ shopId: claim.shopId, workType: claim.workType,
-            scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "completed",
-            cacheRows: [row] }); continue; }
+          if (matching.length > 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          if (matching.length === 1) {
+            const row = matching[0];
+            if (!(row.fetchedAt instanceof Date) || row.fetchedAt > now ||
+                !(row.expiresAt instanceof Date)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            if (row.expiresAt > now) { output.push({ shopId: claim.shopId, workType: claim.workType,
+              scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "completed",
+              cacheRows: [row] }); continue; }
+          }
         }
         if (work.state === "ambiguous") { output.push({ shopId: claim.shopId, workType: claim.workType,
           scopeKey: claim.scopeKey, pipelineTaskId: claim.pipelineTaskId, outcome: "ambiguous" }); continue; }
