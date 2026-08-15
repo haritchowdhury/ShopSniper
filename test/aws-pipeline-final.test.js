@@ -124,7 +124,7 @@ async function oneDomainFinalHarness(mutator = () => {}) {
   } }, repository: {
     async readAwsFinalReuseRows() { return reuseResult; },
     async readAwsAmbiguousDataForSeoTargets({ candidates }) { return candidates; },
-    async readAwsAmbiguousCruxBigQueryWork({ candidates }) {
+    async readAwsTerminalCruxBigQueryWork({ candidates }) {
       return candidates.map((candidate) => ({ ...candidate, scopeKey: "month:202607" }));
     },
     async publishAwsFinalResults(input) { published = input; return { resultFingerprint: "d".repeat(64) }; }
@@ -186,6 +186,17 @@ test("final aggregator accepts a terminal pre-month BigQuery artifact at the fro
   assert.deepEqual(result, { terminal: true, outcome: "completed" });
   assert.ok(published.workOutcomes.some(({ workType, scopeKey, state }) =>
     workType === "crux_bigquery" && scopeKey === "month:202607" && state === "ambiguous"));
+});
+
+test("final aggregator settles a post-month BigQuery contract mismatch whose artifact retained latest", async () => {
+  const { result, published } = await oneDomainFinalHarness(({ sourceArtifacts }) => {
+    sourceArtifacts["crux-bigquery"].scopeStates = [
+      { scopeKey: "latest", state: "contract_mismatch" }
+    ];
+  });
+  assert.deepEqual(result, { terminal: true, outcome: "completed" });
+  assert.ok(published.workOutcomes.some(({ workType, scopeKey, state }) =>
+    workType === "crux_bigquery" && scopeKey === "month:202607" && state === "contract_mismatch"));
 });
 
 test("final aggregator rejects BigQuery no-coverage at latest before a month was resolved", async () => {

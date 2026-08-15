@@ -605,8 +605,9 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           const resolvedBigQueryScope = capturedRows.find((row) => row.source === "crux_bigquery" &&
             row.identity === plan.sourceKeys.cruxBigQuery.identity)?.scopeKey;
           const bigQueryScope = plan.sourceKeys.cruxBigQuery.scopeKey === "latest"
-            ? resolvedBigQueryScope || (["ambiguous", "unavailable", "contract_mismatch"].includes(state)
-              ? "latest" : null)
+            ? resolvedBigQueryScope || (bigQueryState.datasetMonth
+              ? `month:${bigQueryState.datasetMonth}`
+              : (["ambiguous", "unavailable", "contract_mismatch"].includes(state) ? "latest" : null))
             : plan.sourceKeys.cruxBigQuery.scopeKey;
           if (component === "cruxBigQuery" && (!bigQueryScope ||
               !/^(?:latest|month:20\d{4})$/u.test(bigQueryScope)))

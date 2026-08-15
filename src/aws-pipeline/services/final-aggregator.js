@@ -151,7 +151,7 @@ export async function processFinalAggregation(message, runtime, {
     const diagnostics = [];
     const ledgerEvidenceByRequest = new Map();
     const ambiguousDataForSeoCandidates = [];
-    const ambiguousCruxBigQueryCandidates = [];
+    const terminalLatestCruxBigQueryCandidates = [];
     const summaries = { dataforseo: [], cruxRest: [], cruxBigQuery: [] };
     phase = "combined_artifacts";
     const combinedEntries = await mapWithConcurrency(complete.tasks, S3_IO_CONCURRENCY, async (task) => {
@@ -277,8 +277,9 @@ export async function processFinalAggregation(message, runtime, {
         for (const scope of artifact.scopeStates) {
           if (source === "dataforseo" && evidenceByScope.get(scope.scopeKey)?.disposition === "not_dispatched")
             continue;
-          if (source === "crux_bigquery" && scope.scopeKey === "latest" && scope.state === "ambiguous") {
-            ambiguousCruxBigQueryCandidates.push({ shopId: task.itemKey, pipelineTaskId: task.id,
+          if (source === "crux_bigquery" && scope.scopeKey === "latest" &&
+              ["ambiguous", "unavailable", "contract_mismatch"].includes(scope.state)) {
+            terminalLatestCruxBigQueryCandidates.push({ shopId: task.itemKey, pipelineTaskId: task.id,
               state: scope.state });
             continue;
           }
@@ -316,10 +317,10 @@ export async function processFinalAggregation(message, runtime, {
         ledgerEvidenceByRequest.set(descriptor.requestFingerprint, ledgerEvidence);
       }
     }
-    if (ambiguousCruxBigQueryCandidates.length) {
-      const resolved = await runtime.repository.readAwsAmbiguousCruxBigQueryWork({ runId: message.runId,
+    if (terminalLatestCruxBigQueryCandidates.length) {
+      const resolved = await runtime.repository.readAwsTerminalCruxBigQueryWork({ runId: message.runId,
         generation: message.generation, aggregationToken: token,
-        candidates: ambiguousCruxBigQueryCandidates });
+        candidates: terminalLatestCruxBigQueryCandidates });
       workOutcomes.push(...resolved.map((item) => ({ ...item, workType: "crux_bigquery" })));
     }
     const reuseSelections = manifest.workPlan.domains.flatMap((plan) =>

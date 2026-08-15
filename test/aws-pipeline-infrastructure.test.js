@@ -238,7 +238,8 @@ test("deployment constants stay aligned with the packet", () => {
     environment: "production",
     phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
       "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
-      "traffic-repair", "final-repair", "final-publication-repair", "traffic-publication-repair"],
+      "traffic-repair", "final-repair", "final-publication-repair", "traffic-publication-repair",
+      "crux-month-repair"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -400,7 +401,7 @@ test("G-R21 final-repair guard allows only FinalAggregator code", () => {
   assert.throws(() => assertFinalRepairChanges(changes, wrongParameter), /Final-repair code detail drift/u);
 });
 
-test("G-R24 guard allows exactly TrafficWorker and FinalAggregator code", () => {
+test("G-R24/G-R25 guard allows exactly TrafficWorker and FinalAggregator code", () => {
   const changes = ["FinalAggregator", "TrafficWorker"].map((logicalId) => ({ action: "Modify", logicalId,
     type: "AWS::Lambda::Function", replacement: "False" }));
   const description = { Changes: changes.map(({ logicalId }) => ({ ResourceChange: { LogicalResourceId: logicalId,

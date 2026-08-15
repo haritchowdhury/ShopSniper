@@ -117,11 +117,26 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
         providerCostUsd: 0.01, completedAt: now } });
       const token = randomUUID(); assert.equal((await coordinator.claimAggregator({ runId, stage: "traffic_crux",
         generation: 1, owner: "gr8", token, leaseDurationMs: 120000 }, new Date(now.getTime() + 1))).outcome, "owned");
+      await prisma.pipelineStage.update({ where: { id: registered.stage.id }, data: {
+        aggregationLeaseExpiresAt: new Date(Date.now() + 120000)
+      } });
+      await prisma.shopWork.create({ data: {
+        id: shopWorkId(shopId, "crux_bigquery", "month:202607"), shopId,
+        workType: "crux_bigquery", scopeKey: "month:202607", state: "processing",
+        processingRunId: runId, processingPipelineTaskId: taskClaim.task.id, startedAt: now
+      } });
+      const resolvedTerminalWork = await repository.readAwsTerminalCruxBigQueryWork({
+        runId, generation: 1, aggregationToken: token,
+        candidates: [{ shopId, pipelineTaskId: taskClaim.task.id, state: "contract_mismatch" }]
+      });
+      assert.deepEqual(resolvedTerminalWork, [{ shopId, pipelineTaskId: taskClaim.task.id,
+        state: "contract_mismatch", scopeKey: "month:202607" }]);
       const input = { runId, generation: 1, stageId: registered.stage.id, aggregationToken: token,
         cacheRows: [], leadTrafficRows: ["dataforseo", "crux_rest", "crux_bigquery"].map((source) => ({
           leadId: lead.id, source, state: "unavailable", contractVersion: source === "dataforseo"
             ? "dataforseo-traffic-v1" : source === "crux_rest" ? "crux-origin-metrics-v1" : "crux-popularity-v1" })),
-        leadProfileOutcomes: [{ shopId, state: "existing", profileFingerprint }], workOutcomes: [],
+        leadProfileOutcomes: [{ shopId, state: "existing", profileFingerprint }],
+        workOutcomes: resolvedTerminalWork.map((outcome) => ({ ...outcome, workType: "crux_bigquery" })),
         dataForSeoLedgerEvidence: [{ requestFingerprint, scopeKey: "worldwide", targetCount: 1,
           state: "succeeded", resultFingerprint: batchFingerprint }], diagnostics: [],
         trafficSummary: { version: "traffic-enrichment-summary-v1" }, status: {} };
@@ -133,12 +148,16 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
         assert.equal((await prisma.run.findUnique({ where: { id: runId } })).resultsAvailable, false);
         assert.equal(await prisma.leadTrafficEnrichment.count({ where: { runId } }), 0);
         assert.equal(await prisma.userShop.count({ where: { userId: ownerId } }), 0);
+        assert.equal((await prisma.shopWork.findUnique({ where: {
+          id: shopWorkId(shopId, "crux_bigquery", "month:202607") } })).state, "processing");
         assert.equal((await prisma.pipelineStage.findUnique({ where: { id: registered.stage.id } })).state, "aggregating");
       }
       const published = await repository.publishAwsFinalResults(input, new Date(now.getTime() + 3));
       assert.equal(published.run.resultsAvailable, true); assert.equal(published.stage.state, "completed");
       assert.equal(await prisma.leadTrafficEnrichment.count({ where: { runId } }), 3);
       assert.equal(await prisma.userShop.count({ where: { userId: ownerId, shopId } }), 1);
+      assert.equal((await prisma.shopWork.findUnique({ where: {
+        id: shopWorkId(shopId, "crux_bigquery", "month:202607") } })).state, "failed");
       assert.equal((await prisma.dataForSeoRequestLedger.findUnique({ where: { requestFingerprint } })).resultFingerprint,
         batchFingerprint);
     } finally { await prisma?.$disconnect(); await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

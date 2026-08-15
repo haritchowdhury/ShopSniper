@@ -2316,12 +2316,13 @@ export class PrismaRunRepository {
     });
   }
 
-  async readAwsAmbiguousCruxBigQueryWork(input) {
+  async readAwsTerminalCruxBigQueryWork(input) {
     if (!Array.isArray(input?.candidates)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     const candidates = input.candidates.map((candidate, ordinal) => ({ ...candidate, ordinal }));
-    requireUniqueBatchKeys("AWS ambiguous CrUX BigQuery candidates", candidates, ({ shopId }) => shopId);
+    requireUniqueBatchKeys("AWS terminal latest CrUX BigQuery candidates", candidates, ({ shopId }) => shopId);
     if (candidates.some(({ shopId, pipelineTaskId, state }) => typeof shopId !== "string" || !shopId ||
-        typeof pipelineTaskId !== "string" || !pipelineTaskId || state !== "ambiguous"))
+        typeof pipelineTaskId !== "string" || !pipelineTaskId ||
+        !["ambiguous", "unavailable", "contract_mismatch"].includes(state)))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
@@ -2347,7 +2348,7 @@ export class PrismaRunRepository {
       ` : [];
       const counts = new Map();
       for (const row of rows) {
-        if (!/^month:20\d{4}$/u.test(row.scopeKey))
+        if (!/^(?:latest|month:20\d{4})$/u.test(row.scopeKey))
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         counts.set(row.shopId, (counts.get(row.shopId) || 0) + 1);
       }

@@ -327,6 +327,23 @@ test("BigQuery pre-month ambiguity on lease attempt four produces terminal lates
   assert.deepEqual(source.scopeStates, [{ scopeKey: "latest", state: "ambiguous" }]);
 });
 
+test("BigQuery post-month contract mismatch retains the resolved month scope", async () => {
+  const output = await serviceHarness({ adapterOverrides: {
+    fetchCruxPopularityForMonthFn: async ({ origins, datasetMonth, dryRun }) => ({
+      datasetMonth,
+      records: origins.map((origin) => ({ contractVersion: "crux-popularity-v1", origin,
+        coverage: "unavailable", reason: "contract_mismatch", datasetMonth,
+        fetchedAt: message.manifestProducedAt })),
+      dryRunBytesProcessed: dryRun.bytesProcessed, bytesProcessed: 100,
+      bytesBilled: 100, cacheHit: false
+    })
+  } });
+  const source = [...output.artifacts.values()].find((value) =>
+    value.contractVersion === "provider-source-result-v1" && value.source === "crux_bigquery");
+  assert.equal(source.state, "contract_mismatch");
+  assert.deepEqual(source.scopeStates, [{ scopeKey: "month:202607", state: "contract_mismatch" }]);
+});
+
 test("BigQuery attempt marker retries live only before the strict fifteen-minute boundary", () => {
   const marker = bigQueryAttemptBody({ runId: message.runId, generation: 1, scopeKey: "month:202607",
     batchInputFingerprint: "c".repeat(64), datasetMonth: "202607", dryRunBytesProcessed: 100,
