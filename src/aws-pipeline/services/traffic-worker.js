@@ -309,6 +309,23 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
         },
         claimShopWorkBatch: async (_runId, _lease, claims) => {
           executionPhase = `claim_${claims[0]?.workType || "traffic"}`;
+          const groupShopsByClaim = new Map();
+          const groupedClaims = new Map();
+          for (const item of claims) {
+            const plan = planByShop.get(item.shopId);
+            const task = taskByShop.get(item.shopId);
+            const selection = plan && sourceSelection(plan, item.workType, item.scopeKey);
+            if (!plan || !task || !selection || selection.scopeKey !== item.scopeKey)
+              throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            const groupKey = [item.workType, selection.identity, selection.scopeKey,
+              selection.metricSetKey, selection.contractVersion].join("\0");
+            const entries = groupedClaims.get(groupKey) || [];
+            entries.push(item);
+            groupedClaims.set(groupKey, entries);
+            groupShopsByClaim.set(`${item.shopId}:${item.workType}:${item.scopeKey}`, groupKey);
+          }
+          for (const entries of groupedClaims.values()) entries.sort((left, right) =>
+            left.shopId.localeCompare(right.shopId));
           const alreadyTerminal = new Map(claims.map((item) => {
             const plan = planByShop.get(item.shopId);
             const source = item.workType === "dataforseo" ? "dataforseo" : item.workType;
@@ -341,7 +358,13 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
             if (durable) return { outcome: durable.state === "ambiguous" ? "ambiguous" : "completed",
               networkAllowed: false, work: claimItem };
             const item = resolved.get(`${claimItem.shopId}:${claimItem.workType}:${claimItem.scopeKey}`);
-            if (item.outcome === "busy") transientSources.add(`${claimItem.shopId}:${claimItem.workType}`);
+            if (item.outcome === "busy") {
+              const groupKey = groupShopsByClaim.get(
+                `${claimItem.shopId}:${claimItem.workType}:${claimItem.scopeKey}`
+              );
+              for (const sibling of groupedClaims.get(groupKey) || [])
+                transientSources.add(`${sibling.shopId}:${sibling.workType}`);
+            }
             return ({ outcome: item.outcome === "owned" ? "won" :
             item.outcome === "busy" ? "processing" : item.outcome, networkAllowed: item.outcome === "owned",
             work: { shopId: item.shopId, workType: item.workType, scopeKey: item.scopeKey } }); });
@@ -404,9 +427,11 @@ export async function processTrafficBatch(records, runtime, dependencies = {}) {
           fetchDataForSeoTraffic: (input) => dependencies.fetchDataForSeoTrafficFn(input),
           fetchCruxOriginMetrics: async (input) => {
             executionPhase = "crux_rest_live";
-            const plan = manifest.workPlan.domains.find((entry) =>
-              entry.sourceKeys.cruxRest?.identity === input.origin);
-            if (!plan) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            const plans = manifest.workPlan.domains.filter((entry) =>
+              entry.sourceKeys.cruxRest?.identity === input.origin).sort((left, right) =>
+              left.shopId.localeCompare(right.shopId));
+            if (!plans.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+            const plan = plans[0];
             const task = taskByShop.get(plan.shopId);
             const key = providerSourceAttemptArtifactKey(message.runId, plan.shopId, "crux-rest");
             const expected = artifactExpected(message, task, "provider-source-attempt-v1");

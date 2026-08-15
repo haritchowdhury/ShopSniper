@@ -13,6 +13,7 @@ import {
 } from "./crux/adapter.js";
 import { normalizeCruxOrigin } from "./crux/api-request.js";
 import { mapWithConcurrency } from "../aws-pipeline/core/bounded-concurrency.js";
+import { PipelineInvariantError } from "../aws-pipeline/contracts/errors.js";
 
 const FAILURE_PRIORITY = Object.freeze({
   unavailable: 1,
@@ -96,8 +97,8 @@ export function eligibleTrafficIdentities(runId, leads, dependencies = {
 }) {
   const byDataForSeo = new Map();
   const byOrigin = new Map();
-  const dataForSeoShopIds = new Map();
-  const originShopIds = new Map();
+  const dataForSeoShopIdsByIdentity = new Map();
+  const originShopIdsByIdentity = new Map();
   leads.forEach((lead, index) => {
     if (lead.status !== "qualified") return;
     const leadId = dependencies.stableLeadId(runId, lead, index);
@@ -109,7 +110,11 @@ export function eligibleTrafficIdentities(runId, leads, dependencies = {
       const entries = byDataForSeo.get(hostname) || [];
       entries.push(leadId);
       byDataForSeo.set(hostname, entries);
-      if (lead.shop_id) dataForSeoShopIds.set(hostname, lead.shop_id);
+      if (lead.shop_id) {
+        const shopIds = dataForSeoShopIdsByIdentity.get(hostname) || [];
+        shopIds.push(lead.shop_id);
+        dataForSeoShopIdsByIdentity.set(hostname, shopIds);
+      }
     } catch {}
 
     try {
@@ -119,10 +124,21 @@ export function eligibleTrafficIdentities(runId, leads, dependencies = {
       const entries = byOrigin.get(origin) || [];
       entries.push(leadId);
       byOrigin.set(origin, entries);
-      if (lead.shop_id) originShopIds.set(origin, lead.shop_id);
+      if (lead.shop_id) {
+        const shopIds = originShopIdsByIdentity.get(origin) || [];
+        shopIds.push(lead.shop_id);
+        originShopIdsByIdentity.set(origin, shopIds);
+      }
     } catch {}
   });
-  return { byDataForSeo, byOrigin, dataForSeoShopIds, originShopIds };
+  const sortedMap = (input) => new Map([...input.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)).map(([key, values]) => [key, [...new Set(values)].sort()]));
+  return {
+    byDataForSeo: sortedMap(byDataForSeo),
+    byOrigin: sortedMap(byOrigin),
+    dataForSeoShopIdsByIdentity: sortedMap(dataForSeoShopIdsByIdentity),
+    originShopIdsByIdentity: sortedMap(originShopIdsByIdentity)
+  };
 }
 
 function cacheKey(source, identity, scope, policy) {
@@ -157,19 +173,20 @@ function readLatestCruxCache(context, identities) {
 
 async function reserveTrafficIdentities(
   context,
-  shopIds,
+  shopIdsByIdentity,
   identities,
   workType,
   scope
 ) {
   const reservations = new Map();
   const claimable = [];
-  for (const identity of identities) {
-    const shopId = shopIds.get(identity);
-    if (!shopId) {
+  for (const identity of [...identities].sort()) {
+    const shopIds = shopIdsByIdentity.get(identity) || [];
+    if (!shopIds.length) {
       reservations.set(identity, { networkAllowed: true, outcome: "legacy", work: null });
     } else {
-      claimable.push({ identity, shopId, workType, scopeKey: scope });
+      for (const shopId of [...new Set(shopIds)].sort())
+        claimable.push({ identity, shopId, workType, scopeKey: scope });
     }
   }
   if (!claimable.length) return reservations;
@@ -193,39 +210,48 @@ async function reserveTrafficIdentities(
     if (!Array.isArray(claimed) || claimed.length !== claimable.length) {
       throw new Error("Traffic work claim batch did not reconcile every identity");
     }
+    const claimsByIdentity = new Map();
     claimable.forEach(({ identity, shopId, workType: type, scopeKey }, index) => {
       const reservation = claimed[index];
       if (reservation?.work?.shopId !== shopId ||
           reservation.work.workType !== type || reservation.work.scopeKey !== scopeKey) {
-        throw new Error("Traffic work claim batch returned a mismatched identity");
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
-      reservations.set(identity, reservation);
+      const entries = claimsByIdentity.get(identity) || [];
+      entries.push(reservation);
+      claimsByIdentity.set(identity, entries);
     });
+    for (const [identity, entries] of claimsByIdentity) {
+      const terminal = new Set(entries.filter(({ outcome }) =>
+        ["completed", "ambiguous"].includes(outcome)).map(({ outcome }) => outcome));
+      if (terminal.size > 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      let outcome;
+      if (entries.some((entry) => entry.outcome === "ambiguous")) outcome = "ambiguous";
+      else if (entries.some((entry) => entry.outcome === "completed")) outcome = "completed";
+      else if (entries.some((entry) => entry.outcome === "processing")) outcome = "processing";
+      else if (entries.every((entry) => entry.outcome === "won" && entry.networkAllowed === true)) outcome = "won";
+      else throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      reservations.set(identity, {
+        outcome,
+        networkAllowed: outcome === "won",
+        work: null
+      });
+    }
     return reservations;
   }
-  for (const claim of claimable) {
-    reservations.set(claim.identity, await context.repository.claimShopWork(
-      context.runId,
-      context.lease,
-      claim.shopId,
-      claim.workType,
-      claim.scopeKey,
-      dateFrom(context.now)
-    ));
-  }
-  return reservations;
+  throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
 }
 
 async function settleTrafficReservations(
   context,
-  shopIds,
+  shopIdsByIdentity,
   identities,
   workType,
   scope,
   dependencies
 ) {
   const reservations = await reserveTrafficIdentities(
-    context, shopIds, identities, workType, scope
+    context, shopIdsByIdentity, identities, workType, scope
   );
   for (let attempt = 0; attempt < TRAFFIC_WORK_WAIT_ATTEMPTS; attempt += 1) {
     const processing = identities.filter((identity) =>
@@ -235,18 +261,17 @@ async function settleTrafficReservations(
     await dependencies.waitForTrafficWork(TRAFFIC_WORK_WAIT_MS);
     context.assertLeaseActive();
     const refreshed = await reserveTrafficIdentities(
-      context, shopIds, processing, workType, scope
+      context, shopIdsByIdentity, processing, workType, scope
     );
     for (const identity of processing) reservations.set(identity, refreshed.get(identity));
   }
   return reservations;
 }
 
-function workClaimsForIdentities(shopIds, identities, workType, scope) {
-  return identities.flatMap((identity) => {
-    const shopId = shopIds.get(identity);
-    return shopId ? [{ shopId, workType, scopeKey: scope }] : [];
-  });
+function workClaimsForIdentities(shopIdsByIdentity, identities, workType, scopeKey) {
+  return [...identities].sort().flatMap((identity) =>
+    [...new Set(shopIdsByIdentity.get(identity) || [])].sort().map((shopId) =>
+      ({ shopId, workType, scopeKey })));
 }
 
 export async function enrichDataForSeoSource(context, eligible, dependencies) {
@@ -295,7 +320,7 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
       const targets = [];
       const reservations = await settleTrafficReservations(
         context,
-        context.dataForSeoShopIds,
+        context.dataForSeoShopIdsByIdentity,
         candidateTargets,
         "dataforseo",
         key,
@@ -407,10 +432,9 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
           {
             providerCostUsd: response.cost.providerReported,
             cacheRows,
-            workClaims: targets.flatMap((identity) => {
-              const shopId = context.dataForSeoShopIds.get(identity);
-              return shopId ? [{ shopId, workType: "dataforseo", scopeKey: key }] : [];
-            })
+            workClaims: workClaimsForIdentities(
+              context.dataForSeoShopIdsByIdentity, targets, "dataforseo", key
+            )
           },
           dateFrom(context.now)
         );
@@ -448,7 +472,7 @@ export async function enrichDataForSeoSource(context, eligible, dependencies) {
             context.runId,
             context.lease,
             workClaimsForIdentities(
-              context.dataForSeoShopIds,
+              context.dataForSeoShopIdsByIdentity,
               targets,
               "dataforseo",
               key
@@ -519,7 +543,7 @@ export async function enrichCruxRestSource(context, eligible, dependencies) {
   const uncached = identities.filter((identity) => !results.has(identity));
   const reservations = await settleTrafficReservations(
     context,
-    context.originShopIds,
+    context.originShopIdsByIdentity,
     uncached,
     "crux_rest",
     "current",
@@ -603,7 +627,7 @@ export async function enrichCruxRestSource(context, eligible, dependencies) {
   if (cacheRows.length) {
     context.assertLeaseActive();
     const completedClaims = workClaimsForIdentities(
-      context.originShopIds,
+      context.originShopIdsByIdentity,
       missing.filter((origin) => ["available", "no_coverage"].includes(results.get(origin)?.state)),
       "crux_rest",
       "current"
@@ -632,7 +656,7 @@ export async function enrichCruxRestSource(context, eligible, dependencies) {
     await context.repository.finishShopWorkClaims(
       context.runId,
       context.lease,
-      workClaimsForIdentities(context.originShopIds, failed, "crux_rest", "current"),
+      workClaimsForIdentities(context.originShopIdsByIdentity, failed, "crux_rest", "current"),
       "failed",
       dateFrom(context.now)
     );
@@ -746,7 +770,7 @@ export async function enrichCruxBigQuerySource(context, eligible, dependencies) 
   const uncached = identities.filter((identity) => !results.has(identity));
   const reservations = await settleTrafficReservations(
     context,
-    context.originShopIds,
+    context.originShopIdsByIdentity,
     uncached,
     "crux_bigquery",
     `month:${datasetMonth}`,
@@ -852,7 +876,7 @@ export async function enrichCruxBigQuerySource(context, eligible, dependencies) 
         }
         context.assertLeaseActive();
         const completedClaims = workClaimsForIdentities(
-          context.originShopIds,
+          context.originShopIdsByIdentity,
           missing.filter((origin) => ["available", "no_coverage"].includes(results.get(origin)?.state)),
           "crux_bigquery",
           `month:${datasetMonth}`
@@ -893,7 +917,7 @@ export async function enrichCruxBigQuerySource(context, eligible, dependencies) 
       context.runId,
       context.lease,
       workClaimsForIdentities(
-        context.originShopIds,
+        context.originShopIdsByIdentity,
         failed,
         "crux_bigquery",
         `month:${datasetMonth}`
@@ -982,8 +1006,8 @@ export async function enrichTraffic({
     diagnostics
   };
   const eligible = eligibleTrafficIdentities(runId, leads, dependencies);
-  context.dataForSeoShopIds = eligible.dataForSeoShopIds;
-  context.originShopIds = eligible.originShopIds;
+  context.dataForSeoShopIdsByIdentity = eligible.dataForSeoShopIdsByIdentity;
+  context.originShopIdsByIdentity = eligible.originShopIdsByIdentity;
   const trafficEnrichments = [];
   const trafficEnrichmentSummary = { version: "traffic-enrichment-summary-v1" };
 

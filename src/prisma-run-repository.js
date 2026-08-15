@@ -177,6 +177,11 @@ function isUniqueConstraint(error) {
     error?.meta?.code === "23505";
 }
 
+function normalizedCacheFingerprint(row) {
+  return fingerprintJson(Object.fromEntries(Object.entries(row).map(([key, value]) =>
+    [key, value === undefined ? null : value])));
+}
+
 const SHOP_WORK_TYPES = new Set([
   "lead_discovery", "dataforseo", "crux_rest", "crux_bigquery"
 ]);
@@ -2244,12 +2249,22 @@ export class PrismaRunRepository {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
         stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
-      const selections = [...input.selections].sort((a, b) => a.cacheId.localeCompare(b.cacheId));
-      requireUniqueBatchKeys("AWS final reuse selections", selections, ({ cacheId }) => cacheId);
-      const trafficRows = selections.length ? await transaction.trafficEnrichmentCache.findMany({
-        where: { id: { in: selections.map(({ cacheId }) => cacheId) } }, orderBy: { id: "asc" } }) : [];
-      if (trafficRows.length !== selections.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
-      const byId = new Map(selections.map((selection) => [selection.cacheId, selection]));
+      const selections = [...input.selections].sort((left, right) =>
+        left.cacheId.localeCompare(right.cacheId) || left.shopId.localeCompare(right.shopId));
+      requireUniqueBatchKeys("AWS final reuse selections", selections,
+        ({ shopId, source, scopeKey }) => `${shopId}\0${source}\0${scopeKey}`);
+      const byId = new Map();
+      for (const selection of selections) {
+        const prior = byId.get(selection.cacheId);
+        if (prior && ["source", "identity", "scopeKey", "metricSetKey", "contractVersion",
+          "cacheFingerprint"].some((field) => prior[field] !== selection[field]))
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        if (!prior) byId.set(selection.cacheId, selection);
+      }
+      const cacheIds = [...byId.keys()].sort();
+      const trafficRows = cacheIds.length ? await transaction.trafficEnrichmentCache.findMany({
+        where: { id: { in: cacheIds } }, orderBy: { id: "asc" } }) : [];
+      if (trafficRows.length !== cacheIds.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       for (const row of trafficRows) {
         const selection = byId.get(row.id);
         const parsed = trafficCacheRecordToUpsert(row.id, row);
@@ -2372,11 +2387,22 @@ export class PrismaRunRepository {
         (index > 0 && entry.requestFingerprint <= ledgerEvidence[index - 1].requestFingerprint)))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     await afterStep("ledger_evidence_validated");
-    const cacheRows = input.cacheRows.map((row) => trafficCacheRecordToUpsert(cacheId(row), row));
+    const normalizedCacheRows = input.cacheRows.map((row) =>
+      trafficCacheRecordToUpsert(cacheId(row), row));
+    const cacheRowsByKey = new Map();
+    for (const row of normalizedCacheRows) {
+      const key = [row.source, row.identity, row.scopeKey, row.metricSetKey,
+        row.contractVersion].join("\0");
+      const fingerprint = normalizedCacheFingerprint(row);
+      const prior = cacheRowsByKey.get(key);
+      if (prior && (prior.row.id !== row.id || prior.fingerprint !== fingerprint))
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      if (!prior) cacheRowsByKey.set(key, { row, fingerprint });
+    }
+    const cacheRows = [...cacheRowsByKey.entries()].sort(([left], [right]) =>
+      left.localeCompare(right)).map(([, { row }]) => row);
     const trafficRows = input.leadTrafficRows.map((row) => leadTrafficEnrichmentRecordToCreate(
       childId("lead_traffic", input.runId, `${row.leadId}:${row.source}`), input.runId, row.leadId, row));
-    requireUniqueBatchKeys("AWS final cache rows", cacheRows,
-      (row) => `${row.source}:${row.identity}:${row.scopeKey}:${row.metricSetKey}:${row.contractVersion}`);
     requireUniqueBatchKeys("AWS final traffic rows", trafficRows, (row) => `${row.leadId}:${row.source}`);
     requireUniqueBatchKeys("AWS final work outcomes", input.workOutcomes || [],
       (row) => `${row.shopId}\0${row.workType}\0${row.scopeKey}`);

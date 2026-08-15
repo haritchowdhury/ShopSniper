@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { ARTIFACT_ACCESS_UPDATE, assertArtifactAccessChanges, assertBoundedBulkChanges, assertCodeChanges, assertEngineChanges,
   assertFinalRepairChanges,
   assertLeadBoundedExtractionChanges, assertLeadMemoryChanges, assertLeadWorkResumeChanges,
-  assertProviderIdentityChanges, assertTrafficPublicationRepairChanges, assertTrafficRepairChanges,
-  buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parseArguments, templateObjectUrl } from
+  assertProviderIdentityChanges, assertProviderIdentityFanInChanges,
+  assertTrafficPublicationRepairChanges, assertTrafficRepairChanges,
+  buildDeploymentPacket, CODE_UPDATE, DEPLOYMENT, parameterArguments, parseArguments, templateObjectUrl } from
   "../scripts/aws-pipeline/create-change-set.js";
 import { parseInspectArguments } from "../scripts/aws-pipeline/inspect-stack.js";
 
@@ -239,7 +240,7 @@ test("deployment constants stay aligned with the packet", () => {
     phases: ["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
       "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
       "traffic-repair", "final-repair", "final-publication-repair", "traffic-publication-repair",
-      "crux-month-repair"],
+      "crux-month-repair", "provider-identity-fan-in"],
     handlers: [
       ["DiscoveryWorker", "discovery-worker"], ["DomainAggregator", "domain-aggregator"],
       ["LeadWorker", "lead-worker"], ["LeadAggregator", "lead-aggregator"],
@@ -401,7 +402,7 @@ test("G-R21 final-repair guard allows only FinalAggregator code", () => {
   assert.throws(() => assertFinalRepairChanges(changes, wrongParameter), /Final-repair code detail drift/u);
 });
 
-test("G-R24/G-R25 guard allows exactly TrafficWorker and FinalAggregator code", () => {
+test("G-R24/G-R25/G-R26 guard allows exactly TrafficWorker and FinalAggregator code", () => {
   const changes = ["FinalAggregator", "TrafficWorker"].map((logicalId) => ({ action: "Modify", logicalId,
     type: "AWS::Lambda::Function", replacement: "False" }));
   const description = { Changes: changes.map(({ logicalId }) => ({ ResourceChange: { LogicalResourceId: logicalId,
@@ -416,6 +417,53 @@ test("G-R24/G-R25 guard allows exactly TrafficWorker and FinalAggregator code", 
   assert.doesNotThrow(() => assertTrafficPublicationRepairChanges(changes, description));
   assert.throws(() => assertTrafficPublicationRepairChanges(changes.slice(1), description),
     /Traffic-publication-repair inventory/u);
+  assert.equal(parseArguments(["--profile=storesignal-dev", "--region=ap-south-2",
+    "--stack=storesignal-production-pipeline", "--environment=production",
+    "--phase=provider-identity-fan-in", "--account-id=123456789012"]).phase,
+  "provider-identity-fan-in");
+});
+
+test("G-R27 guard allows exactly seven Lambda Code changes and two Recovery dependencies", () => {
+  const changes = [...DEPLOYMENT.handlers.map(([logicalId]) => ({ action: "Modify", logicalId,
+    type: "AWS::Lambda::Function", replacement: "False" })),
+  ...CODE_UPDATE.dependentReevaluations.map(({ logicalId, type, replacement }) => ({
+    action: "Modify", logicalId, type, replacement
+  }))].sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  const description = { Changes: [...DEPLOYMENT.handlers.map(([logicalId]) => ({ ResourceChange: {
+    LogicalResourceId: logicalId, Details: [
+      { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: `${logicalId}CodeKey`,
+        Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Static", ChangeSource: "ParameterReference", CausingEntity: `${logicalId}CodeVersion`,
+        Target: { Name: "Code", RequiresRecreation: "Never" } },
+      { Evaluation: "Dynamic", ChangeSource: "DirectModification",
+        Target: { Name: "Code", RequiresRecreation: "Never" } }
+    ] } })), { ResourceChange: { LogicalResourceId: "RecoveryInvokePermission", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "RecoverySchedule.Arn",
+      Target: { Name: "SourceArn", RequiresRecreation: "Always" }
+    }] } }, { ResourceChange: { LogicalResourceId: "RecoverySchedule", Details: [{
+      Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "Recovery.Arn",
+      Target: { Name: "Targets", RequiresRecreation: "Never" }
+    }] } }] };
+  assert.doesNotThrow(() => assertProviderIdentityFanInChanges(changes, description));
+  assert.throws(() => assertProviderIdentityFanInChanges(changes.slice(1), description),
+    /Provider-identity-fan-in change-set inventory/u);
+  const topologyDrift = clone(description);
+  topologyDrift.Changes[0].ResourceChange.Details.push({ Evaluation: "Static",
+    ChangeSource: "DirectModification", Target: { Name: "MemorySize", RequiresRecreation: "Never" } });
+  assert.throws(() => assertProviderIdentityFanInChanges(changes, topologyDrift), /code detail drift/u);
+  const manifest = { objects: DEPLOYMENT.handlers.map(([logicalId], index) => ({ logicalId,
+    key: `deployment/hash-${index}/function.zip`, versionId: `version-${index}` })) };
+  const parameters = parameterArguments({ phase: "provider-identity-fan-in", environment: "production" },
+    { bucket: "fixture" }, manifest);
+  for (const [logicalId] of DEPLOYMENT.handlers) {
+    assert.ok(parameters.includes(`ParameterKey=${logicalId}CodeKey,ParameterValue=${manifest.objects
+      .find((entry) => entry.logicalId === logicalId).key}`));
+    assert.ok(parameters.includes(`ParameterKey=${logicalId}CodeVersion,ParameterValue=${manifest.objects
+      .find((entry) => entry.logicalId === logicalId).versionId}`));
+  }
+  assert.equal(parameters.some((entry) => entry.includes("UsePreviousValue=true")), false);
+  assert.match(scriptSource, /provider-identity-fan-in[^]*current_window:\\s\*G-R27/u);
+  assert.doesNotMatch(scriptSource, /provider-identity-fan-in[^]{0,200}current_window:\\s\*G-R26/u);
 });
 
 test("G-R19 guard allows only affected code and LeadWorker memory", () => {

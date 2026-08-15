@@ -628,3 +628,48 @@ test("one provider contract failure preserves accepted output from the other", a
     .filter(({ source }) => source.startsWith("crux_"))
     .every(({ state }) => state === "available"));
 });
+
+test("two shops sharing provider identities retain both owners and call each provider identity once", async () => {
+  const repository = new MemoryRepository();
+  const claimed = [];
+  repository.claimShopWorkBatch = async (_runId, _lease, claims) => {
+    claimed.push(...claims.map((claim) => ({ ...claim })));
+    return claims.map((work) => ({ outcome: "won", networkAllowed: true,
+      work: { ...work, state: "processing" } }));
+  };
+  let dataForSeoCalls = 0;
+  let restCalls = 0;
+  let bigQueryCalls = 0;
+  const sharedLeads = ["shop_b", "shop_a"].map((shop_id) => ({
+    ...lead(), shop_id, resolved_domain: "shared.example",
+    final_url: "https://shared.example/products/item"
+  }));
+  const result = await enrichTraffic(options({ dataForSeo: true, crux: true, repository,
+    leads: sharedLeads, dependencies: {
+      fetchDataForSeoTraffic: async ({ targets, scope }) => {
+        dataForSeoCalls += 1;
+        assert.deepEqual(targets, ["shared.example"]);
+        return { records: targets.map((target) => ({ state: "available",
+          value: dataForSeoValue(target, scope === "worldwide" ? "worldwide" :
+            normalizedDataForSeoScope(scope)) })), cost: { providerReported: 0.01 } };
+      },
+      fetchCruxOriginMetrics: async ({ origin }) => { restCalls += 1; return cruxRestValue(origin); },
+      fetchCruxLatestDatasetMonth: async () => "202606",
+      dryRunCruxPopularity: async ({ origins }) => {
+        assert.deepEqual(origins, ["https://shared.example"]);
+        return { datasetMonth: "202606", bytesProcessed: 100 };
+      },
+      fetchCruxPopularityForMonth: async ({ origins }) => {
+        bigQueryCalls += 1;
+        return { records: origins.map((origin) => popularityValue(origin)), bytesProcessed: 90,
+          bytesBilled: 100, cacheHit: false };
+      }
+    }
+  }));
+  assert.equal(dataForSeoCalls, 10);
+  assert.equal(restCalls, 1);
+  assert.equal(bigQueryCalls, 1);
+  assert.equal(result.trafficEnrichments.length, 6);
+  assert.deepEqual([...new Set(claimed.map(({ shopId }) => shopId))], ["shop_a", "shop_b"]);
+  assert.equal(claimed.length, 24);
+});

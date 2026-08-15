@@ -89,10 +89,11 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
       const leadResultFixture = (await load("lead-results.valid.json")).success;
       const leadFixture = leadResultFixture.lead;
       const profile = leadResultFixture.profile; const profileFingerprint = fingerprintJson(profile);
+      const trafficConfig = trafficEnrichmentConfigSnapshot({});
       const requestFingerprint = "1".repeat(64); const batchFingerprint = "2".repeat(64);
       await prisma.run.create({ data: { id: runId, ownerId, state: "running", phase: "scraping",
         stage: "aws_traffic_crux", normalizedShopTypes: [], progress: {}, executionBackend: "aws",
-        pipelineGeneration: 1, trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({}),
+        pipelineGeneration: 1, trafficEnrichmentConfig: trafficConfig,
         awsProviderConfig: {}, resultsAvailable: false } });
       await prisma.shop.create({ data: { id: shopId, stableKey: "fixture.myshopify.com",
         canonicalUrl: "https://fixture.example", resolvedDomain: "fixture.example" } });
@@ -132,7 +133,11 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
       assert.deepEqual(resolvedTerminalWork, [{ shopId, pipelineTaskId: taskClaim.task.id,
         state: "contract_mismatch", scopeKey: "month:202607" }]);
       const input = { runId, generation: 1, stageId: registered.stage.id, aggregationToken: token,
-        cacheRows: [], leadTrafficRows: ["dataforseo", "crux_rest", "crux_bigquery"].map((source) => ({
+        cacheRows: [0, 1].map(() => ({ source: "crux_rest", identity: "https://fixture.example",
+          scopeKey: "current", metricSetKey: trafficConfig.crux.rest.metricSetKey,
+          contractVersion: trafficConfig.crux.rest.contractVersion, state: "no_coverage",
+          fetchedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 86400000).toISOString() })),
+        leadTrafficRows: ["dataforseo", "crux_rest", "crux_bigquery"].map((source) => ({
           leadId: lead.id, source, state: "unavailable", contractVersion: source === "dataforseo"
             ? "dataforseo-traffic-v1" : source === "crux_rest" ? "crux-origin-metrics-v1" : "crux-popularity-v1" })),
         leadProfileOutcomes: [{ shopId, state: "existing", profileFingerprint }],
@@ -155,6 +160,7 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
       const published = await repository.publishAwsFinalResults(input, new Date(now.getTime() + 3));
       assert.equal(published.run.resultsAvailable, true); assert.equal(published.stage.state, "completed");
       assert.equal(await prisma.leadTrafficEnrichment.count({ where: { runId } }), 3);
+      assert.equal(await prisma.trafficEnrichmentCache.count(), 1);
       assert.equal(await prisma.userShop.count({ where: { userId: ownerId, shopId } }), 1);
       assert.equal((await prisma.shopWork.findUnique({ where: {
         id: shopWorkId(shopId, "crux_bigquery", "month:202607") } })).state, "failed");

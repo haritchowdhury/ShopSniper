@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { leadRecordToCreate } from "../src/api-serializer.js";
 import { runStoreId, shopIdForStableKey } from "../src/shop-persistence-contract.js";
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
+import { parseDomainStageManifest } from "../src/aws-pipeline/contracts/artifacts.js";
 import { trafficEnrichmentConfigSnapshot } from "../src/prisma-run-repository.js";
 import { buildCruxBigQueryLiveRequest } from "../src/enrichment/crux/bigquery-request.js";
 import { bindTrafficProviderIdentities, processTrafficBatch,
@@ -22,7 +23,8 @@ const load = async (name) => JSON.parse(await readFile(new URL(`./fixtures/aws-p
 
 async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"], cancelled = false,
   artifactSeed, sharedState, domainCount = 1, fullScopes = true, adapterOverrides = {},
-  leaseAttempt = 1, secretOverrides = {}, stageState = "collecting" } = {}) {
+  leaseAttempt = 1, secretOverrides = {}, stageState = "collecting",
+  sharedProviderIdentity = false } = {}) {
   const domainManifest = await load("domain-manifest.valid.json");
   const workPlan = await load("domain-work-plan.valid.json");
   const leadFixture = (await load("lead-results.valid.json")).success.lead;
@@ -36,6 +38,17 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
       const suffix = String(index).padStart(3, "0");
       const domain = JSON.parse(JSON.stringify(baseDomain).replaceAll("fixture.example", `fixture-${suffix}.example`)
         .replaceAll("fixture.myshopify.com", `fixture-${suffix}.myshopify.com`));
+      if (sharedProviderIdentity) {
+        domain.identity.resolvedDomain = "fixture.example";
+        domain.identity.canonicalUrl = "https://fixture.example/products/item-1";
+        domain.identity.identityEvidence.displayHostname = "fixture.example";
+        domain.identity.identityEvidence.observedHostnames = ["fixture.example",
+          `fixture-${suffix}.myshopify.com`].sort();
+        domain.identity.identityEvidence.canonical = {
+          url: "https://fixture.example/products/item-1", hostname: "fixture.example",
+          trusted: true, reason: "canonical_matches_observed_host"
+        };
+      }
       domain.shopId = shopIdForStableKey(domain.identity.stableKey);
       domain.runStoreId = runStoreId(domainManifest.runId, domain.shopId); return domain;
     });
@@ -48,6 +61,7 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
       plan.candidateFingerprint = fingerprintJson({ contractVersion: "domain-candidate-v1",
         runId: domainManifest.runId, generation: 1, shopId: domain.shopId, runStoreId: domain.runStoreId,
         identity: domain.identity, candidatePayload: domain.candidatePayload });
+      if (sharedProviderIdentity) plan.sourceKeys = structuredClone(basePlan.sourceKeys);
       if (fullScopes) { const base = plan.sourceKeys.dataForSeo[0];
         plan.sourceKeys.dataForSeo = traffic.dataForSeo.scopes.map((scope) => ({ ...base,
           scopeKey: scope === "worldwide" ? scope : `country:${scope.countryIsoCode}:${scope.locationCode}` })); }
@@ -62,12 +76,18 @@ async function serviceHarness({ failAt, terminalReplay = false, triggers = ["m1"
   workPlan.awsProviderConfig.trafficHttp.cruxBigQueryProjectIdFingerprint = fingerprintJson({
     contractVersion: "crux-bigquery-project-v1", projectId: "fixture-project" });
   const manifest = { contractVersion: "domain-stage-manifest-v1", domainManifest, workPlan };
+  if (sharedProviderIdentity) parseDomainStageManifest(manifest);
   const manifestFingerprint = fingerprintJson(manifest);
   const plans = workPlan.domains; const leads = plans.map((plan, index) => {
     const suffix = String(index).padStart(3, "0");
     const fixture = domainCount === 1 ? leadFixture : JSON.parse(JSON.stringify(leadFixture)
       .replaceAll("fixture.example", `fixture-${suffix}.example`)
       .replaceAll("fixture.myshopify.com", `fixture-${suffix}.myshopify.com`));
+    if (sharedProviderIdentity) {
+      fixture.resolved_domain = "fixture.example";
+      fixture.final_url = "https://fixture.example";
+      fixture.canonical_url = "https://fixture.example";
+    }
     const id = `lead_fixture_service_${suffix}`;
     return { ...leadRecordToCreate(domainManifest.runId, id, fixture), id, runId: domainManifest.runId,
       shopId: plan.shopId, status: "qualified", identityEvidence: fixture.identity_evidence };
@@ -285,6 +305,17 @@ test("52-domain stage preserves run-wide provider cardinality through the real s
   assert.deepEqual(calls, { dataforseo: 10, rest: 52, table: 1, dry: 1, live: 1 });
   assert.equal([...artifacts.values()].filter(({ contractVersion }) =>
     contractVersion === "combined-traffic-crux-result-v1").length, 52);
+});
+
+test("two shops sharing one provider identity retain per-shop artifacts with one provider path", async () => {
+  const { result, calls, artifacts } = await serviceHarness({ domainCount: 2,
+    sharedProviderIdentity: true, triggers: ["reverse", "forward"] });
+  assert.ok(result.results.every(({ outcome }) => outcome === "recorded"));
+  assert.deepEqual(calls, { dataforseo: 10, rest: 1, table: 1, dry: 1, live: 1 });
+  assert.equal([...artifacts.values()].filter(({ contractVersion }) =>
+    contractVersion === "provider-source-result-v1").length, 6);
+  assert.equal([...artifacts.values()].filter(({ contractVersion }) =>
+    contractVersion === "combined-traffic-crux-result-v1").length, 2);
 });
 
 test("REST marker makes a lost response terminally ambiguous without a second adapter call", async () => {
