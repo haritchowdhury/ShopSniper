@@ -40,6 +40,7 @@ import { fingerprintJson } from "./aws-pipeline/core/canonical.js";
 import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-config.js";
 import { parseTrafficRunConfig } from "./aws-pipeline/contracts/traffic-config.js";
 import { PipelineInvariantError } from "./aws-pipeline/contracts/errors.js";
+import { pipelineStageId } from "./aws-pipeline/core/keys.js";
 import {
   assertCompleteAggregatorInTransaction,
   completeAggregatorInTransaction,
@@ -1974,10 +1975,24 @@ export class PrismaRunRepository {
         leaseDurationMs !== 60000) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
+      const stageId = pipelineStageId(runIdentifier, "traffic_crux", generation);
+      const stageLocks = await transaction.$queryRaw`
+        SELECT "id" FROM "PipelineStage" WHERE "id" = ${stageId} FOR UPDATE
+      `;
+      if (stageLocks.length !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      const stage = await transaction.pipelineStage.findUnique({ where: { id: stageId } });
+      const runLocks = await transaction.$queryRaw`
+        SELECT "id" FROM "Run" WHERE "id" = ${runIdentifier} FOR UPDATE
+      `;
+      if (runLocks.length !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       const run = await transaction.run.findUnique({ where: { id: runIdentifier } });
-      if (!run || run.executionBackend !== "aws" || run.pipelineGeneration !== generation)
+      if (!stage || stage.runId !== runIdentifier || stage.stage !== "traffic_crux" ||
+          stage.generation !== generation || !run || run.executionBackend !== "aws" ||
+          run.pipelineGeneration !== generation)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       if (run.state !== "running") return { outcome: "cancelled" };
+      if (stage.state === "aggregating" && stage.aggregationLeaseExpiresAt instanceof Date &&
+          stage.aggregationLeaseExpiresAt > now) return { outcome: "busy" };
       if (run.leaseToken === token && run.leaseExpiresAt instanceof Date && run.leaseExpiresAt > now)
         return { outcome: "owned", lease: { owner: run.leaseOwner, token, attempt: run.leaseAttempt,
           expiresAt: run.leaseExpiresAt } };

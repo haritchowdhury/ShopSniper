@@ -12,7 +12,8 @@ export const DEPLOYMENT = Object.freeze({
   phases: Object.freeze(["bootstrap", "package", "full", "activate", "code", "engine", "artifact-access",
     "provider-identity", "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk",
     "traffic-repair", "final-repair", "final-publication-repair", "traffic-publication-repair",
-    "crux-month-repair", "provider-identity-fan-in", "run-isolation-repair"]),
+    "crux-month-repair", "provider-identity-fan-in", "run-isolation-repair",
+    "traffic-final-lease-exclusion"]),
   handlers: Object.freeze([
     ["DiscoveryWorker", "discovery-worker"],
     ["DomainAggregator", "domain-aggregator"],
@@ -92,7 +93,7 @@ export function parseArguments(argv) {
       (!result.execute || !["full", "activate", "code", "engine", "artifact-access", "provider-identity",
         "lead-work-resume", "lead-memory", "lead-bounded-extraction", "bounded-bulk", "traffic-repair",
         "final-repair", "final-publication-repair", "traffic-publication-repair", "crux-month-repair",
-        "provider-identity-fan-in", "run-isolation-repair"]
+        "provider-identity-fan-in", "run-isolation-repair", "traffic-final-lease-exclusion"]
         .includes(result.phase))) {
     fail("--apply-reviewed-change-set requires a reviewed update phase with --execute");
   }
@@ -259,6 +260,9 @@ async function requireApproval(packet, options) {
   }
   if (options.phase === "run-isolation-repair" && !/^current_window:\s*G-R28\s*$/mu.test(state)) {
     fail("G-R28 is not the active window");
+  }
+  if (options.phase === "traffic-final-lease-exclusion" && !/^current_window:\s*G-R29\s*$/mu.test(state)) {
+    fail("G-R29 is not the active window");
   }
   return true;
 }
@@ -555,6 +559,14 @@ export function assertRunIsolationRepairChanges(changes, description) {
   }
 }
 
+export function assertTrafficFinalLeaseExclusionChanges(changes, description) {
+  try { assertEngineChanges(changes, description); }
+  catch (error) {
+    fail(String(error?.message || "Traffic-final-lease-exclusion change drift")
+      .replaceAll("Engine", "Traffic-final-lease-exclusion"));
+  }
+}
+
 export function assertLeadMemoryChanges(changes, description) {
   const expected = [{ action: "Modify", logicalId: "LeadWorker",
     type: "AWS::Lambda::Function", replacement: "False" }];
@@ -689,7 +701,8 @@ function changeSetName(kind, packet) {
             ["final-publication-repair", "traffic-publication-repair"].includes(kind) ? "gr24" :
               kind === "crux-month-repair" ? "gr25" :
                 kind === "provider-identity-fan-in" ? "gr26" :
-                  kind === "run-isolation-repair" ? "gr28" : "g14";
+                  kind === "run-isolation-repair" ? "gr28" :
+                    kind === "traffic-final-lease-exclusion" ? "gr29" : "g14";
   return `${prefix}-${kind}-${packet.approvalToken.slice(0, 12)}`;
 }
 
@@ -826,6 +839,7 @@ async function executeFull(options, packet) {
   const cruxMonthRepair = options.phase === "crux-month-repair";
   const providerIdentityFanIn = options.phase === "provider-identity-fan-in";
   const runIsolationRepair = options.phase === "run-isolation-repair";
+  const trafficFinalLeaseExclusion = options.phase === "traffic-final-lease-exclusion";
   const name = changeSetName(activation ? "activate" : code ? "code" : engine ? "engine" :
     artifactAccess ? "artifact-access" : providerIdentity ? "provider-identity" :
       leadWorkResume ? "lead-work-resume" : leadMemory ? "lead-memory" :
@@ -835,7 +849,8 @@ async function executeFull(options, packet) {
               trafficPublicationRepair ? "traffic-publication-repair" :
                 cruxMonthRepair ? "crux-month-repair" :
                   providerIdentityFanIn ? "provider-identity-fan-in" :
-                    runIsolationRepair ? "run-isolation-repair" : "full", packet);
+                    runIsolationRepair ? "run-isolation-repair" :
+                      trafficFinalLeaseExclusion ? "traffic-final-lease-exclusion" : "full", packet);
   if (!options.applyReviewedChangeSet) {
     aws(options, ["cloudformation", "create-change-set", "--stack-name", options.stack,
       "--change-set-name", name, "--change-set-type", "UPDATE", "--template-url",
@@ -857,6 +872,7 @@ async function executeFull(options, packet) {
                                 cruxMonthRepair ? "Approved G-R25 CrUX month publication repair" :
                                   providerIdentityFanIn ? "Approved G-R27 complete provider identity fan-in package closure" :
                                     runIsolationRepair ? "Approved G-R28 run-isolated provider work correction" :
+                                      trafficFinalLeaseExclusion ? "Approved G-R29 atomic traffic/final lease exclusion" :
                 "Approved G14 disabled production pipeline"]);
     aws(options, ["cloudformation", "wait", "change-set-create-complete", "--stack-name", options.stack,
       "--change-set-name", name], { json: false });
@@ -878,6 +894,7 @@ async function executeFull(options, packet) {
   else if (finalPublicationRepair) assertFinalRepairChanges(changes, described);
   else if (providerIdentityFanIn) assertProviderIdentityFanInChanges(changes, described);
   else if (runIsolationRepair) assertRunIsolationRepairChanges(changes, described);
+  else if (trafficFinalLeaseExclusion) assertTrafficFinalLeaseExclusionChanges(changes, described);
   else if (trafficPublicationRepair || cruxMonthRepair)
     assertTrafficPublicationRepairChanges(changes, described);
   else assertFullChanges(changes, packet);
@@ -899,6 +916,7 @@ async function executeFull(options, packet) {
                           cruxMonthRepair ? "CRUX_MONTH_REPAIR_CHANGE_SET_REVIEWED" :
                             providerIdentityFanIn ? "PROVIDER_IDENTITY_FAN_IN_CHANGE_SET_REVIEWED" :
                               runIsolationRepair ? "RUN_ISOLATION_REPAIR_CHANGE_SET_REVIEWED" :
+                                trafficFinalLeaseExclusion ? "TRAFFIC_FINAL_LEASE_EXCLUSION_CHANGE_SET_REVIEWED" :
       "FULL_CHANGE_SET_REVIEWED", changeSet: name, changes };
   const recorded = JSON.parse(await readFile(changeSetRecordPath, "utf8"));
   if (recorded.approvalToken !== packet.approvalToken || recorded.changeSetId !== described.ChangeSetId ||
@@ -919,6 +937,7 @@ async function executeFull(options, packet) {
                   cruxMonthRepair ? "CRUX_MONTH_REPAIR_STACK_COMPLETE" :
                     providerIdentityFanIn ? "PROVIDER_IDENTITY_FAN_IN_STACK_COMPLETE" :
                       runIsolationRepair ? "RUN_ISOLATION_REPAIR_STACK_COMPLETE" :
+                        trafficFinalLeaseExclusion ? "TRAFFIC_FINAL_LEASE_EXCLUSION_STACK_COMPLETE" :
       "FULL_STACK_COMPLETE", changeSet: name, changes };
 }
 

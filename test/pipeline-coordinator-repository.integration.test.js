@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import { createPrismaClient } from "../src/prisma-client.js";
 import { PipelineCoordinatorRepository, assertCompleteAggregatorInTransaction,
   completeAggregatorInTransaction, registerStageInTransaction
 } from "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
+import { PrismaRunRepository } from "../src/prisma-run-repository.js";
 import { assertMigrationStayedInSchema, createIsolatedTestSchema,
   deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
@@ -90,6 +92,76 @@ test("coordinator registration is independent of PostgreSQL collation for live-s
         new Map(tasks.map((task) => [task.itemKey, task.inputFingerprint])));
     } finally {
       await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await base.$disconnect();
+    }
+  });
+
+test("G-R29 traffic and final leases are atomically mutually exclusive",
+  { skip: !enabled, timeout: 120_000 }, async () => {
+    const schema = `gr29_lease_exclusion_${Date.now()}_${process.pid}`;
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    let prismaA;
+    let prismaB;
+    try {
+      deployPrismaMigrations(scopedUrl, path.join(projectRoot, "prisma.config.ts"));
+      prismaA = createPrismaClient(scopedUrl);
+      prismaB = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prismaA, schema);
+      const trafficA = new PrismaRunRepository(prismaA);
+      const trafficB = new PrismaRunRepository(prismaB);
+      const coordinatorA = new PipelineCoordinatorRepository(prismaA);
+      const coordinatorB = new PipelineCoordinatorRepository(prismaB);
+      const now = new Date("2026-08-15T12:00:00.000Z");
+      const registerTraffic = async (runId) => {
+        await createAwsRun(prismaA, runId);
+        return coordinatorA.registerStage(registration(runId, "traffic_crux", []), now);
+      };
+
+      const finalFirstRun = "run_gr29_final_first_0001";
+      await registerTraffic(finalFirstRun);
+      const finalFirst = await coordinatorA.claimAggregator({ runId: finalFirstRun,
+        stage: "traffic_crux", generation: 1, owner: "final_first", token: randomUUID(),
+        leaseDurationMs: 120000 }, now);
+      assert.equal(finalFirst.outcome, "owned");
+      assert.equal((await trafficB.claimAwsRunLease({ runId: finalFirstRun, generation: 1,
+        owner: "traffic_late", token: randomUUID(), leaseDurationMs: 60000 }, now)).outcome, "busy");
+
+      const trafficFirstRun = "run_gr29_traffic_first_0001";
+      await registerTraffic(trafficFirstRun);
+      const trafficToken = randomUUID();
+      assert.equal((await trafficA.claimAwsRunLease({ runId: trafficFirstRun, generation: 1,
+        owner: "traffic_first", token: trafficToken, leaseDurationMs: 60000 }, now)).outcome, "owned");
+      assert.equal((await coordinatorB.claimAggregator({ runId: trafficFirstRun,
+        stage: "traffic_crux", generation: 1, owner: "final_late", token: randomUUID(),
+        leaseDurationMs: 120000 }, now)).outcome, "busy");
+      await trafficA.releaseAwsRunLease({ runId: trafficFirstRun, generation: 1,
+        token: trafficToken }, new Date(now.getTime() + 1));
+      assert.equal((await coordinatorB.claimAggregator({ runId: trafficFirstRun,
+        stage: "traffic_crux", generation: 1, owner: "final_after_release", token: randomUUID(),
+        leaseDurationMs: 120000 }, new Date(now.getTime() + 2))).outcome, "owned");
+
+      const simultaneousRun = "run_gr29_simultaneous_0001";
+      const simultaneousStage = await registerTraffic(simultaneousRun);
+      const simultaneousTrafficToken = randomUUID();
+      const [trafficClaim, finalClaim] = await Promise.all([
+        trafficB.claimAwsRunLease({ runId: simultaneousRun, generation: 1,
+          owner: "traffic_simultaneous", token: simultaneousTrafficToken, leaseDurationMs: 60000 }, now),
+        coordinatorA.claimAggregator({ runId: simultaneousRun, stage: "traffic_crux", generation: 1,
+          owner: "final_simultaneous", token: randomUUID(), leaseDurationMs: 120000 }, now)
+      ]);
+      assert.deepEqual([trafficClaim.outcome, finalClaim.outcome].sort(), ["busy", "owned"]);
+      const [durableRun, durableStage] = await Promise.all([
+        prismaA.run.findUnique({ where: { id: simultaneousRun } }),
+        prismaA.pipelineStage.findUnique({ where: { id: simultaneousStage.stage.id } })
+      ]);
+      const trafficOwns = durableRun.leaseExpiresAt instanceof Date && durableRun.leaseExpiresAt > now;
+      const finalOwns = durableStage.state === "aggregating" &&
+        durableStage.aggregationLeaseExpiresAt instanceof Date && durableStage.aggregationLeaseExpiresAt > now;
+      assert.notEqual(trafficOwns, finalOwns);
+    } finally {
+      await prismaA?.$disconnect();
+      await prismaB?.$disconnect();
       await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await base.$disconnect();
     }
