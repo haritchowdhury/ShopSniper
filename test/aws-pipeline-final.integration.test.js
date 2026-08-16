@@ -181,23 +181,23 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
       await base.$disconnect(); }
   });
 
-test("G-R20 publishes 1,000 domains and 12,000 work outcomes within the locked transaction timeout",
-  { skip: !enabled, timeout: 180000 }, async () => {
-    const schema = `gr20_final_scale_${Date.now()}_${process.pid}`;
+async function runMaximumPublicationTrial(trialOrdinal) {
+    const schema = `gr30_final_scale_${trialOrdinal}_${Date.now()}_${process.pid}`;
     const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
-    let prisma;
+    let prisma; const timings = [];
     try {
       deployPrismaMigrations(scopedUrl); prisma = createPrismaClient(scopedUrl);
       await assertMigrationStayedInSchema(prisma, schema);
       const repository = new PrismaRunRepository(prisma);
       const now = new Date("2026-08-14T01:00:00.000Z");
-      const runId = "run_gr20_final_scale_00001";
+      const runId = `run_gr30_final_scale_${trialOrdinal}_00001`;
       const stageId = pipelineStageId(runId, "traffic_crux", 1); const aggregationToken = randomUUID();
       const leadFixture = (await load("lead-results.valid.json")).success.lead;
       const shops = Array.from({ length: 1000 }, (_, index) => ({
-        id: `shop_gr20_final_${String(index).padStart(4, "0")}`,
-        stableKey: `domain:gr20-final-${index}.example`, canonicalUrl: `https://gr20-final-${index}.example`,
-        resolvedDomain: `gr20-final-${index}.example`
+        id: `shop_gr30_${trialOrdinal}_final_${String(index).padStart(4, "0")}`,
+        stableKey: `domain:gr30-${trialOrdinal}-final-${index}.example`,
+        canonicalUrl: `https://gr30-${trialOrdinal}-final-${index}.example`,
+        resolvedDomain: `gr30-${trialOrdinal}-final-${index}.example`
       }));
       const tasks = shops.map((shop) => ({ id: pipelineTaskId(stageId, shop.id), stageId, itemKey: shop.id,
         inputFingerprint: fingerprintJson({ shopId: shop.id }), state: "succeeded", terminalAt: now,
@@ -211,12 +211,12 @@ test("G-R20 publishes 1,000 domains and 12,000 work outcomes within the locked t
       await prisma.pipelineStage.create({ data: { id: stageId, runId, stage: "traffic_crux", generation: 1,
         manifestS3Key: `runs/${runId}/domains-manifest.json`, manifestFingerprint: "a".repeat(64),
         manifestProducedAt: now, expectedCount: 1000, terminalCount: 1000, succeededCount: 1000,
-        state: "aggregating", aggregationOwner: "gr20", aggregationLeaseToken: aggregationToken,
+        state: "aggregating", aggregationOwner: `gr30-${trialOrdinal}`, aggregationLeaseToken: aggregationToken,
         aggregationLeaseAcquiredAt: now, aggregationLeaseExpiresAt: new Date(now.getTime() + 120000) } });
       await prisma.shop.createMany({ data: shops });
       await prisma.pipelineTask.createMany({ data: tasks });
       await prisma.lead.createMany({ data: shops.map((shop, index) => ({ ...leadRecordToCreate(runId,
-        `lead_gr20_final_${String(index).padStart(4, "0")}`, { ...leadFixture,
+        `lead_gr30_${trialOrdinal}_final_${String(index).padStart(4, "0")}`, { ...leadFixture,
           resolved_domain: shop.resolvedDomain, final_url: shop.canonicalUrl, canonical_url: shop.canonicalUrl }),
       shopId: shop.id })) });
       const scopes = ["worldwide", ...Array.from({ length: 9 }, (_, index) => `country:G${index}:${1000 + index}`)];
@@ -247,21 +247,18 @@ test("G-R20 publishes 1,000 domains and 12,000 work outcomes within the locked t
         leadProfileOutcomes: shops.map((shop, index) => ({ shopId: shop.id, state: "failed",
           sourceTaskId: tasks[index].id })), workOutcomes, dataForSeoLedgerEvidence: [],
         diagnostics: [], trafficSummary: { version: "traffic-enrichment-summary-v1" }, status: {} };
-      let visibleBeforeFinalWrite = null; const started = Date.now(); const timings = [];
+      let visibleBeforeFinalWrite = null; const started = Date.now();
       let published;
-      try {
-        published = await repository.publishAwsFinalResults(input, now, { async afterStep(step) {
-          timings.push([step, Date.now() - started]);
-          if (step === "before_run_visibility") {
-            const [observed] = await base.$queryRawUnsafe(
-              `SELECT "resultsAvailable" FROM "${schema}"."Run" WHERE "id" = $1`, runId);
-            visibleBeforeFinalWrite = observed.resultsAvailable;
-          }
-        } });
-      } catch (error) {
-        throw new Error(`maximum publication failed at ${JSON.stringify(timings)}`, { cause: error });
-      }
-      assert.ok(Date.now() - started < 15000);
+      published = await repository.publishAwsFinalResults(input, now, { async afterStep(step) {
+        timings.push([step, Date.now() - started]);
+        if (step === "before_run_visibility") {
+          const [observed] = await base.$queryRawUnsafe(
+            `SELECT "resultsAvailable" FROM "${schema}"."Run" WHERE "id" = $1`, runId);
+          visibleBeforeFinalWrite = observed.resultsAvailable;
+        }
+      } });
+      const elapsedMs = Date.now() - started;
+      assert.ok(elapsedMs < 15000, `trial ${trialOrdinal} exceeded 15 seconds: ${JSON.stringify(timings)}`);
       assert.equal(visibleBeforeFinalWrite, false);
       assert.equal(published.run.resultsAvailable, true); assert.equal(published.run.state, "completed");
       assert.equal(published.stage.state, "completed"); assert.match(published.resultFingerprint, /^[a-f0-9]{64}$/u);
@@ -278,9 +275,25 @@ test("G-R20 publishes 1,000 domains and 12,000 work outcomes within the locked t
       assert.equal(await prisma.userShop.count(), 0);
       assert.equal(await prisma.userShopDiscovery.count(), 0);
       assert.equal((await prisma.pipelineStage.findUnique({ where: { id: stageId } })).state, "completed");
+      return { trialOrdinal, elapsedMs, timings };
+    } catch (error) {
+      throw new Error(`maximum publication trial ${trialOrdinal} failed at ${JSON.stringify(timings)}`, {
+        cause: error
+      });
     } finally {
       await prisma?.$disconnect();
       await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
       await base.$disconnect();
     }
+}
+
+test("G-R30 publishes three consecutive 1,000-domain and 12,000-outcome trials below 15 seconds",
+  { skip: !enabled, timeout: 180000 }, async (context) => {
+    const trials = [];
+    for (let trialOrdinal = 1; trialOrdinal <= 3; trialOrdinal += 1) {
+      const trial = await runMaximumPublicationTrial(trialOrdinal);
+      trials.push(trial);
+      context.diagnostic(JSON.stringify(trial));
+    }
+    assert.deepEqual(trials.map(({ trialOrdinal }) => trialOrdinal), [1, 2, 3]);
   });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import {
+  finalizePersistedLeadScoresV3,
   PrismaRunRepository,
   stableLeadId,
   trafficEnrichmentConfigSnapshot
@@ -450,6 +451,7 @@ test("progressive completion finalizes every lead to v3 before publication", asy
   };
   let leadUpdate;
   let published;
+  let trafficFindArguments;
   const transaction = {
     $queryRaw: async (strings, ...values) => {
       if (strings.join("").includes('UPDATE "Lead" AS lead')) {
@@ -467,7 +469,10 @@ test("progressive completion finalizes every lead to v3 before publication", asy
     },
     runDiagnostic: {},
     lead: { findMany: async () => [storedLead] },
-    leadTrafficEnrichment: { findMany: async () => [trafficRow] }
+    leadTrafficEnrichment: { findMany: async (arguments_) => {
+      trafficFindArguments = arguments_;
+      return [trafficRow];
+    } }
   };
   const repository = new PrismaRunRepository({
     $transaction: async (callback) => callback(transaction)
@@ -483,8 +488,59 @@ test("progressive completion finalizes every lead to v3 before publication", asy
   assert.equal(leadUpdate.scoringVersion, 3);
   assert.equal(leadUpdate.leadScore, 75);
   assert.equal(leadUpdate.scoreBreakdown.components.traffic, 24);
+  assert.deepEqual(Object.keys(leadUpdate).sort(), [
+    "id", "leadScore", "pipelineVersion", "scoreBreakdown", "scoringVersion"
+  ]);
+  assert.deepEqual(trafficFindArguments, {
+    where: { runId: "run_abcdefghijklmnop", source: { in: ["dataforseo", "crux_rest"] } },
+    orderBy: [{ leadId: "asc" }, { source: "asc" }],
+    select: {
+      leadId: true,
+      source: true,
+      state: true,
+      contractVersion: true,
+      normalizedPayload: true
+    }
+  });
   assert.equal(published.resultsAvailable, true);
   assert.equal(published.scoringVersion, 3);
+});
+
+test("v3 score finalization validates stored score state before scoring or writing", async () => {
+  let updateAttempted = false;
+  const storedLead = {
+    id: "lead_invalid",
+    status: "qualified",
+    resolvedDomain: "fixture.example",
+    relevanceScore: 100,
+    shopifyConfidence: 100,
+    identityConfidence: 100,
+    email: "hello@fixture.example",
+    phone: null,
+    contactUrl: "https://fixture.example/contact",
+    pipelineVersion: 2,
+    scoringVersion: 2,
+    leadScore: 81,
+    scoreBreakdown: {
+      version: 2,
+      components: {
+        identity: 20,
+        shopifyValidation: 25,
+        categoryFit: 30,
+        contactEvidence: 5
+      },
+      total: 80,
+      semantics: "deterministic_evidence_rank_not_probability"
+    }
+  };
+  await assert.rejects(finalizePersistedLeadScoresV3({
+    lead: { findMany: async () => [storedLead] },
+    leadTrafficEnrichment: { findMany: async () => [] },
+    $queryRaw: async () => { updateAttempted = true; return []; }
+  }, "run_abcdefghijklmnop", {
+    trafficEnrichmentConfig: trafficEnrichmentConfigSnapshot({ dataForSeoEnrichmentEnabled: true })
+  }), /qualified_v2_breakdown_total/u);
+  assert.equal(updateAttempted, false);
 });
 
 test("a progressive v3 score write failure prevents the publication update", async () => {

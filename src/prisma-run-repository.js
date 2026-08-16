@@ -17,6 +17,7 @@ import {
 } from "./api-serializer.js";
 import { loadConfig } from "./config.js";
 import { finalizeLeadScoresV3 } from "./lead-score-finalizer.js";
+import { assertLeadScoreState } from "./lead-state.js";
 import {
   DATAFORSEO_COUNTRY_LOCATION_CODES,
   DATAFORSEO_ITEM_TYPES,
@@ -710,6 +711,27 @@ function dataForSeoScoringEnabled(run) {
   return run?.trafficEnrichmentConfig?.dataForSeo?.enabled === true;
 }
 
+function storedLeadToScoringInput(lead) {
+  assertLeadScoreState({
+    status: lead.status,
+    pipelineVersion: lead.pipelineVersion,
+    scoringVersion: lead.scoringVersion,
+    leadScore: lead.leadScore,
+    scoreBreakdown: lead.scoreBreakdown
+  });
+  return {
+    id: lead.id,
+    status: lead.status,
+    resolved_domain: lead.resolvedDomain,
+    relevance_score: lead.relevanceScore,
+    shopify_confidence: lead.shopifyConfidence,
+    identity_confidence: lead.identityConfidence,
+    email: lead.email,
+    phone: lead.phone,
+    contact_url: lead.contactUrl
+  };
+}
+
 export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, run, { captureLeads } = {}) {
   if (!dataForSeoScoringEnabled(run)) return 2;
   const [storedLeads, trafficEnrichments] = await Promise.all([
@@ -718,11 +740,18 @@ export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, 
       orderBy: { id: "asc" }
     }),
     transaction.leadTrafficEnrichment.findMany({
-      where: { runId: runIdentifier },
-      orderBy: [{ leadId: "asc" }, { source: "asc" }]
+      where: { runId: runIdentifier, source: { in: ["dataforseo", "crux_rest"] } },
+      orderBy: [{ leadId: "asc" }, { source: "asc" }],
+      select: {
+        leadId: true,
+        source: true,
+        state: true,
+        contractVersion: true,
+        normalizedPayload: true
+      }
     })
   ]);
-  const publicLeads = storedLeads.map((lead) => serializeLead(lead));
+  const publicLeads = storedLeads.map(storedLeadToScoringInput);
   const finalLeads = finalizeLeadScoresV3({
     leads: publicLeads,
     trafficEnrichments,
@@ -731,11 +760,29 @@ export async function finalizePersistedLeadScoresV3(transaction, runIdentifier, 
   if (finalLeads.length !== storedLeads.length) {
     throw new Error("V3 score finalization did not reconcile every lead");
   }
-  const updates = finalLeads.map((lead) => {
-    const validated = leadRecordToCreate(runIdentifier, lead.id, lead);
-    return { id: lead.id, pipelineVersion: validated.pipelineVersion,
-      scoringVersion: validated.scoringVersion, leadScore: validated.leadScore,
-      scoreBreakdown: validated.scoreBreakdown ?? null };
+  const updates = finalLeads.map((lead, index) => {
+    const storedLead = storedLeads[index];
+    if (lead.id !== storedLead.id || lead.status !== storedLead.status) {
+      throw new Error("V3 score finalization changed lead identity or order");
+    }
+    const update = {
+      id: storedLead.id,
+      pipelineVersion: lead.pipeline_version,
+      scoringVersion: lead.scoring_version,
+      leadScore: lead.lead_score,
+      scoreBreakdown: lead.score_breakdown ?? null
+    };
+    if (update.pipelineVersion !== 2 || update.scoringVersion !== 3) {
+      throw new Error("V3 score finalization produced an unsupported version");
+    }
+    assertLeadScoreState({
+      status: storedLead.status,
+      pipelineVersion: update.pipelineVersion,
+      scoringVersion: update.scoringVersion,
+      leadScore: update.leadScore,
+      scoreBreakdown: update.scoreBreakdown
+    });
+    return update;
   });
   const updated = updates.length ? await transaction.$queryRaw`
     UPDATE "Lead" AS lead SET
@@ -2388,7 +2435,9 @@ export class PrismaRunRepository {
             ({ shopId: outcome.shopId, workType: outcome.workType, scopeKey: outcome.scopeKey, ordinal })))}::jsonb)
             AS value("shopId" text, "workType" text, "scopeKey" text, "ordinal" integer)
         )
-        SELECT work.*, input."ordinal" FROM input JOIN "ShopWork" work
+        SELECT work."id", work."shopId", work."workType", work."scopeKey", work."state",
+          work."processingRunId", work."processingPipelineTaskId", input."ordinal"
+        FROM input JOIN "ShopWork" work
           ON work."shopId" = input."shopId"
           AND work."workType" = input."workType"::"ShopWorkType"
           AND work."scopeKey" = input."scopeKey"
@@ -2476,7 +2525,9 @@ export class PrismaRunRepository {
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(workProfileOutcomes.map(({ shopId }, ordinal) =>
             ({ shopId, ordinal })))}::jsonb) AS value("shopId" text, "ordinal" integer)
         )
-        SELECT work.*, input."ordinal" FROM input JOIN "ShopWork" work
+        SELECT work."id", work."shopId", work."state", work."processingRunId",
+          work."processingPipelineTaskId", input."ordinal"
+        FROM input JOIN "ShopWork" work
           ON work."shopId" = input."shopId"
           AND work."workType" = 'lead_discovery'::"ShopWorkType" AND work."scopeKey" = 'current'
         ORDER BY input."ordinal" FOR UPDATE OF work
@@ -2583,7 +2634,7 @@ export class PrismaRunRepository {
       if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return { run: await transaction.run.findUnique({ where: { id: input.runId } }),
         stage: await transaction.pipelineStage.findUnique({ where: { id: input.stageId } }), resultFingerprint };
-    }, { maxWait: 5_000, timeout: 15_000 });
+    }, { maxWait: 5_000, timeout: 30_000 });
   }
 
   async claimShopWork(
