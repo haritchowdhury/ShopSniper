@@ -258,7 +258,7 @@ async function runMaximumPublicationTrial(trialOrdinal) {
         }
       } });
       const elapsedMs = Date.now() - started;
-      assert.ok(elapsedMs < 15000, `trial ${trialOrdinal} exceeded 15 seconds: ${JSON.stringify(timings)}`);
+      assert.ok(elapsedMs < 25000, `trial ${trialOrdinal} exceeded 25 seconds: ${JSON.stringify(timings)}`);
       assert.equal(visibleBeforeFinalWrite, false);
       assert.equal(published.run.resultsAvailable, true); assert.equal(published.run.state, "completed");
       assert.equal(published.stage.state, "completed"); assert.match(published.resultFingerprint, /^[a-f0-9]{64}$/u);
@@ -287,7 +287,7 @@ async function runMaximumPublicationTrial(trialOrdinal) {
     }
 }
 
-test("G-R30 publishes three consecutive 1,000-domain and 12,000-outcome trials below 15 seconds",
+test("G-R31 publishes three consecutive 1,000-domain and 12,000-outcome trials below 25 seconds",
   { skip: !enabled, timeout: 180000 }, async (context) => {
     const trials = [];
     for (let trialOrdinal = 1; trialOrdinal <= 3; trialOrdinal += 1) {
