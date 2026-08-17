@@ -1,0 +1,1643 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "privacy": "all values are synthetic; no provider body or customer data is reproduced",
+  "family": "dataforseo-overview-response",
+  "sourceCertificates": [
+    "PAY-KI-002",
+    "PAY-KI-005"
+  ],
+  "cases": [
+    {
+      "id": "OV001",
+      "category": "positive",
+      "description": "observed success with minimum history length 15",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV002",
+      "category": "boundary",
+      "description": "observed maximum history length 102",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV003",
+      "category": "boundary",
+      "description": "history length 14 is below the observed/locked 15..102 bound",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV004",
+      "category": "boundary",
+      "description": "null cpc and null keyword_difficulty are supported nullability",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": null,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": null
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV005",
+      "category": "boundary",
+      "description": "nonpositive search volume parses but yields no usable metric",
+      "expect": "no_usable_metric",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 0,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV006",
+      "category": "missing",
+      "description": "search_volume missing from keyword_info",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV007",
+      "category": "malformed",
+      "description": "competition_level outside LOW/MEDIUM/HIGH",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "EXTREME"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV008",
+      "category": "malformed",
+      "description": "main_intent outside the four locked intents",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "brand_awareness"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV009",
+      "category": "missing",
+      "description": "keyword_info object missing entirely",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV010",
+      "category": "malformed",
+      "description": "monthly_searches month out of 1..12 range",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV011",
+      "category": "unknown",
+      "description": "unknown nested fields stripped without behavior change",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM",
+                      "extra_field": "x"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV012",
+      "category": "missing",
+      "description": "result context missing location_code",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "OV013",
+      "category": "boundary",
+      "description": "missing keyword yields no usable metric exactly as the Python source",
+      "expect": "no_usable_metric",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.01212,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.01212,
+            "path": "/v3/dataforseo_labs/synthetic/overview",
+            "result": [
+              {
+                "location_code": 2840,
+                "language_code": "en",
+                "items_count": 1,
+                "items": [
+                  {
+                    "keyword": null,
+                    "keyword_info": {
+                      "search_volume": 1300,
+                      "cpc": 1.23,
+                      "competition": 0.42,
+                      "competition_level": "MEDIUM"
+                    },
+                    "monthly_searches": [
+                      {
+                        "year": 2024,
+                        "month": 10,
+                        "search_volume": 1000
+                      },
+                      {
+                        "year": 2024,
+                        "month": 11,
+                        "search_volume": 1037
+                      },
+                      {
+                        "year": 2024,
+                        "month": 12,
+                        "search_volume": 1074
+                      },
+                      {
+                        "year": 2025,
+                        "month": 1,
+                        "search_volume": 1111
+                      },
+                      {
+                        "year": 2025,
+                        "month": 2,
+                        "search_volume": 1148
+                      },
+                      {
+                        "year": 2025,
+                        "month": 3,
+                        "search_volume": 1185
+                      },
+                      {
+                        "year": 2025,
+                        "month": 4,
+                        "search_volume": 1222
+                      },
+                      {
+                        "year": 2025,
+                        "month": 5,
+                        "search_volume": 1259
+                      },
+                      {
+                        "year": 2025,
+                        "month": 6,
+                        "search_volume": 1296
+                      },
+                      {
+                        "year": 2025,
+                        "month": 7,
+                        "search_volume": 1333
+                      },
+                      {
+                        "year": 2025,
+                        "month": 8,
+                        "search_volume": 1370
+                      },
+                      {
+                        "year": 2025,
+                        "month": 9,
+                        "search_volume": 1407
+                      },
+                      {
+                        "year": 2025,
+                        "month": 10,
+                        "search_volume": 1444
+                      },
+                      {
+                        "year": 2025,
+                        "month": 11,
+                        "search_volume": 1481
+                      },
+                      {
+                        "year": 2025,
+                        "month": 12,
+                        "search_volume": 1518
+                      }
+                    ],
+                    "keyword_properties": {
+                      "keyword_difficulty": 44
+                    },
+                    "search_intent_info": {
+                      "main_intent": "informational"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

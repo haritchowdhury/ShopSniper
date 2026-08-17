@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "privacy": "all values are synthetic; no provider body or customer data is reproduced",
+  "family": "keyword-sqs-message",
+  "sourceCertificates": [
+    "PAY-KI-006"
+  ],
+  "cases": [
+    {
+      "id": "MS001",
+      "category": "positive",
+      "description": "initialize message accepted",
+      "expect": "message_accepted",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.initialize.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1
+      }
+    },
+    {
+      "id": "MS002",
+      "category": "positive",
+      "description": "expansion task message accepted",
+      "expect": "message_accepted",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.expansion.task.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1,
+        "stage": "expansion",
+        "taskNaturalId": "tsynthetic0000000000000001",
+        "inputFingerprint": "a30692beb8993ea17fec19a9b3defec53b87f4049a2fe0914232280b085ab458"
+      }
+    },
+    {
+      "id": "MS003",
+      "category": "positive",
+      "description": "overview task message accepted",
+      "expect": "message_accepted",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.overview.task.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1,
+        "stage": "market_overview",
+        "taskNaturalId": "tsynthetic0000000000000001",
+        "inputFingerprint": "a30692beb8993ea17fec19a9b3defec53b87f4049a2fe0914232280b085ab458"
+      }
+    },
+    {
+      "id": "MS004",
+      "category": "positive",
+      "description": "aggregate check message accepted",
+      "expect": "message_accepted",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.aggregate.check.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1,
+        "stage": "expansion"
+      }
+    },
+    {
+      "id": "MS005",
+      "category": "missing",
+      "description": "type discriminator missing",
+      "expect": "message_rejected",
+      "payload": {
+        "contractVersion": 1,
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1
+      }
+    },
+    {
+      "id": "MS006",
+      "category": "malformed",
+      "description": "wrong contract version",
+      "expect": "message_rejected",
+      "payload": {
+        "contractVersion": 2,
+        "type": "keyword.initialize.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1
+      }
+    },
+    {
+      "id": "MS007",
+      "category": "unknown",
+      "description": "extra business field (seed text) rejected by strict message object",
+      "expect": "message_rejected",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.initialize.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1,
+        "seed": "synthetic seed"
+      }
+    },
+    {
+      "id": "MS008",
+      "category": "malformed",
+      "description": "input fingerprint not 64 lowercase hex",
+      "expect": "message_rejected",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.expansion.task.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 1,
+        "stage": "expansion",
+        "taskNaturalId": "tsynthetic0000000000000001",
+        "inputFingerprint": "ABC"
+      }
+    },
+    {
+      "id": "MS009",
+      "category": "boundary",
+      "description": "nonpositive generation rejected",
+      "expect": "message_rejected",
+      "payload": {
+        "contractVersion": 1,
+        "type": "keyword.initialize.v1",
+        "researchId": "kr_synthetic0000000000000001",
+        "generation": 0
+      }
+    },
+    {
+      "id": "MS010",
+      "category": "boundary",
+      "description": "mixed valid/invalid batch: valid records parse, invalid record fails alone",
+      "expect": "mixed_batch_partial",
+      "payload": [
+        {
+          "contractVersion": 1,
+          "type": "keyword.expansion.task.v1",
+          "researchId": "kr_synthetic0000000000000001",
+          "generation": 1,
+          "stage": "expansion",
+          "taskNaturalId": "tsynthetic0000000000000001",
+          "inputFingerprint": "a30692beb8993ea17fec19a9b3defec53b87f4049a2fe0914232280b085ab458"
+        },
+        {
+          "contractVersion": 99,
+          "type": "keyword.initialize.v1",
+          "researchId": "kr_synthetic0000000000000001",
+          "generation": 1
+        }
+      ]
+    }
+  ]
+}

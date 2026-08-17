@@ -1,0 +1,314 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "privacy": "all values are synthetic; no provider body or customer data is reproduced",
+  "family": "dataforseo-related-response",
+  "sourceCertificates": [
+    "PAY-KI-002",
+    "PAY-KI-004"
+  ],
+  "cases": [
+    {
+      "id": "RL001",
+      "category": "positive",
+      "description": "observed success shape: keyword_data.keyword consumed; depth and related_keywords validated without behavior",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword_data": {
+                      "keyword": "synthetic keyword one"
+                    },
+                    "depth": 2,
+                    "related_keywords": [
+                      "synthetic keyword two"
+                    ]
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL002",
+      "category": "boundary",
+      "description": "empty items yields empty normalized list",
+      "expect": "normalized_empty",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.012,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.012,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [],
+                "items_count": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL003",
+      "category": "missing",
+      "description": "keyword_data object missing",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "depth": 2,
+                    "related_keywords": []
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL004",
+      "category": "unknown",
+      "description": "direct item.keyword alias is present but never consumed; missing keyword_data still mismatches",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "alias-only-must-not-parse",
+                    "depth": 2,
+                    "related_keywords": []
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL005",
+      "category": "malformed",
+      "description": "related_keywords wrong type (string not array)",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword_data": {
+                      "keyword": "synthetic keyword one"
+                    },
+                    "depth": 2,
+                    "related_keywords": "not-an-array"
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL006",
+      "category": "missing",
+      "description": "depth missing is a validated consumed field mismatch",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword_data": {
+                      "keyword": "synthetic keyword one"
+                    },
+                    "related_keywords": []
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL007",
+      "category": "unknown",
+      "description": "unknown nested fields stripped without behavior change",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword_data": {
+                      "keyword": "synthetic keyword one",
+                      "extra_field": true
+                    },
+                    "depth": 2,
+                    "related_keywords": [],
+                    "unknown_top": 3
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "RL008",
+      "category": "malformed",
+      "description": "keyword wrong type inside keyword_data",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword_data": {
+                      "keyword": false
+                    },
+                    "depth": 2,
+                    "related_keywords": []
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

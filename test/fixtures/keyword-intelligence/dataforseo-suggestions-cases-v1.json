@@ -1,0 +1,383 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "privacy": "all values are synthetic; no provider body or customer data is reproduced",
+  "family": "dataforseo-suggestions-response",
+  "sourceCertificates": [
+    "PAY-KI-002",
+    "PAY-KI-003"
+  ],
+  "cases": [
+    {
+      "id": "SG001",
+      "category": "positive",
+      "description": "observed success shape: two keywords normalized in provider order",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one"
+                  },
+                  {
+                    "keyword": "synthetic keyword two"
+                  }
+                ],
+                "items_count": 2
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG002",
+      "category": "boundary",
+      "description": "empty items array yields empty normalized keyword list",
+      "expect": "normalized_empty",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.012,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.012,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [],
+                "items_count": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG003",
+      "category": "boundary",
+      "description": "whitespace trimming and case-insensitive first-occurrence deduplication",
+      "expect": "normalized_dedup",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "  Synthetic Keyword One  "
+                  },
+                  {
+                    "keyword": "SYNTHETIC KEYWORD ONE"
+                  },
+                  {
+                    "keyword": "synthetic keyword two"
+                  }
+                ],
+                "items_count": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG004",
+      "category": "missing",
+      "description": "item missing consumed keyword field",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "not_keyword": "x"
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG005",
+      "category": "malformed",
+      "description": "keyword wrong type (number)",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": 7
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG006",
+      "category": "malformed",
+      "description": "keyword null",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": null
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG007",
+      "category": "unknown",
+      "description": "unknown item fields (including items[].key alias) are stripped and never consumed",
+      "expect": "normalized",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "synthetic keyword one",
+                    "key": "alias-must-not-be-consumed",
+                    "extra_field": 1
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG008",
+      "category": "missing",
+      "description": "root status_code missing",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_message": "Ok.",
+        "tasks": []
+      }
+    },
+    {
+      "id": "SG009",
+      "category": "malformed",
+      "description": "strict one-task envelope violated by second task",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.0156,
+        "tasks_count": 2,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "a"
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          },
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.0156,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items": [
+                  {
+                    "keyword": "b"
+                  }
+                ],
+                "items_count": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG010",
+      "category": "missing",
+      "description": "result array missing items array",
+      "expect": "contract_mismatch",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0.012,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 20000,
+            "status_message": "Ok.",
+            "time": "0.1000 sec.",
+            "cost": 0.012,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": [
+              {
+                "items_count": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "SG011",
+      "category": "malformed",
+      "description": "task-level error status maps to provider task failure",
+      "expect": "provider_task_failed",
+      "payload": {
+        "status_code": 20000,
+        "status_message": "Ok.",
+        "version": "0.3.20250416",
+        "time": "0.1234 sec.",
+        "cost": 0,
+        "tasks_count": 1,
+        "results_count": 1,
+        "tasks": [
+          {
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "status_code": 40000,
+            "status_message": "synthetic failure",
+            "time": "0.1000 sec.",
+            "cost": 0,
+            "path": "/v3/keywords_data/synthetic/live",
+            "result": null
+          }
+        ]
+      }
+    }
+  ]
+}
