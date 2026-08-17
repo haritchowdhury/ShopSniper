@@ -170,11 +170,18 @@ model Run {
   processingShopWork     ShopWork[] @relation("ShopWorkProcessingRun")
   userShopDiscoveries    UserShopDiscovery[]
   pipelineStages         PipelineStage[]
+  keywordResearchId      String?
+  keywordResearch        KeywordResearch? @relation(fields: [keywordResearchId], references: [id])
+  keywordSelectionRevision Int?
+  keywordSelectionSnapshot Json?
+  queryPlanSource        RunQueryPlanSource @default(legacy)
+  keywordResearchHandoff KeywordResearchHandoff?
 
   @@index([state])
   @@index([state, leaseExpiresAt])
   @@index([createdAt])
   @@index([ownerId, createdAt])
+  @@index([keywordResearchId])
 }
 
 model PipelineStage {
@@ -258,13 +265,15 @@ model RunQuery {
   probeResults         Json?
   probeContractVersion String?
   probeFingerprint     String?
-  probedAt             DateTime?
-  createdAt            DateTime                @default(now())
-  updatedAt            DateTime                @updatedAt
+  probedAt            DateTime?
+  keywordResearchItemId String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
   @@unique([runId, sequence])
   @@index([runId, categoryIndex, sequence])
   @@index([runId, validationState])
+  @@index([keywordResearchItemId])
 }
 
 model RunIntent {
@@ -545,4 +554,191 @@ model RunDiagnostic {
 
   @@unique([runId, sequence])
   @@index([runId, scope, code])
+}
+
+enum KeywordResearchState {
+  queued
+  running
+  completed
+  failed
+}
+
+enum KeywordResearchStageName {
+  expansion
+  anchor_screen
+  market_overview
+}
+
+enum KeywordResearchStageState {
+  collecting
+  ready
+  aggregating
+  completed
+  failed
+}
+
+enum KeywordResearchTaskState {
+  pending
+  processing
+  succeeded
+  skipped
+  failed
+}
+
+enum RunQueryPlanSource {
+  legacy
+  keyword_research
+}
+
+model KeywordResearch {
+  id                String                @id
+  ownerId           String
+  state             KeywordResearchState  @default(queued)
+  generation        Int                   @default(1)
+  contractVersion   Int                   @default(1)
+  configSnapshot    Json
+  configFingerprint String
+  seeds             Json
+  markets           Json
+  progress          Json
+  result            Json?
+  resultFingerprint String?
+  selection         Json?
+  selectionRevision Int                   @default(0)
+  safeErrorCode     String?
+  safeErrorMessage  String?
+  createdAt         DateTime              @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  updatedAt         DateTime              @updatedAt
+  stages            KeywordResearchStage[]
+  runs              Run[]
+  handoffs          KeywordResearchHandoff[]
+
+  @@index([ownerId, createdAt])
+  @@index([state, createdAt])
+}
+
+model KeywordResearchStage {
+  id                        String                    @id
+  researchId                String
+  research                  KeywordResearch           @relation(fields: [researchId], references: [id], onDelete: Cascade)
+  stage                     KeywordResearchStageName
+  generation                Int
+  manifestS3Key             String?
+  manifestFingerprint       String?
+  manifestProducedAt        DateTime?
+  expectedCount             Int
+  terminalCount             Int                       @default(0)
+  succeededCount            Int                       @default(0)
+  skippedCount              Int                       @default(0)
+  failedCount               Int                       @default(0)
+  cancelledCount            Int                       @default(0)
+  state                     KeywordResearchStageState @default(collecting)
+  version                   Int                       @default(1)
+  aggregationOwner          String?
+  aggregationLeaseToken     String?
+  aggregationLeaseAcquiredAt DateTime?
+  aggregationLeaseExpiresAt DateTime?
+  aggregationAttempt        Int                       @default(0)
+  safeErrorCode             String?
+  safeErrorMessage          String?
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+  completedAt               DateTime?
+  tasks                     KeywordResearchTask[]
+
+  @@unique([researchId, stage, generation])
+  @@index([researchId, generation])
+  @@index([state, aggregationLeaseExpiresAt])
+}
+
+model KeywordResearchTask {
+  id                  String                    @id
+  stageId             String
+  stage               KeywordResearchStage     @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  itemKey             String
+  inputFingerprint    String
+  endpointKey         String
+  requestFingerprint  String
+  nextAttemptAt       DateTime?
+  state               KeywordResearchTaskState @default(pending)
+  attemptCount        Int                       @default(0)
+  dispatchCount       Int                       @default(0)
+  lastDispatchedAt    DateTime?
+  leaseOwner          String?
+  leaseToken          String?                   @unique
+  leaseAcquiredAt     DateTime?
+  leaseExpiresAt      DateTime?
+  leaseAttempt        Int                       @default(0)
+  artifactS3Key       String?
+  artifactFingerprint String?
+  terminalAt          DateTime?
+  safeErrorCode       String?
+  safeErrorMessage    String?
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+  attempts            KeywordResearchProviderAttempt[]
+
+  @@unique([stageId, itemKey])
+  @@index([stageId, state])
+  @@index([state, leaseExpiresAt])
+  @@index([stageId, lastDispatchedAt])
+  @@index([state, nextAttemptAt])
+}
+
+model KeywordResearchCache {
+  requestFingerprint String   @id
+  cacheKey           String
+  endpointKey        String
+  contractVersion    Int      @default(1)
+  normalizedResponse Json
+  resultFingerprint  String
+  createdAt          DateTime @default(now())
+  expiresAt          DateTime
+
+  @@index([cacheKey])
+  @@index([expiresAt])
+}
+
+model KeywordResearchProviderAttempt {
+  id                 String                @id
+  taskId             String
+  task               KeywordResearchTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  attemptNumber      Int
+  state              DataForSeoRequestState @default(planned)
+  requestFingerprint String
+  plannedAt          DateTime              @default(now())
+  claimedAt          DateTime?
+  ambiguousAfter     DateTime?
+  completedAt        DateTime?
+  reservationCostUsd Decimal?              @db.Decimal(18, 8)
+  providerCostUsd    Decimal?              @db.Decimal(18, 8)
+  safeErrorCode      String?
+  resultFingerprint  String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([taskId, attemptNumber])
+  @@index([taskId, state])
+}
+
+model KeywordProviderThrottle {
+  provider       String   @id
+  nextAllowedAt  DateTime
+  updatedAt      DateTime @updatedAt
+}
+
+model KeywordResearchHandoff {
+  id                   String           @id
+  researchId           String
+  research             KeywordResearch  @relation(fields: [researchId], references: [id], onDelete: Cascade)
+  selectionRevision    Int
+  clientRequestId      String
+  selectionFingerprint String
+  runId                String           @unique
+  run                  Run              @relation(fields: [runId], references: [id])
+  createdAt            DateTime         @default(now())
+
+  @@unique([researchId, clientRequestId])
 }
