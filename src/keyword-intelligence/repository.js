@@ -490,12 +490,19 @@ export class PrismaKeywordResearchRepository {
     requireNow(now);
     const taskId = requireNonempty(input?.taskId);
     const token = requireToken(input?.token);
+    const leaseExpiresAt = plusMilliseconds(now, TASK_LEASE_MS);
     const updated = await this.client.keywordResearchTask.updateMany({
-      where: { id: taskId, state: "processing", leaseToken: token },
-      data: { leaseExpiresAt: plusMilliseconds(now, TASK_LEASE_MS), updatedAt: now }
+      where: {
+        id: taskId,
+        state: "processing",
+        leaseToken: token,
+        leaseExpiresAt: { gt: now }
+      },
+      data: { leaseExpiresAt, updatedAt: now }
     });
-    if (updated.count !== 1) return { outcome: "lost" };
-    return { outcome: "claimed", leaseExpiresAt: plusMilliseconds(now, TASK_LEASE_MS) };
+    return updated.count === 1
+      ? { outcome: "claimed", leaseExpiresAt }
+      : { outcome: "lost" };
   }
 
   async recordAttempt(input, now) {
@@ -834,8 +841,9 @@ export class PrismaKeywordResearchRepository {
         return duplicateSame ? { outcome: "found", task: workerTask(task) } : { outcome: "conflict" };
       }
       if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
+      if (!(task.leaseExpiresAt instanceof Date) || task.leaseExpiresAt.getTime() <= now.getTime()) return { outcome: "lost" };
       const updated = await tx.keywordResearchTask.updateMany({
-        where: { id: taskId, state: "processing", leaseToken: token },
+        where: { id: taskId, state: "processing", leaseToken: token, leaseExpiresAt: { gt: now } },
         data: {
           state: input.state, terminalAt: now,
           artifactS3Key: input.artifactS3Key ?? null,
@@ -905,7 +913,7 @@ export class PrismaKeywordResearchRepository {
       }
       if (stage.state === "aggregating") {
         const updated = await tx.keywordResearchStage.updateMany({
-          where: { id: stageId, state: "aggregating", aggregationLeaseExpiresAt: { lt: now } },
+          where: { id: stageId, state: "aggregating", aggregationLeaseExpiresAt: { lte: now } },
           data: {
             aggregationOwner: owner, aggregationLeaseToken: token,
             aggregationLeaseAcquiredAt: now,
@@ -918,6 +926,31 @@ export class PrismaKeywordResearchRepository {
       }
       return { outcome: "conflict" };
     });
+  }
+
+  async heartbeatAggregator(input, now) {
+    requireNow(now);
+    const researchId = requireResearchId(input?.researchId);
+    const stage = requireStage(input?.stage);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const token = requireToken(input?.token);
+    const stageId = keywordStageId(researchId, stage, generation);
+    const leaseExpiresAt = plusMilliseconds(now, AGGREGATION_LEASE_MS);
+    const updated = await this.client.keywordResearchStage.updateMany({
+      where: {
+        id: stageId,
+        researchId,
+        stage,
+        generation,
+        state: "aggregating",
+        aggregationLeaseToken: token,
+        aggregationLeaseExpiresAt: { gt: now }
+      },
+      data: { aggregationLeaseExpiresAt: leaseExpiresAt, updatedAt: now }
+    });
+    return updated.count === 1
+      ? { outcome: "claimed", leaseExpiresAt }
+      : { outcome: "lost" };
   }
 
   async _completeStageAndCreateNext(tx, input, now) {
@@ -942,13 +975,16 @@ export class PrismaKeywordResearchRepository {
       return { outcome: "found", stage: workerStage(stage), nextStage: workerStage(nextStage), tasks: nextTasks.map(workerTask) };
     }
     if (stage.state !== "aggregating" || stage.aggregationLeaseToken !== token) return { outcome: "lost" };
+    if (!(stage.aggregationLeaseExpiresAt instanceof Date) || stage.aggregationLeaseExpiresAt.getTime() <= now.getTime()) {
+      return { outcome: "lost" };
+    }
     if (stage.terminalCount !== stage.expectedCount) return { outcome: "conflict" };
     if (stage.manifestS3Key !== null &&
         (stage.manifestS3Key !== input.manifestS3Key || stage.manifestFingerprint !== input.manifestFingerprint)) {
       return { outcome: "conflict" };
     }
     const updated = await tx.keywordResearchStage.updateMany({
-      where: { id: stageId, state: "aggregating", aggregationLeaseToken: token },
+      where: { id: stageId, state: "aggregating", aggregationLeaseToken: token, aggregationLeaseExpiresAt: { gt: now } },
       data: {
         manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
         manifestProducedAt: stage.createdAt, state: "completed", completedAt: now, updatedAt: now
@@ -1079,6 +1115,9 @@ export class PrismaKeywordResearchRepository {
         }
         if (marketStage.state !== "aggregating") return { outcome: "conflict" };
         if (marketStage.aggregationLeaseToken !== token) return { outcome: "lost" };
+        if (!(marketStage.aggregationLeaseExpiresAt instanceof Date) || marketStage.aggregationLeaseExpiresAt.getTime() <= now.getTime()) {
+          return { outcome: "lost" };
+        }
         if (marketStage.terminalCount !== marketStage.expectedCount ||
             marketStage.succeededCount + marketStage.skippedCount + marketStage.failedCount !== marketStage.expectedCount) {
           return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
@@ -1089,7 +1128,7 @@ export class PrismaKeywordResearchRepository {
           return { outcome: "conflict" };
         }
         const updated = await tx.keywordResearchStage.updateMany({
-          where: { id: marketStageId, state: "aggregating", aggregationLeaseToken: token },
+          where: { id: marketStageId, state: "aggregating", aggregationLeaseToken: token, aggregationLeaseExpiresAt: { gt: now } },
           data: {
             manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
             manifestProducedAt: marketStage.createdAt, state: "completed", completedAt: now, updatedAt: now
@@ -1123,7 +1162,7 @@ export class PrismaKeywordResearchRepository {
     return this._transaction(async (tx) => {
       const stageId = keywordStageId(researchId, stageName, generation);
       const updated = await tx.keywordResearchStage.updateMany({
-        where: { id: stageId, state: "aggregating", aggregationLeaseToken: token },
+        where: { id: stageId, state: "aggregating", aggregationLeaseToken: token, aggregationLeaseExpiresAt: { gt: now } },
         data: {
           state: "failed", safeErrorCode: input.safeErrorCode ?? "KEYWORD_RESEARCH_STAGE_FAILED",
           safeErrorMessage: input.safeErrorMessage ?? null, completedAt: now, updatedAt: now

@@ -156,4 +156,23 @@ test("corrective surface stays fail-closed: sentinel and transaction seam are pr
   assert.equal(typeof PrismaKeywordResearchRepository.prototype.publishResearchResult, "function");
   assert.equal(typeof PrismaKeywordResearchRepository.prototype._transaction, "function");
   assert.equal(typeof PrismaKeywordResearchRepository.prototype._completeStageAndCreateNext, "function");
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype.heartbeatAggregator, "function");
+});
+
+test("KI-R2 heartbeat and heartbeatAggregator validate inputs fail-closed before any client call", async () => {
+  const repo = new PrismaKeywordResearchRepository({
+    $transaction: () => { throw new Error("must not open a transaction"); },
+    keywordResearchTask: { updateMany: () => { throw new Error("must not touch the task client"); } },
+    keywordResearchStage: { updateMany: () => { throw new Error("must not touch the stage client"); } }
+  });
+  await assert.rejects(() => repo.heartbeat({ taskId: "t", token: "short" }, NOW), KeywordRepositoryError);
+  await assert.rejects(() => repo.heartbeat({ taskId: "", token: TOKEN }, NOW), KeywordRepositoryError);
+  await assert.rejects(() => repo.heartbeatAggregator({ researchId: "bad", stage: "expansion", generation: 1,
+    token: TOKEN }, NOW), KeywordRepositoryError);
+  await assert.rejects(() => repo.heartbeatAggregator({ researchId: RESEARCH, stage: "discovery", generation: 1,
+    token: TOKEN }, NOW), KeywordRepositoryError);
+  await assert.rejects(() => repo.heartbeatAggregator({ researchId: RESEARCH, stage: "expansion", generation: 0,
+    token: TOKEN }, NOW), KeywordRepositoryError);
+  await assert.rejects(() => repo.heartbeatAggregator({ researchId: RESEARCH, stage: "expansion", generation: 1,
+    token: "short" }, NOW), KeywordRepositoryError);
 });

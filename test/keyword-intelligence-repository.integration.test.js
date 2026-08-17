@@ -219,6 +219,65 @@ function clientWithInjectedZeroCount(client, shouldZero) {
   return client;
 }
 
+function clientWithRemovedTaskHeartbeatPredicate(client, key) {
+  const wrap = (target, path) => new Proxy(target, {
+    get(t, prop) {
+      if (prop === "then") return undefined;
+      const value = t[prop];
+      const nextPath = path ? `${path}.${String(prop)}` : String(prop);
+      if (nextPath === "keywordResearchTask.updateMany") {
+        return (args) => {
+          const cloned = structuredClone(args);
+          delete cloned.where[key];
+          return value.apply(t, [cloned]);
+        };
+      }
+      if (typeof value === "function") return value.bind(t);
+      if (value && typeof value === "object") return wrap(value, nextPath);
+      return value;
+    }
+  });
+  return wrap(client, "");
+}
+
+function clientWithQuerySpy(client) {
+  const spy = { taskReads: 0, taskWrites: 0, stageReads: 0, stageWrites: 0 };
+  const namespaces = [
+    ["keywordResearchTask", "task"],
+    ["keywordResearchStage", "stage"]
+  ];
+  for (const [ns, label] of namespaces) {
+    for (const name of ["findUnique", "findMany", "updateMany"]) {
+      const isRead = name.startsWith("find");
+      const real = client[ns][name].bind(client[ns]);
+      client[ns][name] = (...args) => {
+        if (isRead) spy[`${label}Reads`] += 1;
+        else spy[`${label}Writes`] += 1;
+        return real(...args);
+      };
+    }
+  }
+  return { client, spy };
+}
+
+async function snapshotResearchRows(db, { researchId, stageIds, nextStageId }) {
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  const stages = {};
+  for (const id of stageIds) stages[id] = await db.keywordResearchStage.findUnique({ where: { id } });
+  const nextStage = nextStageId ? await db.keywordResearchStage.findUnique({ where: { id: nextStageId } }) : null;
+  const nextTasks = nextStageId
+    ? await db.keywordResearchTask.findMany({ where: { stageId: nextStageId }, orderBy: { itemKey: "asc" } })
+    : [];
+  return { research, stages, nextStage, nextTasks };
+}
+
+async function assertSnapshotUnchanged(db, options, label) {
+  const after = await snapshotResearchRows(db, options);
+  assert.deepEqual(after, options.before, label);
+  return after;
+}
+
+
 function injectZeroCounts(target, shouldZero) {
   const make = (obj, path) => new Proxy(obj, {
     get(t, prop) {
@@ -243,6 +302,10 @@ async function setupRepo(t, schemaPrefix) {
   const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
   t.after(async () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    const [remaining] = await admin.$queryRawUnsafe(
+      "SELECT schema_name::text AS name FROM information_schema.schemata WHERE schema_name = $1", schema
+    );
+    assert.equal(remaining, undefined, `disposable schema ${schema} must be absent after DROP`);
     await admin.$disconnect();
   });
   deployPrismaMigrations(scopedUrl);
@@ -1466,5 +1529,357 @@ test("SCN-KI-021: completed market stage with running research is a conflicting 
   assert.equal(research.resultFingerprint, null);
   assert.equal(research.selection, null);
   assert.equal(research.selectionRevision, 0);
+  await db.$disconnect();
+});
+
+async function setupExpansionAggregator(db, repo, researchId) {
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const token = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token }, NOW);
+  return { token, stageId: initialized.stage.id };
+}
+
+async function setupAnchorAggregator(db, repo, researchId) {
+  const { token: expToken } = await setupExpansionAggregator(db, repo, researchId);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("ai"), endpointKey: "keyword_overview",
+    requestFingerprint: fp("ar") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expToken,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  await completeStageTasks(db, repo, candidate.nextStage.id, ["US:0"]);
+  const token = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token }, NOW);
+  return { token, stageId: candidate.nextStage.id };
+}
+
+test("SCN-KI-022: task lease boundary at +59,999ms/exact/+1ms with B reclaim and stale-A heartbeat/terminalize losing with unchanged rows and exactly one counter", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kiw2_taskbnd");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId, "owner_kiw1", 2);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(2) }, NOW);
+  const stageId = initialized.stage.id;
+  const taskId = keywordTaskId(stageId, "0:suggestions");
+  const tokenA = newLeaseToken();
+  await repo.claim({ taskId, owner: "a", token: tokenA }, NOW);
+
+  const hbAt = new Date(NOW.getTime() + 59_999);
+  const hb = await repo.heartbeat({ taskId, token: tokenA }, hbAt);
+  assert.equal(hb.outcome, "claimed");
+  assert.equal(hb.leaseExpiresAt.getTime(), NOW.getTime() + 119_999,
+    "live heartbeat at +59,999ms extends expiry to exactly +119,999ms");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskRow.leaseExpiresAt.getTime(), NOW.getTime() + 119_999);
+
+  const tokenB = newLeaseToken();
+  assert.equal((await repo.claim({ taskId, owner: "b", token: tokenB },
+    new Date(NOW.getTime() + 119_998))).outcome, "lost", "B loses at renewed-expiry minus 1ms");
+  assert.equal((await repo.claim({ taskId, owner: "b", token: tokenB },
+    new Date(NOW.getTime() + 119_999))).outcome, "claimed", "B wins at exact renewed expiry");
+
+  const before = {
+    task: await db.keywordResearchTask.findUnique({ where: { id: taskId } }),
+    stage: await db.keywordResearchStage.findUnique({ where: { id: stageId } })
+  };
+  assert.equal((await repo.heartbeat({ taskId, token: tokenA },
+    new Date(NOW.getTime() + 119_999))).outcome, "lost", "stale A heartbeat lost after B reclaim");
+  assert.deepEqual(await db.keywordResearchTask.findUnique({ where: { id: taskId } }), before.task,
+    "task row unchanged after stale A heartbeat");
+  assert.deepEqual(await db.keywordResearchStage.findUnique({ where: { id: stageId } }), before.stage,
+    "stage row unchanged after stale A heartbeat");
+  assert.equal((await repo.terminalize({ taskId, token: tokenA, state: "succeeded",
+    artifactS3Key: "runs/t.json", artifactFingerprint: fp("t") },
+  new Date(NOW.getTime() + 119_999))).outcome, "lost", "stale A terminalize lost after B reclaim");
+  assert.deepEqual(await db.keywordResearchTask.findUnique({ where: { id: taskId } }), before.task,
+    "task row unchanged after stale A terminalize");
+  assert.deepEqual(await db.keywordResearchStage.findUnique({ where: { id: stageId } }), before.stage,
+    "stage row unchanged after stale A terminalize");
+
+  assert.equal((await repo.terminalize({ taskId, token: tokenB, state: "succeeded",
+    artifactS3Key: "runs/t.json", artifactFingerprint: fp("t") },
+  new Date(NOW.getTime() + 119_999))).outcome, "terminal", "B terminalizes once");
+  assert.equal((await repo.terminalize({ taskId, token: tokenB, state: "succeeded",
+    artifactS3Key: "runs/t.json", artifactFingerprint: fp("t") },
+  new Date(NOW.getTime() + 119_999))).outcome, "found", "exact replay returns found");
+  const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  assert.equal(stageAfter.terminalCount, 1, "owning-stage terminal counter exactly one");
+  assert.equal(stageAfter.succeededCount, 1, "owning-stage succeeded counter exactly one");
+
+  const researchId2 = newResearchId();
+  await freshResearch(repo, researchId2, "owner_kiw1", 1);
+  const init2 = await repo.initialize({ researchId: researchId2, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId2 = keywordTaskId(init2.stage.id, "0:suggestions");
+  const tokenA2 = newLeaseToken();
+  await repo.claim({ taskId: taskId2, owner: "a", token: tokenA2 }, NOW);
+  assert.equal((await repo.heartbeat({ taskId: taskId2, token: tokenA2 },
+    new Date(NOW.getTime() + 59_999))).outcome, "claimed");
+  assert.equal((await repo.claim({ taskId: taskId2, owner: "b", token: newLeaseToken() },
+    new Date(NOW.getTime() + 120_000))).outcome, "claimed", "separate +1ms repetition reclaims");
+  await db.$disconnect();
+});
+
+test("SCN-KI-022: aggregation heartbeat at exactly +40,000ms extends to +160,000ms with one write and zero reads and unchanged owner/token/acquired/attempt/counters/manifests; competitor loses at -1ms and reclaims at exact/+1ms", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kiw2_aggbnd");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const stageId = initialized.stage.id;
+  const tokenA = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: tokenA }, NOW);
+
+  const stageBefore = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  const { client, spy } = clientWithQuerySpy(db);
+  const spied = new PrismaKeywordResearchRepository(client);
+  const hbAt = new Date(NOW.getTime() + 40_000);
+  const hb = await spied.heartbeatAggregator({ researchId, stage: "expansion", generation: 1,
+    token: tokenA }, hbAt);
+  assert.equal(hb.outcome, "claimed");
+  assert.equal(hb.leaseExpiresAt.getTime(), NOW.getTime() + 160_000,
+    "aggregation heartbeat at +40,000ms extends expiry to exactly +160,000ms");
+  assert.equal(spy.stageWrites, 1, "one stage write");
+  assert.equal(spy.stageReads, 0, "zero stage reads");
+  assert.equal(spy.taskWrites, 0, "zero task writes");
+  const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  assert.equal(stageAfter.aggregationLeaseExpiresAt.getTime(), NOW.getTime() + 160_000);
+  assert.equal(stageAfter.aggregationOwner, stageBefore.aggregationOwner, "owner unchanged");
+  assert.equal(stageAfter.aggregationLeaseToken, stageBefore.aggregationLeaseToken, "token unchanged");
+  assert.equal(stageAfter.aggregationLeaseAcquiredAt.getTime(), stageBefore.aggregationLeaseAcquiredAt.getTime(),
+    "acquired-at unchanged");
+  assert.equal(stageAfter.aggregationAttempt, stageBefore.aggregationAttempt, "attempt unchanged");
+  assert.equal(stageAfter.succeededCount, stageBefore.succeededCount, "succeeded counter unchanged");
+  assert.equal(stageAfter.terminalCount, stageBefore.terminalCount, "terminal counter unchanged");
+  assert.equal(stageAfter.manifestS3Key, stageBefore.manifestS3Key, "manifest key unchanged");
+  assert.equal(stageAfter.manifestFingerprint, stageBefore.manifestFingerprint, "manifest fingerprint unchanged");
+  assert.equal(stageAfter.state, "aggregating", "state unchanged");
+
+  const tokenB = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "b",
+    token: tokenB }, new Date(NOW.getTime() + 159_999))).outcome, "lost", "competitor loses at renewed-expiry minus 1ms");
+  assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "b",
+    token: tokenB }, new Date(NOW.getTime() + 160_000))).outcome, "claimed", "competitor reclaims at exact renewed expiry");
+
+  const researchId2 = newResearchId();
+  await freshResearch(repo, researchId2);
+  const init2 = await repo.initialize({ researchId: researchId2, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, init2.stage.id, init2.tasks.map((task) => task.itemKey));
+  const a2 = newLeaseToken();
+  await repo.claimAggregator({ researchId: researchId2, stage: "expansion", generation: 1, owner: "a",
+    token: a2 }, NOW);
+  assert.equal((await repo.claimAggregator({ researchId: researchId2, stage: "expansion", generation: 1,
+    owner: "b", token: newLeaseToken() }, new Date(NOW.getTime() + 120_001))).outcome, "claimed",
+  "separate +1ms repetition reclaims");
+  assert.equal((await repo.heartbeatAggregator({ researchId: researchId2, stage: "expansion", generation: 1,
+    token: newLeaseToken() }, hbAt)).outcome, "lost", "wrong token loses");
+
+  const researchId3 = newResearchId();
+  await freshResearch(repo, researchId3);
+  const init3 = await repo.initialize({ researchId: researchId3, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, init3.stage.id, init3.tasks.map((task) => task.itemKey));
+  const a3 = newLeaseToken();
+  await repo.claimAggregator({ researchId: researchId3, stage: "expansion", generation: 1, owner: "a",
+    token: a3 }, NOW);
+  assert.equal((await repo.heartbeatAggregator({ researchId: researchId3, stage: "expansion", generation: 1,
+    token: a3 }, new Date(NOW.getTime() + 121_000))).outcome, "lost", "expired lease loses");
+  await db.$disconnect();
+});
+
+test("SCN-KI-022: stale owners lose candidate/shortlist/final/fail with full row-equality witnesses; B publishes each exactly once, exact replays return found, and a second failStage has no second terminal", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kiw2_stalepaths");
+
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("ai"), endpointKey: "keyword_overview",
+    requestFingerprint: fp("ar") };
+
+  const resC = newResearchId();
+  await freshResearch(repo, resC);
+  const { token: aC, stageId: cStageId } = await setupExpansionAggregator(db, repo, resC);
+  const bC = newLeaseToken();
+  await repo.claimAggregator({ researchId: resC, stage: "expansion", generation: 1, owner: "b",
+    token: bC }, new Date(NOW.getTime() + 121_000));
+  const cOptions = { researchId: resC, stageIds: [cStageId],
+    nextStageId: keywordStageId(resC, "anchor_screen", 1) };
+  const beforeC = await snapshotResearchRows(db, cOptions);
+  assert.equal((await repo.publishCandidateManifest({ researchId: resC, generation: 1, token: aC,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] },
+  new Date(NOW.getTime() + 121_000))).outcome, "lost", "stale A candidate lost");
+  await assertSnapshotUnchanged(db, { ...cOptions, before: beforeC },
+    "candidate stale call leaves research/stage/next-stage rows and task set equal");
+  assert.equal((await repo.publishCandidateManifest({ researchId: resC, generation: 1, token: bC,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] },
+  new Date(NOW.getTime() + 121_000))).outcome, "terminal", "B candidate publishes once");
+  assert.equal((await repo.publishCandidateManifest({ researchId: resC, generation: 1, token: bC,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] },
+  new Date(NOW.getTime() + 121_000))).outcome, "found", "candidate exact replay returns found");
+
+  const resS = newResearchId();
+  await freshResearch(repo, resS);
+  const { token: aS, stageId: sStageId } = await setupAnchorAggregator(db, repo, resS);
+  const bS = newLeaseToken();
+  await repo.claimAggregator({ researchId: resS, stage: "anchor_screen", generation: 1, owner: "b",
+    token: bS }, new Date(NOW.getTime() + 121_000));
+  const sOptions = { researchId: resS, stageIds: [sStageId],
+    nextStageId: keywordStageId(resS, "market_overview", 1) };
+  const beforeS = await snapshotResearchRows(db, sOptions);
+  assert.equal((await repo.publishShortlist({ researchId: resS, generation: 1, token: aS,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() },
+  new Date(NOW.getTime() + 121_000))).outcome, "lost", "stale A shortlist lost");
+  await assertSnapshotUnchanged(db, { ...sOptions, before: beforeS },
+    "shortlist stale call leaves research/stage/next-stage rows and task set equal");
+  assert.equal((await repo.publishShortlist({ researchId: resS, generation: 1, token: bS,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() },
+  new Date(NOW.getTime() + 121_000))).outcome, "terminal", "B shortlist publishes once");
+  assert.equal((await repo.publishShortlist({ researchId: resS, generation: 1, token: bS,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() },
+  new Date(NOW.getTime() + 121_000))).outcome, "found", "shortlist exact replay returns found");
+
+  const resF = newResearchId();
+  await freshResearch(repo, resF);
+  const { mktToken: aF, marketStageId: fStageId } = await advanceToMarketStage(db, repo, resF);
+  const bF = newLeaseToken();
+  await repo.claimAggregator({ researchId: resF, stage: "market_overview", generation: 1, owner: "b",
+    token: bF }, new Date(NOW.getTime() + 121_000));
+  const keywords = [makeKeywordRow("alpha keyword")];
+  const result = makeResult(keywords, resF);
+  const selectionItems = defaultSelectionFor(keywords);
+  const fOptions = { researchId: resF, stageIds: [fStageId], nextStageId: null };
+  const beforeF = await snapshotResearchRows(db, fOptions);
+  assert.equal((await repo.publishResearchResult({ researchId: resF, generation: 1, token: aF,
+    manifestS3Key: "runs/f.json", manifestFingerprint: fp("f"), result,
+    resultFingerprint: fp("rf"), selectionItems }, new Date(NOW.getTime() + 121_000))).outcome,
+  "lost", "stale A final publication lost");
+  await assertSnapshotUnchanged(db, { ...fOptions, before: beforeF },
+    "final stale call leaves research/stage rows and selection/result equal");
+  assert.equal((await repo.publishResearchResult({ researchId: resF, generation: 1, token: bF,
+    manifestS3Key: "runs/f.json", manifestFingerprint: fp("f"), result,
+    resultFingerprint: fp("rf"), selectionItems }, new Date(NOW.getTime() + 121_000))).outcome,
+  "terminal", "B final publication once");
+  assert.equal((await repo.publishResearchResult({ researchId: resF, generation: 1, token: bF,
+    manifestS3Key: "runs/f.json", manifestFingerprint: fp("f"), result,
+    resultFingerprint: fp("rf"), selectionItems }, new Date(NOW.getTime() + 121_000))).outcome,
+  "found", "final exact replay returns found");
+
+  const resFail = newResearchId();
+  await freshResearch(repo, resFail);
+  const { mktToken: aFail, marketStageId: failStageId } = await advanceToMarketStage(db, repo, resFail);
+  const bFail = newLeaseToken();
+  await repo.claimAggregator({ researchId: resFail, stage: "market_overview", generation: 1, owner: "b",
+    token: bFail }, new Date(NOW.getTime() + 121_000));
+  const failOptions = { researchId: resFail, stageIds: [failStageId], nextStageId: null };
+  const beforeFail = await snapshotResearchRows(db, failOptions);
+  assert.equal((await repo.failStage({ researchId: resFail, stage: "market_overview", generation: 1,
+    token: aFail, safeErrorCode: "X" }, new Date(NOW.getTime() + 121_000))).outcome, "lost",
+  "stale A fail-stage lost");
+  await assertSnapshotUnchanged(db, { ...failOptions, before: beforeFail },
+    "fail stale call leaves research/stage rows equal");
+  assert.equal((await repo.failStage({ researchId: resFail, stage: "market_overview", generation: 1,
+    token: bFail, safeErrorCode: "X" }, new Date(NOW.getTime() + 121_000))).outcome, "terminal",
+  "B fail-stage once");
+  const secondFail = await repo.failStage({ researchId: resFail, stage: "market_overview", generation: 1,
+    token: bFail, safeErrorCode: "X" }, new Date(NOW.getTime() + 121_000));
+  assert.equal(secondFail.outcome, "lost", "second failStage creates no second terminal transition");
+  const failResearch = await db.keywordResearch.findUnique({ where: { id: resFail } });
+  assert.equal(failResearch.state, "failed", "research failed exactly once");
+  await db.$disconnect();
+});
+
+test("SCN-KI-022: exactly one task terminal counter and one aggregation publication occur, never two", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kiw2_onceterm");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const stageId = initialized.stage.id;
+  const taskId = keywordTaskId(stageId, "0:suggestions");
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  assert.equal((await repo.terminalize({ taskId, token, state: "succeeded",
+    artifactS3Key: "runs/t.json", artifactFingerprint: fp("t") }, NOW)).outcome, "terminal");
+  const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  assert.equal(stageAfter.succeededCount, 1, "one terminal counter");
+  assert.equal(stageAfter.terminalCount, 1);
+
+  await completeStageTasks(db, repo, stageId, ["0:related"]);
+  const aggToken = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: aggToken }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("ai"), endpointKey: "keyword_overview",
+    requestFingerprint: fp("ar") };
+  assert.equal((await repo.publishCandidateManifest({ researchId, generation: 1, token: aggToken,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW)).outcome,
+  "terminal", "one aggregation publication");
+  const anchorStages = await db.keywordResearchStage.findMany({
+    where: { id: keywordStageId(researchId, "anchor_screen", 1) } });
+  assert.equal(anchorStages.length, 1, "exactly one anchor stage created");
+  await db.$disconnect();
+});
+
+test("SCN-KI-022 V5: removing one heartbeat predicate falsifies the unchanged lost oracle via assert.rejects and the unwrapped client restores it", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kiw2_v5ctrl");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId, "owner_kiw1", 3);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(3) }, NOW);
+  const stageId = initialized.stage.id;
+  const AT10 = new Date(NOW.getTime() + 10_000);
+  const AT61 = new Date(NOW.getTime() + 61_000);
+
+  async function freshTask(itemKey) {
+    const taskId = keywordTaskId(stageId, itemKey);
+    const token = newLeaseToken();
+    await repo.claim({ taskId, owner: "w", token }, NOW);
+    return { taskId, token };
+  }
+
+  const assertLostHeartbeat = async (repo_, taskId, token, at) => {
+    const result = await repo_.heartbeat({ taskId, token }, at);
+    assert.equal(result.outcome, "lost");
+  };
+
+  {
+    const { taskId } = await freshTask("0:suggestions");
+    const wrapped = clientWithRemovedTaskHeartbeatPredicate(db, "leaseToken");
+    const wrappedRepo = new PrismaKeywordResearchRepository(wrapped);
+    await assert.rejects(
+      () => assertLostHeartbeat(wrappedRepo, taskId, newLeaseToken(), AT10),
+      assert.AssertionError,
+      "control 1: removing the token predicate falsifies the wrong-token lost oracle"
+    );
+    const { taskId: freshId } = await freshTask("0:related");
+    await assertLostHeartbeat(repo, freshId, newLeaseToken(), AT10);
+  }
+
+  {
+    const { taskId, token } = await freshTask("1:suggestions");
+    await repo.terminalize({ taskId, token, state: "succeeded", artifactS3Key: "runs/x.json",
+      artifactFingerprint: fp("x") }, NOW);
+    const wrapped = clientWithRemovedTaskHeartbeatPredicate(db, "state");
+    const wrappedRepo = new PrismaKeywordResearchRepository(wrapped);
+    await assert.rejects(
+      () => assertLostHeartbeat(wrappedRepo, taskId, token, AT10),
+      assert.AssertionError,
+      "control 2: removing the state predicate falsifies the terminal-row lost oracle"
+    );
+    const { taskId: freshId, token: freshToken } = await freshTask("1:related");
+    await repo.terminalize({ taskId: freshId, token: freshToken, state: "succeeded",
+      artifactS3Key: "runs/y.json", artifactFingerprint: fp("y") }, NOW);
+    await assertLostHeartbeat(repo, freshId, freshToken, AT10);
+  }
+
+  {
+    const { taskId, token } = await freshTask("2:suggestions");
+    const wrapped = clientWithRemovedTaskHeartbeatPredicate(db, "leaseExpiresAt");
+    const wrappedRepo = new PrismaKeywordResearchRepository(wrapped);
+    await assert.rejects(
+      () => assertLostHeartbeat(wrappedRepo, taskId, token, AT61),
+      assert.AssertionError,
+      "control 3: removing the live-expiry predicate falsifies the expired-owner lost oracle"
+    );
+    const { taskId: freshId, token: freshToken } = await freshTask("2:related");
+    await assertLostHeartbeat(repo, freshId, freshToken, AT61);
+  }
   await db.$disconnect();
 });
