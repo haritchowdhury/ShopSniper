@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { blake2s } from "@noble/hashes/blake2.js";
 import { prismaSchemaForClient } from "../prisma-client.js";
+import { createDefaultSelection } from "./selection.js";
 
 const RESEARCH_ID = /^kr_[A-Za-z0-9_-]{24}$/u;
 const RUN_ID = /^run_[A-Za-z0-9_-]{16,80}$/u;
@@ -11,14 +12,24 @@ const CLIENT_REQUEST_ID = /^[A-Za-z0-9_-]{16,80}$/u;
 const STAGES = new Set(["expansion", "anchor_screen", "market_overview"]);
 const TASK_TERMINAL = new Set(["succeeded", "skipped", "failed"]);
 const ATTEMPT_TERMINAL = new Set(["succeeded", "failed", "ambiguous"]);
+const ATTEMPT_NONTERMINAL = new Set(["planned", "in_flight"]);
+const ENDPOINT_KEYS = new Set(["keyword_suggestions", "related_keywords", "keyword_overview"]);
 const TASK_LEASE_MS = 60_000;
 const AGGREGATION_LEASE_MS = 120_000;
 const THROTTLE_MIN_GAP_MS = 2_000;
 const CACHE_TTL_SECONDS = 604_800;
 const MAX_RESULT_BYTES = 33_554_432;
 const MAX_SELECTION_ITEMS = 200;
+const MAX_DEFAULT_ITEMS = 100;
 const MAX_HANDOFF_ITEMS = 100;
+const MAX_ATTEMPTS = 5;
 const DECIMAL_8 = /^\d+\.\d{8}$/u;
+const MARKET_TASK_KEYS = ["GB:0", "CA:0", "AU:0", "NZ:0", "DE:0", "FR:0", "IN:0", "AE:0"];
+const CODE_AMBIGUOUS = "KEYWORD_PROVIDER_AMBIGUOUS";
+const CODE_THROTTLED = "KEYWORD_PROVIDER_THROTTLED";
+const CODE_BUDGET_EXHAUSTED = "KEYWORD_PROVIDER_BUDGET_EXHAUSTED";
+const CODE_RETRY_NOT_SCHEDULED = "KEYWORD_PROVIDER_RETRY_NOT_SCHEDULED";
+const CODE_RESULT_TOO_LARGE = "KEYWORD_RESULT_TOO_LARGE";
 
 export class KeywordRepositoryError extends Error {
   constructor(code = "KEYWORD_INPUT_CONFLICT") {
@@ -91,6 +102,16 @@ function requireSelectionItemId(value) {
   return value;
 }
 
+function requireSafeErrorCode(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) conflict();
+  return value;
+}
+
+function requireAttemptNumber(value) {
+  if (!Number.isInteger(value) || value < 1) conflict();
+  return value;
+}
+
 function plusMilliseconds(now, duration) {
   return new Date(now.getTime() + duration);
 }
@@ -111,9 +132,9 @@ export function newLeaseToken() {
 export function selectionItemId(sourceKind, originalNormalizedKeyword) {
   if (sourceKind !== "calculated" && sourceKind !== "manual") conflict();
   if (typeof originalNormalizedKeyword !== "string" || originalNormalizedKeyword.length === 0 ||
-      originalNormalizedKeyword.length > 160) conflict();
-  const digest = Buffer.from(blake2s(Buffer.from(`${sourceKind}\n${originalNormalizedKeyword}`, "utf8"))).toString("hex");
-  return `ksi_${digest.slice(0, 12)}`;
+      [...originalNormalizedKeyword].length > 160) conflict();
+  const digest = blake2s(new TextEncoder().encode(`${sourceKind}\n${originalNormalizedKeyword}`), { dkLen: 6 });
+  return `ksi_${Buffer.from(digest).toString("hex")}`;
 }
 
 export function keywordStageId(researchId, stage, generation) {
@@ -131,17 +152,40 @@ export function keywordTaskId(stageId, itemKey) {
 
 function keywordAttemptId(taskId, attemptNumber) {
   requireNonempty(taskId);
-  if (!Number.isInteger(attemptNumber) || attemptNumber < 1) conflict();
+  requireAttemptNumber(attemptNumber);
   return derivedId("kra_", [taskId, attemptNumber]);
 }
 
-function taskRegistrationMatches(task, expected) {
-  return task.itemKey === expected.itemKey && task.inputFingerprint === expected.inputFingerprint &&
-    task.endpointKey === expected.endpointKey && task.requestFingerprint === expected.requestFingerprint;
+function canonicalJson(value) {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "number" && !Number.isFinite(value)) conflict();
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
-function sameNullable(left, right) {
-  return (left ?? null) === (right ?? null);
+function stageInputFingerprint({ researchId, generation, stage, tasks }) {
+  const ordered = [...tasks].sort((left, right) => left.itemKey.localeCompare(right.itemKey));
+  const payload = {
+    researchId,
+    generation,
+    stage,
+    tasks: ordered.map((task) => ({
+      itemKey: task.itemKey,
+      inputFingerprint: task.inputFingerprint,
+      endpointKey: task.endpointKey,
+      requestFingerprint: task.requestFingerprint
+    }))
+  };
+  return createHash("sha256").update(canonicalJson(payload), "utf8").digest("hex");
+}
+
+function moneyString(value) {
+  if (value === null || value === undefined) return null;
+  return Number(value).toFixed(8);
 }
 
 function serializeMoney(value) {
@@ -154,19 +198,104 @@ function normalizeUsdInput(value) {
   return Number(requireDecimalUsd(value)).toFixed(8);
 }
 
-function requireTaskInputs(tasks) {
-  if (!Array.isArray(tasks)) conflict();
+function taskRegistrationMatches(task, expected) {
+  return task.itemKey === expected.itemKey && task.inputFingerprint === expected.inputFingerprint &&
+    task.endpointKey === expected.endpointKey && task.requestFingerprint === expected.requestFingerprint;
+}
+
+function sameNullable(left, right) {
+  return (left ?? null) === (right ?? null);
+}
+
+function workerResearch(row) {
+  return {
+    id: row.id, state: row.state, generation: row.generation, contractVersion: row.contractVersion,
+    configSnapshot: row.configSnapshot, configFingerprint: row.configFingerprint,
+    seeds: row.seeds, markets: row.markets
+  };
+}
+
+function workerStage(row) {
+  return {
+    id: row.id, researchId: row.researchId, stage: row.stage, generation: row.generation,
+    state: row.state, expectedCount: row.expectedCount, terminalCount: row.terminalCount,
+    succeededCount: row.succeededCount, skippedCount: row.skippedCount, failedCount: row.failedCount,
+    manifestS3Key: row.manifestS3Key ?? null, manifestFingerprint: row.manifestFingerprint ?? null,
+    manifestProducedAt: row.manifestProducedAt ?? null, createdAt: row.createdAt
+  };
+}
+
+function workerTask(row) {
+  return {
+    id: row.id, stageId: row.stageId, itemKey: row.itemKey, inputFingerprint: row.inputFingerprint,
+    endpointKey: row.endpointKey, requestFingerprint: row.requestFingerprint,
+    nextAttemptAt: row.nextAttemptAt ?? null, state: row.state, attemptCount: row.attemptCount,
+    leaseToken: row.leaseToken ?? null, leaseExpiresAt: row.leaseExpiresAt ?? null,
+    createdAt: row.createdAt, artifactS3Key: row.artifactS3Key ?? null,
+    artifactFingerprint: row.artifactFingerprint ?? null, terminalAt: row.terminalAt ?? null,
+    safeErrorCode: row.safeErrorCode ?? null
+  };
+}
+
+function workerAttempt(row) {
+  return {
+    attemptNumber: row.attemptNumber, state: row.state, requestFingerprint: row.requestFingerprint,
+    reservationCostUsd: moneyString(row.reservationCostUsd), providerCostUsd: moneyString(row.providerCostUsd),
+    safeErrorCode: row.safeErrorCode ?? null, resultFingerprint: row.resultFingerprint ?? null,
+    plannedAt: row.plannedAt, completedAt: row.completedAt ?? null, ambiguousAfter: row.ambiguousAfter ?? null
+  };
+}
+
+function requireTaskShapes(tasks) {
+  if (!Array.isArray(tasks)) return false;
   for (const task of tasks) {
-    requireItemKey(task?.itemKey);
-    requireFingerprint(task?.inputFingerprint);
-    if (!["keyword_suggestions", "related_keywords", "keyword_overview"].includes(task?.endpointKey)) {
-      conflict();
-    }
-    requireFingerprint(task?.requestFingerprint);
+    if (!ITEM_KEY.test(task?.itemKey)) return false;
+    if (!FINGERPRINT.test(task?.inputFingerprint)) return false;
+    if (!ENDPOINT_KEYS.has(task?.endpointKey)) return false;
+    if (!FINGERPRINT.test(task?.requestFingerprint)) return false;
+    if (task?.nextAttemptAt !== undefined && task.nextAttemptAt !== null &&
+        !(task.nextAttemptAt instanceof Date)) return false;
   }
-  const unique = new Set(tasks.map(({ itemKey }) => itemKey));
-  if (unique.size !== tasks.length) conflict();
-  return [...tasks].sort((left, right) => left.itemKey.localeCompare(right.itemKey));
+  return true;
+}
+
+function requireUniqueTaskKeys(tasks) {
+  const seen = new Set();
+  for (const task of tasks) {
+    if (seen.has(task.itemKey)) return false;
+    seen.add(task.itemKey);
+  }
+  return true;
+}
+
+function sameTaskSet(persisted, expected) {
+  if (!Array.isArray(persisted) || !Array.isArray(expected)) return false;
+  if (persisted.length !== expected.length) return false;
+  const expectedByItemKey = new Map(expected.map((task) => [task.itemKey, task]));
+  return persisted.every((task) => {
+    const wanted = expectedByItemKey.get(task.itemKey);
+    return Boolean(wanted) && taskRegistrationMatches(task, wanted);
+  });
+}
+
+function validSelectionItem(item) {
+  return Boolean(item) && typeof item === "object" &&
+    typeof item.itemId === "string" && /^ksi_[a-f0-9]{12}$/u.test(item.itemId) &&
+    (item.sourceKind === "calculated" || item.sourceKind === "manual") &&
+    typeof item.keyword === "string" && [...item.keyword].length <= 160 &&
+    Array.isArray(item.sourceSeeds) &&
+    typeof item.lane === "string" &&
+    item.facets !== null && typeof item.facets === "object" &&
+    (item.metricsSnapshot === null || (item.metricsSnapshot && typeof item.metricsSnapshot === "object"));
+}
+
+function retryDelaySeconds(taskId, attemptNumber) {
+  const baseDelay = Math.min(60, 2 * 2 ** (attemptNumber - 1));
+  const digest = createHash("sha256").update(`${taskId}:${attemptNumber}`, "utf8").digest("hex");
+  const first8Hex = digest.slice(0, 8);
+  const mod = Number.parseInt(first8Hex, 16) % 2501;
+  const jitter = baseDelay * (mod / 10000);
+  return Math.ceil(baseDelay + jitter);
 }
 
 export class PrismaKeywordResearchRepository {
@@ -175,7 +304,7 @@ export class PrismaKeywordResearchRepository {
     this.schema = prismaSchemaForClient(client);
   }
 
-  async transaction(work) {
+  async _transaction(work) {
     return this.client.$transaction(async (tx) => {
       if (this.schema && this.schema !== "public") {
         await tx.$queryRaw`SELECT set_config('search_path', ${this.schema}, true)`;
@@ -216,49 +345,105 @@ export class PrismaKeywordResearchRepository {
     return { outcome: "found", research };
   }
 
+  async getWorkerResearch(input) {
+    const researchId = requireResearchId(input?.researchId);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const research = await this.client.keywordResearch.findUnique({ where: { id: researchId } });
+    if (!research) return { outcome: "not_found" };
+    if (research.generation !== generation) return { outcome: "conflict" };
+    return { outcome: "found", research: workerResearch(research) };
+  }
+
+  async getTaskContext(input) {
+    const taskId = requireNonempty(input?.taskId);
+    const task = await this.client.keywordResearchTask.findUnique({
+      where: { id: taskId }, include: { stage: { include: { research: true } } }
+    });
+    if (!task || !task.stage || !task.stage.research) return { outcome: "not_found" };
+    const latestAttempt = await this.client.keywordResearchProviderAttempt.findFirst({
+      where: { taskId }, orderBy: { attemptNumber: "desc" }
+    });
+    return {
+      outcome: "found",
+      research: workerResearch(task.stage.research),
+      stage: workerStage(task.stage),
+      task: workerTask(task),
+      latestAttempt: latestAttempt ? workerAttempt(latestAttempt) : null
+    };
+  }
+
+  async getStageContext(input) {
+    const researchId = requireResearchId(input?.researchId);
+    const stageName = requireStage(input?.stage);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const research = await this.client.keywordResearch.findUnique({ where: { id: researchId } });
+    if (!research) return { outcome: "not_found" };
+    if (research.generation !== generation) return { outcome: "conflict" };
+    const stageId = keywordStageId(researchId, stageName, generation);
+    const stage = await this.client.keywordResearchStage.findUnique({ where: { id: stageId } });
+    if (!stage) return { outcome: "not_found" };
+    if (stage.stage !== stageName) return { outcome: "conflict" };
+    const tasks = await this.client.keywordResearchTask.findMany({
+      where: { stageId }, orderBy: { itemKey: "asc" }
+    });
+    return {
+      outcome: "found",
+      research: workerResearch(research),
+      stage: workerStage(stage),
+      tasks: tasks.map(workerTask)
+    };
+  }
+
   async initialize(input, now) {
     requireNow(now);
     const researchId = requireResearchId(input?.researchId);
-    const ownerId = requireOwner(input?.ownerId);
-    const stageName = requireStage(input?.stage);
     const generation = requireGeneration(input?.generation ?? 1);
-    const tasks = requireTaskInputs(input?.tasks ?? []);
-    return this.transaction(async (tx) => {
+    if (input?.stage !== "expansion") conflict();
+    if (!Array.isArray(input?.tasks) || !requireTaskShapes(input.tasks) || !requireUniqueTaskKeys(input.tasks)) {
+      conflict();
+    }
+    const tasks = [...input.tasks];
+    return this._transaction(async (tx) => {
       const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
-      if (!research || research.ownerId !== ownerId || research.generation !== generation) {
-        return { outcome: "not_found" };
+      if (!research) return { outcome: "not_found" };
+      if (research.generation !== generation) return { outcome: "conflict" };
+      if (research.state !== "queued" && research.state !== "running") return { outcome: "conflict" };
+      if (!Array.isArray(research.seeds) || research.seeds.length < 1) return { outcome: "conflict" };
+      const expectedKeys = new Set();
+      for (let index = 0; index < research.seeds.length; index += 1) {
+        expectedKeys.add(`${index}:suggestions`);
+        expectedKeys.add(`${index}:related`);
       }
-      if (research.state === "failed" || research.state === "completed") return { outcome: "conflict" };
+      if (tasks.length !== expectedKeys.size ||
+          tasks.some((task) => !expectedKeys.has(task.itemKey))) {
+        return { outcome: "conflict" };
+      }
+      const stageId = keywordStageId(researchId, "expansion", generation);
+      const existingStage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
+      if (existingStage) {
+        if (existingStage.expectedCount !== tasks.length) return { outcome: "conflict" };
+        const stored = await tx.keywordResearchTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
+        if (!sameTaskSet(stored, tasks)) return { outcome: "conflict" };
+        return { outcome: "found", stage: workerStage(existingStage), tasks: stored.map(workerTask) };
+      }
       if (research.state === "queued") {
         await tx.keywordResearch.update({ where: { id: researchId }, data: { state: "running", startedAt: now } });
       }
-      const stageId = keywordStageId(researchId, stageName, generation);
-      const created = await tx.keywordResearchStage.createMany({ data: [{
-        id: stageId, researchId, stage: stageName, generation,
+      await tx.keywordResearchStage.create({ data: {
+        id: stageId, researchId, stage: "expansion", generation,
         expectedCount: tasks.length, state: tasks.length === 0 ? "ready" : "collecting",
         createdAt: now, updatedAt: now
-      }], skipDuplicates: true });
-      if (created.count === 1 && tasks.length) {
-        await tx.keywordResearchTask.createMany({ data: tasks.map((task) => ({
-          id: keywordTaskId(stageId, task.itemKey), stageId, itemKey: task.itemKey,
-          inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
-          requestFingerprint: task.requestFingerprint,
-          nextAttemptAt: task.nextAttemptAt instanceof Date ? task.nextAttemptAt : null,
-          createdAt: now, updatedAt: now
-        })) });
-      }
+      } });
+      await tx.keywordResearchTask.createMany({ data: tasks.map((task) => ({
+        id: keywordTaskId(stageId, task.itemKey), stageId, itemKey: task.itemKey,
+        inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
+        requestFingerprint: task.requestFingerprint,
+        nextAttemptAt: task.nextAttemptAt instanceof Date ? task.nextAttemptAt : null,
+        createdAt: now, updatedAt: now
+      })) });
       const stage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
       const stored = await tx.keywordResearchTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
-      const expectedByItemKey = new Map(tasks.map((task) => [task.itemKey, task]));
-      if (!stage || stage.expectedCount !== tasks.length ||
-          stored.length !== tasks.length ||
-          stored.some((task) => {
-            const expected = expectedByItemKey.get(task.itemKey);
-            return !expected || !taskRegistrationMatches(task, expected);
-          })) {
-        return { outcome: "conflict" };
-      }
-      return { outcome: created.count === 1 ? "created" : "found", stage, tasks: stored };
+      return { outcome: "created", stage: workerStage(stage), tasks: stored.map(workerTask) };
     });
   }
 
@@ -267,7 +452,7 @@ export class PrismaKeywordResearchRepository {
     const taskId = requireNonempty(input?.taskId);
     const owner = requireNonempty(input?.owner);
     const token = requireToken(input?.token);
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
       if (!task) return { outcome: "not_found" };
       if (TASK_TERMINAL.has(task.state)) return { outcome: "conflict" };
@@ -289,7 +474,7 @@ export class PrismaKeywordResearchRepository {
         }
       });
       if (updated.count !== 1) return { outcome: "lost" };
-      return { outcome: "claimed", task: await tx.keywordResearchTask.findUnique({ where: { id: taskId } }) };
+      return { outcome: "claimed", task: workerTask(await tx.keywordResearchTask.findUnique({ where: { id: taskId } })) };
     });
   }
 
@@ -308,24 +493,46 @@ export class PrismaKeywordResearchRepository {
   async recordAttempt(input, now) {
     requireNow(now);
     const taskId = requireNonempty(input?.taskId);
-    const attemptNumber = input?.attemptNumber;
-    if (!Number.isInteger(attemptNumber) || attemptNumber < 1) conflict();
-    requireFingerprint(input?.requestFingerprint);
-    const reservationCostUsd = requireDecimalUsd(input?.reservationCostUsd);
-    const maxCostPerResearchUsd = requireDecimalUsd(input?.maxCostPerResearchUsd);
-    return this.transaction(async (tx) => {
+    const token = requireToken(input?.token);
+    const requestFingerprint = requireFingerprint(input?.requestFingerprint);
+    const reservationCostUsd = normalizeUsdInput(requireDecimalUsd(input?.reservationCostUsd));
+    const maxCostPerResearchUsd = normalizeUsdInput(requireDecimalUsd(input?.maxCostPerResearchUsd));
+    return this._transaction(async (tx) => {
       const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
       if (!task) return { outcome: "not_found" };
-      const existing = await tx.keywordResearchProviderAttempt.findUnique({
-        where: { taskId_attemptNumber: { taskId, attemptNumber } }
-      });
-      if (existing) {
-        if (existing.requestFingerprint !== input.requestFingerprint ||
-            serializeMoney(existing.reservationCostUsd) !== normalizeUsdInput(reservationCostUsd)) {
-          return { outcome: "conflict" };
-        }
-        return { outcome: "found", attempt: existing };
+      if (task.state === "processing" && task.leaseToken !== token) return { outcome: "lost" };
+      if (task.state !== "processing") return { outcome: "lost" };
+      if (task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() <= now.getTime()) {
+        return { outcome: "lost" };
       }
+      if (task.requestFingerprint !== requestFingerprint) return { outcome: "conflict" };
+      const attemptNumber = task.attemptCount + 1;
+      if (attemptNumber < 1 || attemptNumber > MAX_ATTEMPTS) {
+        return { outcome: "conflict", code: "KEYWORD_PROVIDER_RETRY_EXHAUSTED" };
+      }
+      const latest = await tx.keywordResearchProviderAttempt.findFirst({
+        where: { taskId }, orderBy: { attemptNumber: "desc" }
+      });
+      if (latest && !ATTEMPT_TERMINAL.has(latest.state)) {
+        if (latest.requestFingerprint === requestFingerprint &&
+            serializeMoney(latest.reservationCostUsd) === reservationCostUsd) {
+          return { outcome: "found", attempt: workerAttempt(latest), mayCall: false };
+        }
+        return { outcome: "conflict" };
+      }
+      if (latest && latest.state === "ambiguous") {
+        if (latest.requestFingerprint === requestFingerprint &&
+            serializeMoney(latest.reservationCostUsd) === reservationCostUsd) {
+          return { outcome: "found", attempt: workerAttempt(latest), mayCall: false };
+        }
+        return { outcome: "conflict" };
+      }
+      if (latest && latest.state === "failed") {
+        if (task.nextAttemptAt === null) {
+          return { outcome: "conflict", code: CODE_RETRY_NOT_SCHEDULED };
+        }
+      }
+      if (latest && latest.state === "succeeded") return { outcome: "conflict" };
       const stage = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
       if (!stage) return { outcome: "not_found" };
       const [exposure] = await tx.$queryRaw`
@@ -339,51 +546,265 @@ export class PrismaKeywordResearchRepository {
           AND s."generation" = ${stage.generation}`;
       if (BigInt(exposure.exposureUsd.replace(".", "")) + BigInt(reservationCostUsd.replace(".", "")) >
           BigInt(maxCostPerResearchUsd.replace(".", ""))) {
-        return { outcome: "conflict", code: "KEYWORD_PROVIDER_BUDGET_EXHAUSTED" };
+        return { outcome: "conflict", code: CODE_BUDGET_EXHAUSTED };
       }
       const attempt = await tx.keywordResearchProviderAttempt.create({ data: {
         id: keywordAttemptId(taskId, attemptNumber), taskId, attemptNumber,
-        state: "planned", requestFingerprint: input.requestFingerprint,
+        state: "planned", requestFingerprint,
         reservationCostUsd, plannedAt: now, createdAt: now, updatedAt: now
       } });
-      return { outcome: "created", attempt };
+      const dueNextAttemptAt = task.nextAttemptAt instanceof Date && task.nextAttemptAt.getTime() <= now.getTime()
+        ? null
+        : task.nextAttemptAt;
+      await tx.keywordResearchTask.update({
+        where: { id: taskId },
+        data: { attemptCount: attemptNumber, nextAttemptAt: dueNextAttemptAt, updatedAt: now }
+      });
+      return { outcome: "created", attempt: workerAttempt(attempt), mayCall: true };
     });
   }
 
   async settleAttempt(input, now) {
     requireNow(now);
     const taskId = requireNonempty(input?.taskId);
-    if (!Number.isInteger(input?.attemptNumber) || input?.attemptNumber < 1) conflict();
-    if (!ATTEMPT_TERMINAL.has(input?.state)) conflict();
-    if (input.state !== "ambiguous" && input?.providerCostUsd !== undefined) {
-      requireDecimalUsd(input.providerCostUsd);
+    const token = requireToken(input?.token);
+    const attemptNumber = requireAttemptNumber(input?.attemptNumber);
+    if (input?.state !== "succeeded" && input?.state !== "failed") conflict();
+    const providerCostUsd = normalizeUsdInput(requireDecimalUsd(input?.providerCostUsd));
+    const safeErrorCode = input?.safeErrorCode === undefined || input.safeErrorCode === null
+      ? null
+      : requireSafeErrorCode(input.safeErrorCode);
+    const resultFingerprint = input?.resultFingerprint === undefined || input.resultFingerprint === null
+      ? null
+      : requireFingerprint(input.resultFingerprint);
+    if (input.state === "succeeded" && input?.cacheEntry === null) conflict();
+    if (input.state === "failed" && input?.cacheEntry !== null && input?.cacheEntry !== undefined) conflict();
+    const cacheEntry = input.state === "succeeded" ? input.cacheEntry : null;
+    if (cacheEntry) {
+      requireNonempty(cacheEntry.cacheKey);
+      if (!ENDPOINT_KEYS.has(cacheEntry.endpointKey)) conflict();
+      if (cacheEntry.contractVersion !== 1) conflict();
+      if (cacheEntry.normalizedResponse === null || typeof cacheEntry.normalizedResponse !== "object") conflict();
+      requireFingerprint(cacheEntry.resultFingerprint);
+      if (cacheEntry.ttlSeconds !== CACHE_TTL_SECONDS) conflict();
     }
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const attempt = await tx.keywordResearchProviderAttempt.findUnique({
-        where: { taskId_attemptNumber: { taskId, attemptNumber: input.attemptNumber } }
+        where: { taskId_attemptNumber: { taskId, attemptNumber } }
       });
       if (!attempt) return { outcome: "not_found" };
+      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      if (!task) return { outcome: "not_found" };
+      if (task.attemptCount !== attemptNumber) return { outcome: "conflict" };
       if (ATTEMPT_TERMINAL.has(attempt.state)) {
         const sameSettle = attempt.state === input.state &&
-          serializeMoney(attempt.providerCostUsd) === normalizeUsdInput(input.providerCostUsd) &&
-          sameNullable(attempt.safeErrorCode, input.safeErrorCode ?? null) &&
-          sameNullable(attempt.resultFingerprint, input.resultFingerprint ?? null);
-        return sameSettle ? { outcome: "found", attempt } : { outcome: "conflict" };
+          serializeMoney(attempt.providerCostUsd) === providerCostUsd &&
+          sameNullable(attempt.safeErrorCode, safeErrorCode) &&
+          sameNullable(attempt.resultFingerprint, resultFingerprint);
+        if (!sameSettle) return { outcome: "conflict" };
+        if (input.state === "succeeded") {
+          const cacheRow = await tx.keywordResearchCache.findUnique({
+            where: { requestFingerprint: attempt.requestFingerprint }
+          });
+          if (!cacheRow || cacheRow.cacheKey !== cacheEntry.cacheKey ||
+              cacheRow.endpointKey !== cacheEntry.endpointKey ||
+              cacheRow.contractVersion !== cacheEntry.contractVersion ||
+              cacheRow.resultFingerprint !== cacheEntry.resultFingerprint ||
+              canonicalJson(cacheRow.normalizedResponse) !== canonicalJson(cacheEntry.normalizedResponse)) {
+            return { outcome: "conflict" };
+          }
+        }
+        const fenceActive = task.state === "processing" && task.leaseToken === token &&
+          task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() > now.getTime();
+        return { outcome: "found", attempt: workerAttempt(attempt), fenceActive };
       }
+      if (!ATTEMPT_NONTERMINAL.has(attempt.state)) return { outcome: "conflict" };
       const updated = await tx.keywordResearchProviderAttempt.updateMany({
         where: { id: attempt.id, state: { in: ["planned", "in_flight"] } },
         data: {
           state: input.state,
-          providerCostUsd: input.state === "ambiguous" ? null : input.providerCostUsd ?? null,
-          safeErrorCode: input.safeErrorCode ?? null,
-          resultFingerprint: input.resultFingerprint ?? null,
-          completedAt: input.state === "ambiguous" ? null : now,
-          ambiguousAfter: input.state === "ambiguous" ? now : null,
+          providerCostUsd,
+          safeErrorCode,
+          resultFingerprint,
+          completedAt: now,
+          ambiguousAfter: null,
           updatedAt: now
         }
       });
       if (updated.count !== 1) return { outcome: "lost" };
-      return { outcome: "terminal", attempt: await tx.keywordResearchProviderAttempt.findUnique({ where: { id: attempt.id } }) };
+      if (input.state === "succeeded") {
+        const existingCache = await tx.keywordResearchCache.findUnique({
+          where: { requestFingerprint: attempt.requestFingerprint }
+        });
+        if (existingCache) {
+          const same = existingCache.cacheKey === cacheEntry.cacheKey &&
+            existingCache.endpointKey === cacheEntry.endpointKey &&
+            existingCache.contractVersion === cacheEntry.contractVersion &&
+            existingCache.resultFingerprint === cacheEntry.resultFingerprint &&
+            canonicalJson(existingCache.normalizedResponse) === canonicalJson(cacheEntry.normalizedResponse);
+          if (!same) return { outcome: "conflict" };
+        } else {
+          await tx.keywordResearchCache.create({ data: {
+            requestFingerprint: attempt.requestFingerprint, cacheKey: cacheEntry.cacheKey,
+            endpointKey: cacheEntry.endpointKey, contractVersion: 1,
+            normalizedResponse: cacheEntry.normalizedResponse,
+            resultFingerprint: cacheEntry.resultFingerprint,
+            createdAt: now, expiresAt: plusMilliseconds(now, CACHE_TTL_SECONDS * 1000)
+          } });
+        }
+      }
+      const settled = await tx.keywordResearchProviderAttempt.findUnique({
+        where: { taskId_attemptNumber: { taskId, attemptNumber } }
+      });
+      const fenceActive = task.state === "processing" && task.leaseToken === token &&
+        task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() > now.getTime();
+      return {
+        outcome: fenceActive ? "terminal" : "lost",
+        attempt: workerAttempt(settled),
+        fenceActive
+      };
+    });
+  }
+
+  async markAttemptAmbiguous(input, now) {
+    requireNow(now);
+    const taskId = requireNonempty(input?.taskId);
+    const attemptNumber = requireAttemptNumber(input?.attemptNumber);
+    const requestFingerprint = requireFingerprint(input?.requestFingerprint);
+    if (input?.safeErrorCode !== CODE_AMBIGUOUS) conflict();
+    return this._transaction(async (tx) => {
+      const attempt = await tx.keywordResearchProviderAttempt.findUnique({
+        where: { taskId_attemptNumber: { taskId, attemptNumber } }
+      });
+      if (!attempt) return { outcome: "not_found" };
+      if (attempt.state === "ambiguous") {
+        return attempt.requestFingerprint === requestFingerprint
+          ? { outcome: "found" }
+          : { outcome: "conflict" };
+      }
+      if (!ATTEMPT_NONTERMINAL.has(attempt.state)) return { outcome: "conflict" };
+      if (attempt.requestFingerprint !== requestFingerprint) return { outcome: "conflict" };
+      await tx.keywordResearchProviderAttempt.updateMany({
+        where: { id: attempt.id, state: { in: ["planned", "in_flight"] } },
+        data: {
+          state: "ambiguous", safeErrorCode: CODE_AMBIGUOUS,
+          providerCostUsd: null, ambiguousAfter: now, updatedAt: now
+        }
+      });
+      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      if (!task) return { outcome: "not_found" };
+      if (!TASK_TERMINAL.has(task.state)) {
+        await tx.keywordResearchTask.updateMany({
+          where: { id: taskId, state: task.state },
+          data: {
+            state: "failed", safeErrorCode: CODE_AMBIGUOUS, terminalAt: now,
+            leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null,
+            updatedAt: now
+          }
+        });
+        const stage = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
+        if (stage) {
+          await tx.keywordResearchStage.update({
+            where: { id: stage.id },
+            data: { failedCount: { increment: 1 }, terminalCount: { increment: 1 }, updatedAt: now }
+          });
+          if (stage.state !== "completed" && stage.state !== "failed") {
+            await tx.keywordResearchStage.updateMany({
+              where: { id: stage.id, state: { notIn: ["completed", "failed"] } },
+              data: {
+                state: "failed", safeErrorCode: CODE_AMBIGUOUS, safeErrorMessage: null, completedAt: now,
+                aggregationOwner: null, aggregationLeaseToken: null,
+                aggregationLeaseAcquiredAt: null, aggregationLeaseExpiresAt: null,
+                updatedAt: now
+              }
+            });
+          }
+          await tx.keywordResearch.updateMany({
+            where: { id: stage.researchId, state: { notIn: ["completed", "failed"] } },
+            data: { state: "failed", safeErrorCode: CODE_AMBIGUOUS, safeErrorMessage: null, completedAt: now, updatedAt: now }
+          });
+        }
+      }
+      return { outcome: "terminal" };
+    });
+  }
+
+  async deferTask(input, now) {
+    requireNow(now);
+    const taskId = requireNonempty(input?.taskId);
+    const token = requireToken(input?.token);
+    if (!(input?.nextAttemptAt instanceof Date) || !Number.isFinite(input.nextAttemptAt.getTime())) conflict();
+    if (input?.safeErrorCode !== CODE_THROTTLED) conflict();
+    const nextAttemptAt = input.nextAttemptAt;
+    return this._transaction(async (tx) => {
+      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      if (!task) return { outcome: "not_found" };
+      if (task.state === "pending" && task.leaseToken === null && task.leaseExpiresAt === null &&
+          task.nextAttemptAt instanceof Date && task.nextAttemptAt.getTime() === nextAttemptAt.getTime() &&
+          task.safeErrorCode === CODE_THROTTLED) {
+        return { outcome: "delayed", retryAt: task.nextAttemptAt };
+      }
+      if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
+      if (task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() <= now.getTime()) {
+        return { outcome: "lost" };
+      }
+      if (nextAttemptAt.getTime() <= now.getTime()) return { outcome: "conflict" };
+      const latest = await tx.keywordResearchProviderAttempt.findFirst({
+        where: { taskId }, orderBy: { attemptNumber: "desc" }
+      });
+      if (latest && task.leaseAcquiredAt instanceof Date &&
+          latest.plannedAt instanceof Date && latest.plannedAt.getTime() >= task.leaseAcquiredAt.getTime()) {
+        return { outcome: "conflict" };
+      }
+      const updated = await tx.keywordResearchTask.updateMany({
+        where: { id: taskId, state: "processing", leaseToken: token },
+        data: {
+          state: "pending", nextAttemptAt, safeErrorCode: CODE_THROTTLED,
+          leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null,
+          updatedAt: now
+        }
+      });
+      if (updated.count !== 1) return { outcome: "lost" };
+      return { outcome: "delayed", retryAt: nextAttemptAt };
+    });
+  }
+
+  async scheduleRetry(input, now) {
+    requireNow(now);
+    const taskId = requireNonempty(input?.taskId);
+    const token = requireToken(input?.token);
+    const attemptNumber = requireAttemptNumber(input?.attemptNumber);
+    return this._transaction(async (tx) => {
+      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      if (!task) return { outcome: "not_found" };
+      const latest = await tx.keywordResearchProviderAttempt.findFirst({
+        where: { taskId }, orderBy: { attemptNumber: "desc" }
+      });
+      if (!latest || latest.attemptNumber !== attemptNumber || latest.state !== "failed") {
+        return { outcome: "conflict" };
+      }
+      if (attemptNumber >= MAX_ATTEMPTS) return { outcome: "conflict", code: "KEYWORD_PROVIDER_RETRY_EXHAUSTED" };
+      const completedBase = latest.completedAt instanceof Date ? latest.completedAt.getTime() : now.getTime();
+      const delaySeconds = retryDelaySeconds(taskId, attemptNumber);
+      const retryAt = new Date(Math.max(completedBase + delaySeconds * 1000, now.getTime()));
+      if (task.state === "pending" && task.leaseToken === null && task.leaseExpiresAt === null &&
+          task.nextAttemptAt instanceof Date && task.nextAttemptAt.getTime() === retryAt.getTime()) {
+        return { outcome: "delayed", retryAt: task.nextAttemptAt };
+      }
+      if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
+      if (task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() <= now.getTime()) {
+        return { outcome: "lost" };
+      }
+      const updated = await tx.keywordResearchTask.updateMany({
+        where: { id: taskId, state: "processing", leaseToken: token },
+        data: {
+          state: "pending", nextAttemptAt: retryAt,
+          leaseOwner: null, leaseToken: null, leaseAcquiredAt: null, leaseExpiresAt: null,
+          updatedAt: now
+        }
+      });
+      if (updated.count !== 1) return { outcome: "lost" };
+      return { outcome: "delayed", retryAt };
     });
   }
 
@@ -394,7 +815,7 @@ export class PrismaKeywordResearchRepository {
     if (!TASK_TERMINAL.has(input?.state)) conflict();
     if (input?.artifactS3Key !== undefined && input.artifactS3Key !== null) requireNonempty(input.artifactS3Key);
     if (input?.artifactFingerprint != null) requireFingerprint(input.artifactFingerprint);
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
       if (!task) return { outcome: "not_found" };
       if (TASK_TERMINAL.has(task.state)) {
@@ -402,7 +823,7 @@ export class PrismaKeywordResearchRepository {
           sameNullable(task.artifactS3Key, input.artifactS3Key ?? null) &&
           sameNullable(task.artifactFingerprint, input.artifactFingerprint ?? null) &&
           sameNullable(task.safeErrorCode, input.safeErrorCode ?? null);
-        return duplicateSame ? { outcome: "found", task } : { outcome: "conflict" };
+        return duplicateSame ? { outcome: "found", task: workerTask(task) } : { outcome: "conflict" };
       }
       if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
       const updated = await tx.keywordResearchTask.updateMany({
@@ -428,7 +849,7 @@ export class PrismaKeywordResearchRepository {
         where: { id: task.stageId, state: "collecting", terminalCount: { gte: stageRow.expectedCount } },
         data: { state: "ready", updatedAt: now }
       });
-      return { outcome: "terminal", task: await tx.keywordResearchTask.findUnique({ where: { id: taskId } }) };
+      return { outcome: "terminal", task: workerTask(await tx.keywordResearchTask.findUnique({ where: { id: taskId } })) };
     });
   }
 
@@ -439,89 +860,102 @@ export class PrismaKeywordResearchRepository {
     const generation = requireGeneration(input?.generation ?? 1);
     const owner = requireNonempty(input?.owner);
     const token = requireToken(input?.token);
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const stageId = keywordStageId(researchId, stageName, generation);
       const stage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
       if (!stage) return { outcome: "not_found" };
-      if (stage.state === "completed" || stage.state === "failed") return { outcome: "conflict" };
+      if (stage.stage !== stageName) return { outcome: "conflict" };
+      if (stage.state === "collecting") return { outcome: "not_ready", stage: workerStage(stage) };
+      if (stage.state === "completed") {
+        const exact = stage.terminalCount === stage.expectedCount &&
+          stage.succeededCount + stage.skippedCount + stage.failedCount === stage.expectedCount;
+        return exact ? { outcome: "found", stage: workerStage(stage) } : { outcome: "conflict" };
+      }
+      if (stage.state === "failed") return { outcome: "conflict" };
       const leaseLive = stage.aggregationLeaseExpiresAt instanceof Date &&
         stage.aggregationLeaseExpiresAt.getTime() > now.getTime();
-      if (leaseLive && stage.aggregationLeaseToken !== token) return { outcome: "lost" };
-      const updated = await tx.keywordResearchStage.updateMany({
-        where: { id: stageId, aggregationLeaseToken: stage.aggregationLeaseToken,
-          state: { in: ["collecting", "ready", "aggregating"] } },
-        data: {
-          state: "aggregating", aggregationOwner: owner, aggregationLeaseToken: token,
-          aggregationLeaseAcquiredAt: now,
-          aggregationLeaseExpiresAt: plusMilliseconds(now, AGGREGATION_LEASE_MS),
-          aggregationAttempt: { increment: 1 }, updatedAt: now
-        }
-      });
-      if (updated.count !== 1) return { outcome: "lost" };
-      return { outcome: "claimed", stage: await tx.keywordResearchStage.findUnique({ where: { id: stageId } }) };
+      if (stage.state === "aggregating" && leaseLive) {
+        return stage.aggregationLeaseToken === token
+          ? { outcome: "found", stage: workerStage(stage) }
+          : { outcome: "lost" };
+      }
+      const ready = stage.terminalCount === stage.expectedCount &&
+        stage.succeededCount + stage.skippedCount + stage.failedCount === stage.expectedCount;
+      if (stage.state === "ready") {
+        if (!ready) return { outcome: "conflict" };
+        const updated = await tx.keywordResearchStage.updateMany({
+          where: { id: stageId, state: "ready" },
+          data: {
+            state: "aggregating", aggregationOwner: owner, aggregationLeaseToken: token,
+            aggregationLeaseAcquiredAt: now,
+            aggregationLeaseExpiresAt: plusMilliseconds(now, AGGREGATION_LEASE_MS),
+            aggregationAttempt: { increment: 1 }, updatedAt: now
+          }
+        });
+        if (updated.count !== 1) return { outcome: "lost" };
+        return { outcome: "claimed", stage: workerStage(await tx.keywordResearchStage.findUnique({ where: { id: stageId } })) };
+      }
+      if (stage.state === "aggregating") {
+        const updated = await tx.keywordResearchStage.updateMany({
+          where: { id: stageId, state: "aggregating", aggregationLeaseExpiresAt: { lt: now } },
+          data: {
+            aggregationOwner: owner, aggregationLeaseToken: token,
+            aggregationLeaseAcquiredAt: now,
+            aggregationLeaseExpiresAt: plusMilliseconds(now, AGGREGATION_LEASE_MS),
+            aggregationAttempt: { increment: 1 }, updatedAt: now
+          }
+        });
+        if (updated.count !== 1) return { outcome: "lost" };
+        return { outcome: "claimed", stage: workerStage(await tx.keywordResearchStage.findUnique({ where: { id: stageId } })) };
+      }
+      return { outcome: "conflict" };
     });
   }
 
-  async manifestInTransaction(tx, input, now, stageNameOverride) {
-    const researchId = requireResearchId(input?.researchId);
-    const stageName = requireStage(stageNameOverride ?? input?.stage);
-    const generation = requireGeneration(input?.generation ?? 1);
-    const token = requireToken(input?.token);
-    requireNonempty(input?.manifestS3Key);
-    requireFingerprint(input?.manifestFingerprint);
-    const stageId = keywordStageId(researchId, stageName, generation);
+  async _completeStageAndCreateNext(tx, input, now) {
+    const researchId = requireResearchId(input.researchId);
+    const generation = requireGeneration(input.generation);
+    const token = requireToken(input.token);
+    requireNonempty(input.manifestS3Key);
+    requireFingerprint(input.manifestFingerprint);
+    const stageId = keywordStageId(researchId, input.stageName, generation);
     const stage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
     if (!stage) return { outcome: "not_found" };
-    if (stage.state === "completed" || stage.state === "failed") return { outcome: "conflict" };
+    if (stage.stage !== input.stageName) return { outcome: "conflict" };
+    if (stage.state === "completed") {
+      if (stage.manifestS3Key !== input.manifestS3Key || stage.manifestFingerprint !== input.manifestFingerprint) {
+        return { outcome: "conflict" };
+      }
+      const nextStageId = keywordStageId(researchId, input.nextStageName, generation);
+      const nextStage = await tx.keywordResearchStage.findUnique({ where: { id: nextStageId } });
+      if (!nextStage) return { outcome: "conflict" };
+      const nextTasks = await tx.keywordResearchTask.findMany({ where: { stageId: nextStageId }, orderBy: { itemKey: "asc" } });
+      if (!sameTaskSet(nextTasks, input.nextStageTasks)) return { outcome: "conflict" };
+      return { outcome: "found", stage: workerStage(stage), nextStage: workerStage(nextStage), tasks: nextTasks.map(workerTask) };
+    }
     if (stage.state !== "aggregating" || stage.aggregationLeaseToken !== token) return { outcome: "lost" };
-    if (stage.manifestS3Key !== null) {
-      const same = stage.manifestS3Key === input.manifestS3Key &&
-        stage.manifestFingerprint === input.manifestFingerprint;
-      return same ? { outcome: "found", stage } : { outcome: "conflict" };
+    if (stage.terminalCount !== stage.expectedCount) return { outcome: "conflict" };
+    if (stage.manifestS3Key !== null &&
+        (stage.manifestS3Key !== input.manifestS3Key || stage.manifestFingerprint !== input.manifestFingerprint)) {
+      return { outcome: "conflict" };
     }
     const updated = await tx.keywordResearchStage.updateMany({
-      where: { id: stageId, state: "aggregating", aggregationLeaseToken: token, manifestS3Key: null },
+      where: { id: stageId, state: "aggregating", aggregationLeaseToken: token },
       data: {
         manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
-        manifestProducedAt: now, updatedAt: now
+        manifestProducedAt: stage.createdAt, state: "completed", completedAt: now, updatedAt: now
       }
     });
     if (updated.count !== 1) return { outcome: "lost" };
-    return { outcome: "terminal", stage: await tx.keywordResearchStage.findUnique({ where: { id: stageId } }) };
-  }
-
-  async stageCompletionInTransaction(tx, identity, now, nextStageName, nextStageTasks) {
-    const researchId = requireResearchId(identity?.researchId);
-    const stageName = requireStage(identity?.stage);
-    const generation = requireGeneration(identity?.generation ?? 1);
-    const token = requireToken(identity?.token);
-    const stageId = keywordStageId(researchId, stageName, generation);
-    const stage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
-    if (!stage) return { outcome: "not_found" };
-    if (stage.state === "completed") {
-      return stage.terminalCount === stage.expectedCount
-        ? { outcome: "found", stage }
-        : { outcome: "conflict" };
-    }
-    if (stage.state === "failed" || stage.state !== "aggregating" || stage.aggregationLeaseToken !== token) {
-      return { outcome: "lost" };
-    }
-    if (stage.terminalCount !== stage.expectedCount) return { outcome: "conflict" };
-    const updated = await tx.keywordResearchStage.updateMany({
-      where: { id: stageId, state: "aggregating", aggregationLeaseToken: token },
-      data: { state: "completed", completedAt: now, updatedAt: now }
-    });
-    if (updated.count !== 1) return { outcome: "lost" };
-    if (nextStageTasks.length) {
-      const derivedNext = stageName === "expansion" ? "anchor_screen"
-        : stageName === "anchor_screen" ? "market_overview" : null;
-      if (derivedNext !== nextStageName) return { outcome: "conflict" };
-      const nextStageId = keywordStageId(researchId, nextStageName, generation);
-      await tx.keywordResearchStage.createMany({ data: [{
-        id: nextStageId, researchId, stage: nextStageName, generation,
-        expectedCount: nextStageTasks.length, state: "collecting", createdAt: now, updatedAt: now
-      }], skipDuplicates: true });
-      await tx.keywordResearchTask.createMany({ data: nextStageTasks.map((task) => ({
+    const nextStageId = keywordStageId(researchId, input.nextStageName, generation);
+    await tx.keywordResearchStage.create({ data: {
+      id: nextStageId, researchId, stage: input.nextStageName, generation,
+      expectedCount: input.nextStageTasks.length,
+      state: input.nextStageTasks.length === 0 ? "ready" : "collecting",
+      createdAt: now, updatedAt: now
+    } });
+    if (input.nextStageTasks.length) {
+      await tx.keywordResearchTask.createMany({ data: input.nextStageTasks.map((task) => ({
         id: keywordTaskId(nextStageId, task.itemKey), stageId: nextStageId, itemKey: task.itemKey,
         inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
         requestFingerprint: task.requestFingerprint,
@@ -529,35 +963,140 @@ export class PrismaKeywordResearchRepository {
         createdAt: now, updatedAt: now
       })) });
     }
-    return { outcome: "terminal", stage: await tx.keywordResearchStage.findUnique({ where: { id: stageId } }) };
+    const nextStage = await tx.keywordResearchStage.findUnique({ where: { id: nextStageId } });
+    const nextTasks = await tx.keywordResearchTask.findMany({ where: { stageId: nextStageId }, orderBy: { itemKey: "asc" } });
+    const completedStage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
+    return {
+      outcome: "terminal", stage: workerStage(completedStage), nextStage: workerStage(nextStage),
+      tasks: nextTasks.map(workerTask)
+    };
   }
 
   async publishCandidateManifest(input, now) {
     requireNow(now);
-    return this.transaction((tx) => this.manifestInTransaction(tx, input, now));
+    const researchId = requireResearchId(input?.researchId);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const token = requireToken(input?.token);
+    requireNonempty(input?.manifestS3Key);
+    requireFingerprint(input?.manifestFingerprint);
+    const tasks = Array.isArray(input?.nextStageTasks) ? input.nextStageTasks : [];
+    if (tasks.length !== 1 || tasks[0]?.itemKey !== "US:0" || tasks[0]?.endpointKey !== "keyword_overview") {
+      return { outcome: "conflict", code: "KEYWORD_ANCHOR_TASK_SET_INVALID" };
+    }
+    if (!requireTaskShapes(tasks) || !requireUniqueTaskKeys(tasks)) return { outcome: "conflict" };
+    return this._transaction((tx) => this._completeStageAndCreateNext(tx, {
+      researchId, generation, token, manifestS3Key: input.manifestS3Key,
+      manifestFingerprint: input.manifestFingerprint,
+      stageName: "expansion", nextStageName: "anchor_screen", nextStageTasks: tasks
+    }, now));
   }
 
   async publishShortlist(input, now) {
     requireNow(now);
-    const marketTasks = input?.marketTasks === undefined ? [] : requireTaskInputs(input.marketTasks);
-    return this.transaction(async (tx) => {
-      const manifest = await this.manifestInTransaction(tx, input, now, "anchor_screen");
-      if (manifest.outcome !== "terminal" && manifest.outcome !== "found") return manifest;
-      const completion = await this.stageCompletionInTransaction(tx, {
-        researchId: input.researchId, stage: "anchor_screen",
-        generation: input?.generation ?? 1, token: input.token
-      }, now, "market_overview", marketTasks);
-      return completion;
-    });
+    const researchId = requireResearchId(input?.researchId);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const token = requireToken(input?.token);
+    requireNonempty(input?.manifestS3Key);
+    requireFingerprint(input?.manifestFingerprint);
+    const tasks = Array.isArray(input?.marketTasks) ? input.marketTasks : [];
+    if (tasks.length !== MARKET_TASK_KEYS.length ||
+        tasks.some((task, index) => task?.itemKey !== MARKET_TASK_KEYS[index] || task?.endpointKey !== "keyword_overview")) {
+      return { outcome: "conflict", code: "KEYWORD_MARKET_TASK_SET_INVALID" };
+    }
+    if (!requireTaskShapes(tasks) || !requireUniqueTaskKeys(tasks)) return { outcome: "conflict" };
+    return this._transaction((tx) => this._completeStageAndCreateNext(tx, {
+      researchId, generation, token, manifestS3Key: input.manifestS3Key,
+      manifestFingerprint: input.manifestFingerprint,
+      stageName: "anchor_screen", nextStageName: "market_overview", nextStageTasks: tasks
+    }, now));
   }
 
-  async publishStageCompletion(input, now) {
+  async publishResearchResult(input, now) {
     requireNow(now);
-    const nextStageTasks = input?.nextStageTasks === undefined ? [] : requireTaskInputs(input.nextStageTasks);
-    return this.transaction((tx) => this.stageCompletionInTransaction(tx, input, now,
-      input?.stage === "expansion" ? "anchor_screen"
-        : input?.stage === "anchor_screen" ? "market_overview" : null,
-      nextStageTasks));
+    const researchId = requireResearchId(input?.researchId);
+    const generation = requireGeneration(input?.generation ?? 1);
+    const token = requireToken(input?.token);
+    requireNonempty(input?.manifestS3Key);
+    requireFingerprint(input?.manifestFingerprint);
+    requireFingerprint(input?.resultFingerprint);
+    if (input?.result === null || typeof input?.result !== "object") conflict();
+    const serialized = JSON.stringify(input.result);
+    if (Buffer.byteLength(serialized, "utf8") > MAX_RESULT_BYTES) {
+      return { outcome: "conflict", code: CODE_RESULT_TOO_LARGE };
+    }
+    const selectionItems = Array.isArray(input?.selectionItems) ? input.selectionItems : null;
+    if (selectionItems === null || selectionItems.length > MAX_DEFAULT_ITEMS) {
+      return { outcome: "conflict", code: "KEYWORD_SELECTION_INVALID" };
+    }
+    for (const item of selectionItems) {
+      if (!validSelectionItem(item)) return { outcome: "conflict", code: "KEYWORD_SELECTION_INVALID" };
+    }
+    const rows = Array.isArray(input.result) ? input.result : input.result.keywords;
+    if (!Array.isArray(rows)) return { outcome: "conflict", code: "KEYWORD_SELECTION_INVALID" };
+    const expectedSelection = createDefaultSelection(rows);
+    if (!expectedSelection.ok || canonicalJson(selectionItems) !== canonicalJson(expectedSelection.items)) {
+      return { outcome: "conflict", code: "KEYWORD_SELECTION_MISMATCH" };
+    }
+    return this._transaction(async (tx) => {
+      const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
+      if (!research) return { outcome: "not_found" };
+      if (research.generation !== generation) return { outcome: "conflict" };
+      const marketStageId = keywordStageId(researchId, "market_overview", generation);
+      const marketStage = await tx.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+      if (!marketStage) return { outcome: "conflict" };
+      if (research.state === "completed") {
+        const selectionMatches = research.selection !== null && typeof research.selection === "object" &&
+          canonicalJson(research.selection.items) === canonicalJson(selectionItems);
+        const manifestMatches = marketStage.manifestS3Key === input.manifestS3Key &&
+          marketStage.manifestFingerprint === input.manifestFingerprint;
+        const resultMatches = research.resultFingerprint === input.resultFingerprint &&
+          research.selectionRevision === 1;
+        return selectionMatches && manifestMatches && resultMatches
+          ? { outcome: "found" }
+          : { outcome: "conflict" };
+      }
+      if (research.state !== "running") return { outcome: "conflict" };
+      const expansionStage = await tx.keywordResearchStage.findUnique({
+        where: { id: keywordStageId(researchId, "expansion", generation) }
+      });
+      const anchorStage = await tx.keywordResearchStage.findUnique({
+        where: { id: keywordStageId(researchId, "anchor_screen", generation) }
+      });
+      if (!expansionStage || !anchorStage || expansionStage.state !== "completed" || anchorStage.state !== "completed") {
+        return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
+      }
+      if (marketStage.state === "completed") {
+        return { outcome: "found" };
+      }
+      if (marketStage.state !== "aggregating") return { outcome: "conflict" };
+      if (marketStage.aggregationLeaseToken !== token) return { outcome: "lost" };
+      if (marketStage.terminalCount !== marketStage.expectedCount ||
+          marketStage.succeededCount + marketStage.skippedCount + marketStage.failedCount !== marketStage.expectedCount) {
+        return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
+      }
+      if (marketStage.manifestS3Key !== null &&
+          (marketStage.manifestS3Key !== input.manifestS3Key ||
+           marketStage.manifestFingerprint !== input.manifestFingerprint)) {
+        return { outcome: "conflict" };
+      }
+      const updated = await tx.keywordResearchStage.updateMany({
+        where: { id: marketStageId, state: "aggregating", aggregationLeaseToken: token },
+        data: {
+          manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
+          manifestProducedAt: marketStage.createdAt, state: "completed", completedAt: now, updatedAt: now
+        }
+      });
+      if (updated.count !== 1) return { outcome: "lost" };
+      await tx.keywordResearch.updateMany({
+        where: { id: researchId, state: "running", generation },
+        data: {
+          state: "completed", result: input.result, resultFingerprint: input.resultFingerprint,
+          selection: { items: selectionItems }, selectionRevision: 1,
+          completedAt: now, updatedAt: now
+        }
+      });
+      return { outcome: "terminal" };
+    });
   }
 
   async failStage(input, now) {
@@ -567,7 +1106,7 @@ export class PrismaKeywordResearchRepository {
     const generation = requireGeneration(input?.generation ?? 1);
     const token = requireToken(input?.token);
     requireNonempty(input?.safeErrorCode ?? "KEYWORD_RESEARCH_STAGE_FAILED");
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const stageId = keywordStageId(researchId, stageName, generation);
       const updated = await tx.keywordResearchStage.updateMany({
         where: { id: stageId, state: "aggregating", aggregationLeaseToken: token },
@@ -586,39 +1125,6 @@ export class PrismaKeywordResearchRepository {
     });
   }
 
-  async publishResearchResult(input, now) {
-    requireNow(now);
-    const researchId = requireResearchId(input?.researchId);
-    requireFingerprint(input?.resultFingerprint);
-    if (input?.result === null || typeof input?.result !== "object") conflict();
-    const serialized = JSON.stringify(input.result);
-    if (Buffer.byteLength(serialized, "utf8") > MAX_RESULT_BYTES) {
-      return { outcome: "conflict", code: "KEYWORD_RESULT_TOO_LARGE" };
-    }
-    return this.transaction(async (tx) => {
-      const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
-      if (!research) return { outcome: "not_found" };
-      if (research.state === "completed") {
-        return research.resultFingerprint === input.resultFingerprint
-          ? { outcome: "found", research }
-          : { outcome: "conflict" };
-      }
-      if (research.state !== "running") return { outcome: "conflict" };
-      const stages = await tx.keywordResearchStage.findMany({ where: { researchId, generation: research.generation } });
-      const allCompleted = stages.length === 3 && stages.every((stage) => stage.state === "completed");
-      if (!allCompleted) return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
-      const updated = await tx.keywordResearch.updateMany({
-        where: { id: researchId, state: "running" },
-        data: {
-          state: "completed", result: input.result, resultFingerprint: input.resultFingerprint,
-          completedAt: now, updatedAt: now
-        }
-      });
-      if (updated.count !== 1) return { outcome: "lost" };
-      return { outcome: "terminal", research: await tx.keywordResearch.findUnique({ where: { id: researchId } }) };
-    });
-  }
-
   async saveSelection(input, now) {
     requireNow(now);
     const researchId = requireResearchId(input?.researchId);
@@ -626,7 +1132,7 @@ export class PrismaKeywordResearchRepository {
     if (!Number.isInteger(input?.expectedRevision) || input.expectedRevision < 0) conflict();
     if (!Array.isArray(input?.items) || input.items.length > MAX_SELECTION_ITEMS) conflict();
     for (const item of input.items) requireSelectionItemId(item?.itemId);
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
       if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
       if (research.state !== "completed") return { outcome: "conflict" };
@@ -657,7 +1163,7 @@ export class PrismaKeywordResearchRepository {
       requireNonempty(item?.keyword);
     }
     if (typeof input?.constructRun !== "function" || typeof input?.constructQueries !== "function") conflict();
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
       if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
       const existingHandoff = await tx.keywordResearchHandoff.findUnique({
@@ -698,23 +1204,55 @@ export class PrismaKeywordResearchRepository {
 
   async recover(now) {
     requireNow(now);
-    return this.transaction(async (tx) => {
-      const tasks = await tx.$queryRaw`
-        SELECT t."id"::text AS "taskId", t."state"::text AS "state", t."stageId"::text AS "stageId"
-        FROM "KeywordResearchTask" AS t
-        WHERE (t."state" = 'processing' AND t."leaseExpiresAt" IS NOT NULL AND t."leaseExpiresAt" < ${now})
-           OR (t."state" = 'pending' AND (t."nextAttemptAt" IS NULL OR t."nextAttemptAt" <= ${now}))`;
-      const stages = await tx.$queryRaw`
-        SELECT s."id"::text AS "stageId", s."researchId"::text AS "researchId",
-               s."stage"::text AS "stage", s."generation" AS "generation"
-        FROM "KeywordResearchStage" AS s
-        WHERE s."state" = 'aggregating' AND s."aggregationLeaseExpiresAt" IS NOT NULL
-          AND s."aggregationLeaseExpiresAt" < ${now}`;
+    return this._transaction(async (tx) => {
+      const initializations = await tx.keywordResearch.findMany({
+        where: { state: "queued", stages: { none: { stage: "expansion" } } },
+        orderBy: { id: "asc" }
+      });
+      const tasks = await tx.keywordResearchTask.findMany({
+        where: {
+          OR: [
+            { state: "processing", leaseExpiresAt: { lt: now } },
+            { state: "pending", OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] }
+          ]
+        },
+        include: { stage: true },
+        orderBy: { id: "asc" }
+      });
+      const stages = await tx.keywordResearchStage.findMany({
+        where: {
+          OR: [
+            { state: "ready" },
+            { state: "aggregating", aggregationLeaseExpiresAt: { lt: now } }
+          ]
+        },
+        include: { tasks: { orderBy: { itemKey: "asc" } } },
+        orderBy: { id: "asc" }
+      });
       return {
         outcome: "found",
-        taskDispatches: tasks.map((task) => ({ taskId: task.taskId, kind: "task" })),
+        initializations: initializations.map((research) => ({
+          researchId: research.id, generation: research.generation
+        })),
+        taskDispatches: tasks.filter((task) => task.stage).map((task) => ({
+          researchId: task.stage.researchId,
+          generation: task.stage.generation,
+          stage: task.stage.stage,
+          stageId: task.stageId,
+          taskId: task.id,
+          itemKey: task.itemKey,
+          inputFingerprint: task.inputFingerprint,
+          endpointKey: task.endpointKey,
+          requestFingerprint: task.requestFingerprint
+        })),
         aggregateChecks: stages.map((stage) => ({
-          researchId: stage.researchId, stage: stage.stage, generation: stage.generation, kind: "aggregate_check"
+          researchId: stage.researchId,
+          generation: stage.generation,
+          stage: stage.stage,
+          stageId: stage.id,
+          stageInputFingerprint: stageInputFingerprint({
+            researchId: stage.researchId, generation: stage.generation, stage: stage.stage, tasks: stage.tasks
+          })
         }))
       };
     });
@@ -734,7 +1272,7 @@ export class PrismaKeywordResearchRepository {
     requireNow(now);
     requireFingerprint(input?.requestFingerprint);
     requireNonempty(input?.cacheKey);
-    if (!["keyword_suggestions", "related_keywords", "keyword_overview"].includes(input?.endpointKey)) conflict();
+    if (!ENDPOINT_KEYS.has(input?.endpointKey)) conflict();
     requireFingerprint(input?.resultFingerprint);
     if (input?.normalizedResponse === null || typeof input.normalizedResponse !== "object") conflict();
     if (!Number.isInteger(input?.ttlSeconds ?? CACHE_TTL_SECONDS) || input.ttlSeconds < 1) conflict();
@@ -761,7 +1299,7 @@ export class PrismaKeywordResearchRepository {
     requireNonempty(provider);
     const minGapMs = input?.minGapMs ?? THROTTLE_MIN_GAP_MS;
     if (!Number.isInteger(minGapMs) || minGapMs < THROTTLE_MIN_GAP_MS) conflict();
-    return this.transaction(async (tx) => {
+    return this._transaction(async (tx) => {
       const claimed = await tx.$queryRaw`
         UPDATE "KeywordProviderThrottle"
         SET "nextAllowedAt" = now() + make_interval(secs => ${minGapMs / 1000}::float8), "updatedAt" = now()

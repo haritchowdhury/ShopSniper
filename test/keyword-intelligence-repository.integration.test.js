@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createPrismaClient } from "../src/prisma-client.js";
 import { PrismaKeywordResearchRepository, keywordStageId, keywordTaskId,
   newLeaseToken, newResearchId, selectionItemId } from "../src/keyword-intelligence/repository.js";
+import { createDefaultSelection } from "../src/keyword-intelligence/selection.js";
 import { assertMigrationStayedInSchema, createIsolatedTestSchema,
   deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 
@@ -14,6 +15,7 @@ const NINE_MARKETS = ["US", "GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"].map(
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
 const NOW = new Date("2026-08-17T00:00:00.000Z");
 const LATER = new Date(NOW.getTime() + 121_000);
+const EARLY = new Date(NOW.getTime() + 61_000);
 
 const KEYWORD_TABLES = {
   KeywordResearch: ["id", "ownerId", "state", "generation", "contractVersion", "configSnapshot",
@@ -98,69 +100,100 @@ async function catalogAssertion(db, schema) {
   assert.equal(runQueryColumns.length, 1, "RunQuery lineage column");
 }
 
-async function freshResearch(repo, researchId, ownerId = "owner_kiw1") {
+async function freshResearch(repo, researchId, ownerId = "owner_kiw1", seedCount = 1) {
+  const seeds = Array.from({ length: seedCount }, (_, index) => `seed ${index}`);
   const created = await repo.create({ researchId, ownerId, configSnapshot: { anchor: "US" },
-    configFingerprint: fp("c"), seeds: ["synthetic seed"], markets: NINE_MARKETS }, NOW);
+    configFingerprint: fp("c"), seeds, markets: NINE_MARKETS }, NOW);
   assert.equal(created.outcome, "created");
   return created;
 }
 
-const expansionTasks = (seedCount = 2) => Array.from({ length: seedCount }, (_, index) => ({
-  itemKey: `${index}:suggestions`, inputFingerprint: fp(`i${index}`), endpointKey: "keyword_suggestions",
-  requestFingerprint: fp(`r${index}`)
+const expansionTasksFor = (seedCount = 1) => Array.from({ length: seedCount * 2 }, (_, index) => {
+  const suffix = index % 2 === 0 ? "suggestions" : "related";
+  return {
+    itemKey: `${Math.floor(index / 2)}:${suffix}`,
+    inputFingerprint: fp(`i${index}`),
+    endpointKey: suffix === "suggestions" ? "keyword_suggestions" : "related_keywords",
+    requestFingerprint: fp(`r${index}`)
+  };
+});
+
+const marketTasksFor = () => ["GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"].map((code) => ({
+  itemKey: `${code}:0`, inputFingerprint: fp(`market-${code}-input`),
+  endpointKey: "keyword_overview", requestFingerprint: fp(`market-${code}-request`)
 }));
 
-async function completeResearchFlow(db, repo, researchId, ownerId) {
-  await freshResearch(repo, researchId, ownerId);
-  await repo.initialize({ researchId, ownerId, stage: "expansion", generation: 1,
-    tasks: expansionTasks(2) }, NOW);
-  const stageId = keywordStageId(researchId, "expansion", 1);
-  for (const itemKey of ["0:suggestions", "1:suggestions"]) {
-    const token = newLeaseToken();
+async function completeStageTasks(db, repo, stageId, itemKeys, state = "succeeded", at = NOW) {
+  for (const itemKey of itemKeys) {
     const taskId = keywordTaskId(stageId, itemKey);
-    assert.equal((await repo.claim({ taskId, owner: "worker", token }, NOW)).outcome, "claimed");
-    assert.equal((await repo.terminalize({ taskId, token, state: "succeeded",
-      artifactS3Key: `runs/keyword-research/${researchId}/generation-1/expansion/${itemKey}.json`,
-      artifactFingerprint: fp(itemKey[0]) }, NOW)).outcome, "terminal");
+    const token = newLeaseToken();
+    assert.equal((await repo.claim({ taskId, owner: "worker", token }, at)).outcome, "claimed");
+    assert.equal((await repo.terminalize({ taskId, token, state,
+      artifactS3Key: `runs/${stageId}/${itemKey}.json`, artifactFingerprint: fp(itemKey) }, at)).outcome,
+    "terminal");
   }
-  const aggregatorToken = newLeaseToken();
-  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
-    owner: "aggregator", token: aggregatorToken }, NOW);
-  await repo.publishCandidateManifest({ researchId, stage: "expansion", generation: 1,
-    token: aggregatorToken, manifestS3Key: `runs/keyword-research/${researchId}/generation-1/expansion/manifest.json`,
-    manifestFingerprint: fp("m") }, NOW);
-  await repo.publishStageCompletion({ researchId, stage: "expansion", generation: 1,
-    token: aggregatorToken, nextStageTasks: [{ itemKey: "anchor", inputFingerprint: fp("a"),
-      endpointKey: "keyword_overview", requestFingerprint: fp("ra") }] }, NOW);
-  const anchorStageId = keywordStageId(researchId, "anchor_screen", 1);
-  const anchorTaskId = keywordTaskId(anchorStageId, "anchor");
-  const anchorToken = newLeaseToken();
-  await repo.claim({ taskId: anchorTaskId, owner: "worker", token: anchorToken }, NOW);
-  await repo.terminalize({ taskId: anchorTaskId, token: anchorToken, state: "succeeded",
-    artifactS3Key: `runs/keyword-research/${researchId}/generation-1/anchor_screen/anchor.json`,
-    artifactFingerprint: fp("x") }, NOW);
-  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1,
-    owner: "aggregator", token: aggregatorToken }, NOW);
-  await repo.publishShortlist({ researchId, generation: 1, token: aggregatorToken,
-    manifestS3Key: `runs/keyword-research/${researchId}/generation-1/anchor_screen/manifest.json`,
-    manifestFingerprint: fp("s"), marketTasks: [{ itemKey: "US", inputFingerprint: fp("us"),
-      endpointKey: "keyword_overview", requestFingerprint: fp("rus") }] }, NOW);
-  const marketStageId = keywordStageId(researchId, "market_overview", 1);
-  const marketTaskId = keywordTaskId(marketStageId, "US");
-  const marketToken = newLeaseToken();
-  await repo.claim({ taskId: marketTaskId, owner: "worker", token: marketToken }, NOW);
-  await repo.terminalize({ taskId: marketTaskId, token: marketToken, state: "succeeded",
-    artifactS3Key: `runs/keyword-research/${researchId}/generation-1/market_overview/US.json`,
-    artifactFingerprint: fp("y") }, NOW);
-  await repo.claimAggregator({ researchId, stage: "market_overview", generation: 1,
-    owner: "aggregator", token: aggregatorToken }, NOW);
-  await repo.publishStageCompletion({ researchId, stage: "market_overview", generation: 1,
-    token: aggregatorToken }, NOW);
-  return aggregatorToken;
 }
 
-test("migration catalog, enum values, uniques, defaults, legacy compatibility", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_catalog_${Date.now().toString(36)}`;
+function makeKeywordRow(keyword, overrides = {}) {
+  return {
+    itemId: selectionItemId("calculated", keyword),
+    keyword,
+    originalKeyword: keyword,
+    seed: "seed 0",
+    sourceSeeds: ["seed 0"],
+    lane: "category_discovery",
+    facets: { audience: [], category: [], channel: [], fit: [], modifier: [] },
+    metricsSnapshot: {
+      searchVolume: 100, cpc: 1.2, competition: 0.5, competitionLevel: "MEDIUM",
+      keywordDifficulty: 30, mainIntent: "commercial", commercialIntent: 0.8,
+      monthlyHistory: [], trendSlope: 0.1, flags: [], opportunityScore: 90,
+      recommended: true, mergedInto: null, availableMarkets: ["US"],
+      marketMetrics: { US: { searchVolume: 100 } }
+    },
+    recommended: true, opportunityScore: 90, searchVolume: 100, mergedInto: null,
+    ...overrides
+  };
+}
+
+function makeResult(keywords, researchId = "") {
+  return {
+    contractVersion: 1, researchId, generation: 1, configFingerprint: fp("c"),
+    seeds: ["seed 0"], markets: NINE_MARKETS, summary: {}, keywords, clusters: []
+  };
+}
+
+const defaultSelectionFor = (keywords) => {
+  const result = makeResult(keywords);
+  return createDefaultSelection(keywords).items;
+};
+
+function injectFailures(target, shouldFail) {
+  const make = (obj, path) => new Proxy(obj, {
+    get(t, prop) {
+      if (prop === "then") return undefined;
+      const value = t[prop];
+      const nextPath = path ? `${path}.${String(prop)}` : String(prop);
+      if (typeof value === "function") {
+        return (...args) => {
+          if (shouldFail(nextPath, args)) throw new Error(`injected:${nextPath}`);
+          return value.apply(t, args);
+        };
+      }
+      if (value && typeof value === "object") return make(value, nextPath);
+      return value;
+    }
+  });
+  return make(target, "");
+}
+
+function clientWithInjectedFailure(client, shouldFail) {
+  const realTransaction = client.$transaction.bind(client);
+  client.$transaction = (work, ...rest) => realTransaction((tx) => work(injectFailures(tx, shouldFail)), ...rest);
+  return client;
+}
+
+async function setupRepo(t, schemaPrefix) {
+  const schema = `${schemaPrefix}_${Date.now().toString(36)}`;
   const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
   t.after(async () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
@@ -169,8 +202,14 @@ test("migration catalog, enum values, uniques, defaults, legacy compatibility", 
   deployPrismaMigrations(scopedUrl);
   const db = createPrismaClient(scopedUrl);
   await assertMigrationStayedInSchema(db, schema);
+  const repo = new PrismaKeywordResearchRepository(db);
+  return { schema, db, repo };
+}
+
+test("migration catalog, enum values, uniques, defaults, legacy compatibility", { skip: !enabled }, async (t) => {
+  const { schema, db } = await setupRepo(t, "kir1_catalog");
   await catalogAssertion(db, schema);
-  const legacy = await db.run.create({ data: { id: "run_legacy_kiw1", state: "queued",
+  const legacy = await db.run.create({ data: { id: "run_legacy_kir1", state: "queued",
     stage: "discovery", normalizedShopTypes: [], progress: {} } });
   assert.equal(legacy.queryPlanSource, "legacy");
   assert.equal(legacy.keywordResearchId, null);
@@ -184,7 +223,7 @@ test("migration catalog, enum values, uniques, defaults, legacy compatibility", 
 });
 
 test("negative control: removing one unique constraint fails the catalog assertion", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_negctl_${Date.now().toString(36)}`;
+  const schema = `kir1_negctl_${Date.now().toString(36)}`;
   const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
   t.after(async () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
@@ -198,61 +237,111 @@ test("negative control: removing one unique constraint fails the catalog asserti
 });
 
 test("research create/getOwned idempotency and ownership", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_research_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(createPrismaClient(scopedUrl));
+  const { db, repo } = await setupRepo(t, "kir1_research");
   const researchId = newResearchId();
   await freshResearch(repo, researchId);
   assert.equal((await repo.create({ researchId, ownerId: "owner_kiw1", configSnapshot: { anchor: "US" },
-    configFingerprint: fp("c"), seeds: ["synthetic seed"], markets: NINE_MARKETS }, NOW)).outcome, "found");
+    configFingerprint: fp("c"), seeds: ["seed 0"], markets: NINE_MARKETS }, NOW)).outcome, "found");
   assert.equal((await repo.create({ researchId, ownerId: "other", configSnapshot: { anchor: "US" },
-    configFingerprint: fp("c"), seeds: ["synthetic seed"], markets: NINE_MARKETS }, NOW)).outcome, "conflict");
+    configFingerprint: fp("c"), seeds: ["seed 0"], markets: NINE_MARKETS }, NOW)).outcome, "conflict");
   assert.equal((await repo.getOwned({ researchId, ownerId: "other" })).outcome, "not_found");
   assert.equal((await repo.getOwned({ researchId, ownerId: "owner_kiw1" })).outcome, "found");
+  await db.$disconnect();
 });
 
-test("initialize, lease claim/heartbeat/loss/reclaim, terminal counters", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_leases_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
+test("worker context projections are ownerless and exact (DEC-KI-026)", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_context");
   const researchId = newResearchId();
   await freshResearch(repo, researchId);
-  const initialized = await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion",
-    generation: 1, tasks: expansionTasks(2) }, NOW);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
   assert.equal(initialized.outcome, "created");
-  assert.equal(initialized.stage.expectedCount, 2);
-  assert.equal((await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion",
-    generation: 1, tasks: expansionTasks(2) }, NOW)).outcome, "found");
-  const research = await repo.getOwned({ researchId, ownerId: "owner_kiw1" });
-  assert.equal(research.research.state, "running");
+  assert.deepEqual(Object.keys(initialized.stage).sort(), [
+    "createdAt", "expectedCount", "failedCount", "id", "manifestFingerprint", "manifestProducedAt",
+    "manifestS3Key", "researchId", "skippedCount", "stage", "state", "succeededCount",
+    "terminalCount", "generation"
+  ].sort());
+  assert.ok(!Object.hasOwn(initialized.stage, "aggregationOwner"));
+  assert.ok(!Object.hasOwn(initialized.tasks[0], "leaseOwner"));
+  assert.ok(!Object.hasOwn(initialized.tasks[0], "safeErrorMessage"));
+
+  const worker = await repo.getWorkerResearch({ researchId, generation: 1 });
+  assert.equal(worker.outcome, "found");
+  assert.ok(!Object.hasOwn(worker.research, "ownerId"));
+  assert.equal(worker.research.id, researchId);
+  assert.equal(worker.research.generation, 1);
+  assert.equal((await repo.getWorkerResearch({ researchId, generation: 2 })).outcome, "conflict");
+  assert.equal((await repo.getWorkerResearch({ researchId: newResearchId(), generation: 1 })).outcome, "not_found");
 
   const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
-  const claimToken = newLeaseToken();
-  const delayed = await repo.claim({ taskId, owner: "w", token: claimToken }, NOW);
-  assert.equal(delayed.outcome, "claimed");
-  const competing = await repo.claim({ taskId, owner: "w2", token: newLeaseToken() }, NOW);
-  assert.equal(competing.outcome, "lost");
-  const heartbeat = await repo.heartbeat({ taskId, token: claimToken }, new Date(NOW.getTime() + 20_000));
-  assert.equal(heartbeat.outcome, "claimed");
-  assert.equal((await repo.heartbeat({ taskId, token: newLeaseToken() }, NOW)).outcome, "lost");
-  const stolen = await repo.terminalize({ taskId, token: newLeaseToken(), state: "succeeded" }, NOW);
-  assert.equal(stolen.outcome, "lost");
-  const reclaimToken = newLeaseToken();
-  const reclaimed = await repo.claim({ taskId, owner: "w3", token: reclaimToken }, LATER);
-  assert.equal(reclaimed.outcome, "claimed");
-  assert.equal(reclaimed.task.leaseAttempt, 2);
+  const context = await repo.getTaskContext({ taskId });
+  assert.equal(context.outcome, "found");
+  assert.ok(!Object.hasOwn(context.research, "ownerId"));
+  assert.equal(context.task.id, taskId);
+  assert.equal(context.latestAttempt, null);
+  assert.ok(!Object.hasOwn(context.stage, "aggregationOwner"));
 
+  const stageContext = await repo.getStageContext({ researchId, stage: "expansion", generation: 1 });
+  assert.equal(stageContext.outcome, "found");
+  assert.equal(stageContext.tasks.length, 2);
+  assert.equal(stageContext.tasks[0].itemKey, "0:related");
+  assert.equal(stageContext.tasks[1].itemKey, "0:suggestions");
+  assert.ok(!Object.hasOwn(stageContext.stage, "aggregationOwner"));
+  assert.equal((await repo.getStageContext({ researchId, stage: "expansion", generation: 2 })).outcome, "conflict");
+  assert.equal((await repo.getStageContext({ researchId, stage: "anchor_screen", generation: 1 })).outcome, "not_found");
+  await db.$disconnect();
+});
+
+test("ownerless initialize exact replay, mismatch, and seed/task-set validation", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_init");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId, "owner_kiw1", 2);
+  const tasks = expansionTasksFor(2);
+  const created = await repo.initialize({ researchId, generation: 1, stage: "expansion", tasks }, NOW);
+  assert.equal(created.outcome, "created");
+  assert.equal(created.stage.expectedCount, 4);
+  assert.equal(created.tasks.length, 4);
+  assert.equal((await repo.getOwned({ researchId, ownerId: "owner_kiw1" })).research.state, "running");
+  const replay = await repo.initialize({ researchId, generation: 1, stage: "expansion", tasks }, NOW);
+  assert.equal(replay.outcome, "found");
+  assert.deepEqual(replay.tasks.map((task) => task.itemKey).sort(),
+    ["0:related", "0:suggestions", "1:related", "1:suggestions"]);
+  const changed = tasks.map((task) => task.itemKey === "0:suggestions"
+    ? { ...task, requestFingerprint: fp("changed") } : task);
+  assert.equal((await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: changed }, NOW)).outcome, "conflict");
+  const missing = tasks.slice(0, 3);
+  assert.equal((await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: missing }, NOW)).outcome, "conflict");
+  assert.equal((await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(2) }, new Date(NOW.getTime() + 5_000))).outcome, "found");
+  assert.equal((await repo.initialize({ researchId, generation: 2, stage: "expansion",
+    tasks }, NOW)).outcome, "conflict");
+  const other = newResearchId();
+  assert.equal((await repo.initialize({ researchId: other, generation: 1, stage: "expansion",
+    tasks }, NOW)).outcome, "not_found");
+  await db.$disconnect();
+});
+
+test("claim/heartbeat/loss/reclaim under the token fence", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_leases");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const claimToken = newLeaseToken();
+  const claimed = await repo.claim({ taskId, owner: "w", token: claimToken }, NOW);
+  assert.equal(claimed.outcome, "claimed");
+  assert.equal(claimed.task.leaseToken, claimToken);
+  assert.equal((await repo.claim({ taskId, owner: "w2", token: newLeaseToken() }, NOW)).outcome, "lost");
+  assert.equal((await repo.heartbeat({ taskId, token: claimToken }, new Date(NOW.getTime() + 20_000))).outcome, "claimed");
+  assert.equal((await repo.heartbeat({ taskId, token: newLeaseToken() }, NOW)).outcome, "lost");
+  assert.equal((await repo.terminalize({ taskId, token: newLeaseToken(), state: "succeeded" }, NOW)).outcome, "lost");
+  const reclaimToken = newLeaseToken();
+  assert.equal((await repo.claim({ taskId, owner: "w3", token: reclaimToken }, LATER)).outcome, "claimed");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskRow.leaseAttempt, 2);
   const terminal = await repo.terminalize({ taskId, token: reclaimToken, state: "succeeded",
     artifactS3Key: "runs/x.json", artifactFingerprint: fp("a") }, LATER);
   assert.equal(terminal.outcome, "terminal");
@@ -264,107 +353,158 @@ test("initialize, lease claim/heartbeat/loss/reclaim, terminal counters", { skip
     artifactS3Key: "runs/x.json", artifactFingerprint: fp("a") }, LATER)).outcome, "found");
   assert.equal((await repo.terminalize({ taskId, token: reclaimToken, state: "failed" }, LATER)).outcome,
     "conflict");
+  await db.$disconnect();
+});
+
+test("recordAttempt token fence, derived attempt number, budget, ceiling, retry-not-scheduled, replay", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_attempt");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const stageId = initialized.stage.id;
+  const taskId = keywordTaskId(stageId, "0:suggestions");
   const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
-  assert.equal(taskRow.state, "succeeded");
-  assert.ok(!Object.hasOwn(taskRow, "ownerId"));
-  await db.$disconnect();
-});
 
-test("delayed claim honors nextAttemptAt", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_delay_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
-  const researchId = newResearchId();
-  await freshResearch(repo, researchId);
-  await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion", generation: 1,
-    tasks: [{ itemKey: "0:suggestions", inputFingerprint: fp("i"), endpointKey: "keyword_suggestions",
-      requestFingerprint: fp("r"), nextAttemptAt: new Date(NOW.getTime() + 5_000) }] }, NOW);
-  const stage = await db.keywordResearchStage.findUnique({ where: {
-    id: keywordStageId(researchId, "expansion", 1) } });
-  const taskId = keywordTaskId(stage.id, "0:suggestions");
-  const early = await repo.claim({ taskId, owner: "w", token: newLeaseToken() }, NOW);
-  assert.equal(early.outcome, "delayed");
-  assert.equal(early.retryAt.getTime(), NOW.getTime() + 5_000);
-  assert.equal((await repo.claim({ taskId, owner: "w", token: newLeaseToken() },
-    new Date(NOW.getTime() + 6_000))).outcome, "claimed");
-  await db.$disconnect();
-});
+  const wrongToken = await repo.recordAttempt({ taskId, token: newLeaseToken(),
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(wrongToken.outcome, "lost");
+  assert.equal((await repo.recordAttempt({ taskId, token: newLeaseToken(),
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW)).outcome, "lost");
 
-test("attempt reservation, budget denial, settlement, ambiguity, privacy", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_budget_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
-  const researchId = newResearchId();
-  await freshResearch(repo, researchId);
-  await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion", generation: 1,
-    tasks: expansionTasks(2) }, NOW);
-  const stage = await db.keywordResearchStage.findUnique({ where: {
-    id: keywordStageId(researchId, "expansion", 1) } });
-  const taskId = keywordTaskId(stage.id, "0:suggestions");
   const token = newLeaseToken();
   await repo.claim({ taskId, owner: "w", token }, NOW);
-  const attempt = await repo.recordAttempt({ taskId, attemptNumber: 1,
-    requestFingerprint: fp("r0"), reservationCostUsd: "0.01560000",
+  const created = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
     maxCostPerResearchUsd: "0.02000000" }, NOW);
-  assert.equal(attempt.outcome, "created");
-  assert.equal((await repo.recordAttempt({ taskId, attemptNumber: 1,
-    requestFingerprint: fp("r0"), reservationCostUsd: "0.01560000",
-    maxCostPerResearchUsd: "0.02000000" }, NOW)).outcome, "found");
-  assert.equal((await repo.recordAttempt({ taskId, attemptNumber: 1,
-    requestFingerprint: fp("zz"), reservationCostUsd: "0.01560000",
-    maxCostPerResearchUsd: "0.02000000" }, NOW)).outcome, "conflict");
-  const denied = await repo.recordAttempt({ taskId, attemptNumber: 2,
-    requestFingerprint: fp("r1"), reservationCostUsd: "0.01560000",
+  assert.equal(created.outcome, "created");
+  assert.equal(created.mayCall, true);
+  assert.equal(created.attempt.attemptNumber, 1);
+  assert.equal(created.attempt.reservationCostUsd, "0.01560000");
+
+  const replay = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
     maxCostPerResearchUsd: "0.02000000" }, NOW);
+  assert.equal(replay.outcome, "found");
+  assert.equal(replay.mayCall, false);
+
+  const secondTaskId = keywordTaskId(stageId, "0:related");
+  const secondToken = newLeaseToken();
+  await repo.claim({ taskId: secondTaskId, owner: "w", token: secondToken }, NOW);
+  const denied = await repo.recordAttempt({ taskId: secondTaskId, token: secondToken,
+    requestFingerprint: (await db.keywordResearchTask.findUnique({ where: { id: secondTaskId } })).requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "0.02000000" }, NOW);
   assert.equal(denied.outcome, "conflict");
   assert.equal(denied.code, "KEYWORD_PROVIDER_BUDGET_EXHAUSTED");
-  const secondTaskId = keywordTaskId(stage.id, "1:suggestions");
-  const deniedOtherTask = await repo.recordAttempt({ taskId: secondTaskId, attemptNumber: 1,
-    requestFingerprint: fp("r1"), reservationCostUsd: "0.01560000",
-    maxCostPerResearchUsd: "0.02000000" }, NOW);
-  assert.equal(deniedOtherTask.outcome, "conflict");
 
-  const settled = await repo.settleAttempt({ taskId, attemptNumber: 1, state: "succeeded",
-    providerCostUsd: "0.01200000", resultFingerprint: fp("n") }, NOW);
+  const settled = await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "succeeded",
+    providerCostUsd: "0.01200000", resultFingerprint: fp("n"),
+    cacheEntry: { cacheKey: "kw:suggestions:abc", endpointKey: "keyword_suggestions",
+      contractVersion: 1, normalizedResponse: { keywords: ["a"] }, resultFingerprint: fp("n"),
+      ttlSeconds: 604800 } }, NOW);
   assert.equal(settled.outcome, "terminal");
-  assert.equal((await repo.settleAttempt({ taskId, attemptNumber: 1, state: "succeeded",
-    providerCostUsd: "0.01200000", resultFingerprint: fp("n") }, NOW)).outcome, "found");
-  assert.equal((await repo.settleAttempt({ taskId, attemptNumber: 1, state: "failed" }, NOW)).outcome,
-    "conflict");
-  const afterSettle = await repo.recordAttempt({ taskId: secondTaskId, attemptNumber: 1,
-    requestFingerprint: fp("r1"), reservationCostUsd: "0.00790000",
-    maxCostPerResearchUsd: "0.02000000" }, NOW);
+
+  const afterSettle = await repo.recordAttempt({ taskId: secondTaskId, token: secondToken,
+    requestFingerprint: (await db.keywordResearchTask.findUnique({ where: { id: secondTaskId } })).requestFingerprint,
+    reservationCostUsd: "0.00790000", maxCostPerResearchUsd: "0.02000000" }, NOW);
   assert.equal(afterSettle.outcome, "created");
 
-  const ambiguous = await repo.settleAttempt({ taskId: secondTaskId, attemptNumber: 1,
-    state: "ambiguous", safeErrorCode: "KEYWORD_PROVIDER_AMBIGUOUS" }, NOW);
-  assert.equal(ambiguous.outcome, "terminal");
-  const ambiguousHeld = await repo.recordAttempt({ taskId, attemptNumber: 2,
-    requestFingerprint: fp("r2"), reservationCostUsd: "0.00020000",
-    maxCostPerResearchUsd: "0.02000000" }, NOW);
-  assert.equal(ambiguousHeld.outcome, "conflict");
-  assert.equal(ambiguousHeld.code, "KEYWORD_PROVIDER_BUDGET_EXHAUSTED");
+  await db.keywordResearchTask.update({ where: { id: secondTaskId },
+    data: { attemptCount: 5 } });
+  await db.keywordResearchProviderAttempt.create({ data: {
+    id: keywordTaskId(stageId, "x"), taskId: secondTaskId, attemptNumber: 5,
+    state: "failed", requestFingerprint: fp("a5"), reservationCostUsd: "0.01560000",
+    providerCostUsd: "0.01200000", plannedAt: NOW, completedAt: NOW, createdAt: NOW, updatedAt: NOW
+  } });
+  const ceiling = await repo.recordAttempt({ taskId: secondTaskId, token: secondToken,
+    requestFingerprint: (await db.keywordResearchTask.findUnique({ where: { id: secondTaskId } })).requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(ceiling.outcome, "conflict");
+  assert.equal(ceiling.code, "KEYWORD_PROVIDER_RETRY_EXHAUSTED");
 
-  const attemptRow = await db.keywordResearchProviderAttempt.findUnique({ where: {
-    taskId_attemptNumber: { taskId, attemptNumber: 1 } } });
-  assert.ok(!Object.hasOwn(attemptRow, "ownerId"));
+  await db.keywordResearchProviderAttempt.deleteMany({ where: { taskId: secondTaskId, attemptNumber: { gte: 2 } } });
+  await db.keywordResearchProviderAttempt.update({
+    where: { taskId_attemptNumber: { taskId: secondTaskId, attemptNumber: 1 } },
+    data: { state: "failed", providerCostUsd: "0.01200000", completedAt: NOW }
+  });
+  await db.keywordResearchTask.update({ where: { id: secondTaskId }, data: { attemptCount: 1 } });
+  const retryNotScheduled = await repo.recordAttempt({ taskId: secondTaskId, token: secondToken,
+    requestFingerprint: (await db.keywordResearchTask.findUnique({ where: { id: secondTaskId } })).requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" },
+  new Date(NOW.getTime() + 5_000));
+  assert.equal(retryNotScheduled.outcome, "conflict");
+  assert.equal(retryNotScheduled.code, "KEYWORD_PROVIDER_RETRY_NOT_SCHEDULED");
   await db.$disconnect();
 });
 
-test("aggregation lease competition and manifest/shortlist/stage completion", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_aggr_${Date.now().toString(36)}`;
+test("settleAttempt atomic cost settlement plus normalized cache even after fence loss", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_settle");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const created = await repo.recordAttempt({ taskId, token, requestFingerprint: taskRow.requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(created.outcome, "created");
+
+  const cacheEntry = { cacheKey: "kw:suggestions:abc", endpointKey: "keyword_suggestions",
+    contractVersion: 1, normalizedResponse: { keywords: ["alpha"] }, resultFingerprint: fp("n"),
+    ttlSeconds: 604800 };
+  const settled = await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "succeeded",
+    providerCostUsd: "0.01200000", resultFingerprint: fp("n"), cacheEntry }, NOW);
+  assert.equal(settled.outcome, "terminal");
+  assert.equal(settled.fenceActive, true);
+  const attemptRow = await db.keywordResearchProviderAttempt.findUnique({
+    where: { taskId_attemptNumber: { taskId, attemptNumber: 1 } } });
+  assert.equal(attemptRow.state, "succeeded");
+  assert.equal(Number(attemptRow.providerCostUsd).toFixed(8), "0.01200000");
+  const cacheRow = await db.keywordResearchCache.findUnique({
+    where: { requestFingerprint: taskRow.requestFingerprint } });
+  assert.ok(cacheRow);
+  assert.equal(cacheRow.contractVersion, 1);
+  assert.equal(cacheRow.expiresAt.getTime(), NOW.getTime() + 604800 * 1000);
+
+  const replay = await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "succeeded",
+    providerCostUsd: "0.01200000", resultFingerprint: fp("n"), cacheEntry }, NOW);
+  assert.equal(replay.outcome, "found");
+  const conflict = await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "succeeded",
+    providerCostUsd: "0.01200000", resultFingerprint: fp("other"), cacheEntry }, NOW);
+  assert.equal(conflict.outcome, "conflict");
+
+  const staleToken = newLeaseToken();
+  const lostSettle = await repo.settleAttempt({ taskId, token: staleToken, attemptNumber: 1,
+    state: "succeeded", providerCostUsd: "0.01200000", resultFingerprint: fp("n"), cacheEntry },
+  new Date(NOW.getTime() + 61_000));
+  assert.equal(lostSettle.outcome, "found");
+  assert.equal(lostSettle.fenceActive, false);
+
+  const failTaskId = keywordTaskId(initialized.stage.id, "0:related");
+  const failToken = newLeaseToken();
+  await repo.claim({ taskId: failTaskId, owner: "w", token: failToken }, NOW);
+  const failRow = await db.keywordResearchTask.findUnique({ where: { id: failTaskId } });
+  await repo.recordAttempt({ taskId: failTaskId, token: failToken,
+    requestFingerprint: failRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  const failed = await repo.settleAttempt({ taskId: failTaskId, token: failToken, attemptNumber: 1,
+    state: "failed", providerCostUsd: "0.01200000", safeErrorCode: "KEYWORD_PROVIDER_TASK_FAILED",
+    cacheEntry: null }, NOW);
+  assert.equal(failed.outcome, "terminal");
+  const failedAttempt = await db.keywordResearchProviderAttempt.findUnique({
+    where: { taskId_attemptNumber: { taskId: failTaskId, attemptNumber: 1 } } });
+  assert.equal(failedAttempt.safeErrorCode, "KEYWORD_PROVIDER_TASK_FAILED");
+  assert.equal(failedAttempt.ambiguousAfter, null);
+  assert.ok(!Object.hasOwn(failedAttempt, "ownerId"));
+  await db.$disconnect();
+});
+
+test("cache settlement is all-or-none: injected cache write rolls back attempt settlement", { skip: !enabled }, async (t) => {
+  const schema = `kir1_settle_rollback_${Date.now().toString(36)}`;
   const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
   t.after(async () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
@@ -372,58 +512,308 @@ test("aggregation lease competition and manifest/shortlist/stage completion", { 
   });
   deployPrismaMigrations(scopedUrl);
   const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
+  const repo = new PrismaKeywordResearchRepository(
+    clientWithInjectedFailure(db, (path) => path === "keywordResearchCache.create")
+  );
   const researchId = newResearchId();
   await freshResearch(repo, researchId);
-  await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion", generation: 1,
-    tasks: expansionTasks(2) }, NOW);
-  const stageId = keywordStageId(researchId, "expansion", 1);
-  const firstToken = newLeaseToken();
-  const firstTaskId = keywordTaskId(stageId, "0:suggestions");
-  await repo.claim({ taskId: firstTaskId, owner: "w", token: firstToken }, NOW);
-  await repo.terminalize({ taskId: firstTaskId, token: firstToken, state: "succeeded",
-    artifactS3Key: "runs/x.json", artifactFingerprint: fp("0") }, NOW);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  await repo.recordAttempt({ taskId, token, requestFingerprint: taskRow.requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  const cacheEntry = { cacheKey: "kw:suggestions:abc", endpointKey: "keyword_suggestions",
+    contractVersion: 1, normalizedResponse: { keywords: ["alpha"] }, resultFingerprint: fp("n"),
+    ttlSeconds: 604800 };
+  await assert.rejects(() => repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "succeeded",
+    providerCostUsd: "0.01200000", resultFingerprint: fp("n"), cacheEntry }, NOW),
+  /injected:keywordResearchCache.create/);
+  const attemptRow = await db.keywordResearchProviderAttempt.findUnique({
+    where: { taskId_attemptNumber: { taskId, attemptNumber: 1 } } });
+  assert.equal(attemptRow.state, "planned");
+  const cacheRow = await db.keywordResearchCache.findUnique({
+    where: { requestFingerprint: taskRow.requestFingerprint } });
+  assert.equal(cacheRow, null);
+  await db.$disconnect();
+});
+
+test("markAttemptAmbiguous fails task/stage/research once, holds reservation, and never authorizes a second call", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_ambig");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const created = await repo.recordAttempt({ taskId, token, requestFingerprint: taskRow.requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(created.outcome, "created");
+
+  const marked = await repo.markAttemptAmbiguous({ taskId, attemptNumber: 1,
+    requestFingerprint: taskRow.requestFingerprint, safeErrorCode: "KEYWORD_PROVIDER_AMBIGUOUS" },
+  new Date(NOW.getTime() + 61_000));
+  assert.equal(marked.outcome, "terminal");
+  const attemptRow = await db.keywordResearchProviderAttempt.findUnique({
+    where: { taskId_attemptNumber: { taskId, attemptNumber: 1 } } });
+  assert.equal(attemptRow.state, "ambiguous");
+  assert.equal(attemptRow.providerCostUsd, null);
+  assert.equal(Number(attemptRow.reservationCostUsd).toFixed(8), "0.01560000");
+  const taskAfter = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskAfter.state, "failed");
+  assert.equal(taskAfter.safeErrorCode, "KEYWORD_PROVIDER_AMBIGUOUS");
+  assert.equal(taskAfter.leaseToken, null);
+  const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: initialized.stage.id } });
+  assert.equal(stageAfter.state, "failed");
+  assert.equal(stageAfter.failedCount, 1);
+  assert.equal(stageAfter.terminalCount, 1);
+  assert.equal(stageAfter.aggregationLeaseToken, null);
+  const researchAfter = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(researchAfter.state, "failed");
+
+  assert.equal((await repo.markAttemptAmbiguous({ taskId, attemptNumber: 1,
+    requestFingerprint: taskRow.requestFingerprint, safeErrorCode: "KEYWORD_PROVIDER_AMBIGUOUS" }, NOW)).outcome,
+  "found");
+  assert.equal((await repo.markAttemptAmbiguous({ taskId, attemptNumber: 1,
+    requestFingerprint: fp("wrong"), safeErrorCode: "KEYWORD_PROVIDER_AMBIGUOUS" }, NOW)).outcome, "conflict");
+
+  const second = await repo.recordAttempt({ taskId, token: newLeaseToken(),
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, new Date(NOW.getTime() + 61_000));
+  assert.equal(second.outcome, "lost");
+  assert.notEqual(second.mayCall, true);
+  await db.$disconnect();
+});
+
+test("deferTask throttle delay consumes no attempt and replays idempotently", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_defer");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const retryAt = new Date(NOW.getTime() + 5_000);
+  const deferred = await repo.deferTask({ taskId, token, nextAttemptAt: retryAt,
+    safeErrorCode: "KEYWORD_PROVIDER_THROTTLED" }, NOW);
+  assert.equal(deferred.outcome, "delayed");
+  assert.equal(deferred.retryAt.getTime(), retryAt.getTime());
+  const taskAfter = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskAfter.state, "pending");
+  assert.equal(taskAfter.attemptCount, 0);
+  assert.equal(taskAfter.nextAttemptAt.getTime(), retryAt.getTime());
+  assert.equal(taskAfter.leaseToken, null);
+  assert.equal(taskAfter.leaseOwner, null);
+  assert.equal(taskAfter.leaseAcquiredAt, null);
+  assert.equal(taskAfter.leaseExpiresAt, null);
+  assert.equal(taskAfter.safeErrorCode, "KEYWORD_PROVIDER_THROTTLED");
+  const replay = await repo.deferTask({ taskId, token, nextAttemptAt: retryAt,
+    safeErrorCode: "KEYWORD_PROVIDER_THROTTLED" }, NOW);
+  assert.equal(replay.outcome, "delayed");
+  assert.equal(replay.retryAt.getTime(), retryAt.getTime());
+  assert.equal((await repo.claim({ taskId, owner: "w", token: newLeaseToken() }, NOW)).outcome, "delayed");
+  assert.equal((await repo.claim({ taskId, owner: "w", token: newLeaseToken() },
+    new Date(NOW.getTime() + 6_000))).outcome, "claimed");
+
+  const secondTaskId = keywordTaskId(initialized.stage.id, "0:related");
+  const secondToken = newLeaseToken();
+  await repo.claim({ taskId: secondTaskId, owner: "w", token: secondToken }, NOW);
+  const secondRow = await db.keywordResearchTask.findUnique({ where: { id: secondTaskId } });
+  await repo.recordAttempt({ taskId: secondTaskId, token: secondToken,
+    requestFingerprint: secondRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  const conflict = await repo.deferTask({ taskId: secondTaskId, token: secondToken,
+    nextAttemptAt: new Date(NOW.getTime() + 5_000), safeErrorCode: "KEYWORD_PROVIDER_THROTTLED" }, NOW);
+  assert.equal(conflict.outcome, "conflict");
+  await db.$disconnect();
+});
+
+test("scheduleRetry crash/reclaim/schedule/due sequence derives retryAt from DEC-KI-007", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_retry");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const attempt = await repo.recordAttempt({ taskId, token, requestFingerprint: taskRow.requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(attempt.outcome, "created");
+  const settled = await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "failed",
+    providerCostUsd: "0.01200000", safeErrorCode: "KEYWORD_PROVIDER_RETRYABLE", cacheEntry: null }, NOW);
+  assert.equal(settled.outcome, "terminal");
+  assert.equal(settled.fenceActive, true);
+
+  const recovered = await repo.recover(LATER);
+  assert.ok(recovered.taskDispatches.some(({ taskId: id }) => id === taskId));
+  const reclaimToken = newLeaseToken();
+  assert.equal((await repo.claim({ taskId, owner: "w", token: reclaimToken }, LATER)).outcome, "claimed");
+  const premature = await repo.recordAttempt({ taskId, token: reclaimToken,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, LATER);
+  assert.equal(premature.outcome, "conflict");
+  assert.equal(premature.code, "KEYWORD_PROVIDER_RETRY_NOT_SCHEDULED");
+
+  const scheduled = await repo.scheduleRetry({ taskId, token: reclaimToken, attemptNumber: 1 }, LATER);
+  assert.equal(scheduled.outcome, "delayed");
+  assert.ok(scheduled.retryAt instanceof Date);
+  const taskAfter = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskAfter.state, "pending");
+  assert.equal(taskAfter.nextAttemptAt.getTime(), scheduled.retryAt.getTime());
+  assert.equal(taskAfter.leaseToken, null);
+  assert.equal(taskAfter.attemptCount, 1);
+  assert.equal((await repo.scheduleRetry({ taskId, token: reclaimToken, attemptNumber: 1 }, LATER)).outcome,
+    "delayed");
+  const earlyClaim = await repo.claim({ taskId, owner: "w", token: newLeaseToken() },
+    new Date(scheduled.retryAt.getTime() - 1_000));
+  assert.equal(earlyClaim.outcome, "delayed");
+  const dueToken = newLeaseToken();
+  assert.equal((await repo.claim({ taskId, owner: "w", token: dueToken }, scheduled.retryAt)).outcome, "claimed");
+  const staleAttempt = await repo.recordAttempt({ taskId, token: newLeaseToken(),
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, scheduled.retryAt);
+  assert.equal(staleAttempt.outcome, "lost");
+  const retried2 = await repo.recordAttempt({ taskId, token: dueToken,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, scheduled.retryAt);
+  assert.equal(retried2.outcome, "created");
+  assert.equal(retried2.attempt.attemptNumber, 2);
+
+  await repo.settleAttempt({ taskId, token: dueToken, attemptNumber: 2, state: "failed",
+    providerCostUsd: "0.01200000", safeErrorCode: "KEYWORD_PROVIDER_RETRYABLE", cacheEntry: null },
+  scheduled.retryAt);
+  await db.keywordResearchProviderAttempt.create({ data: {
+    id: "kra_ceiling_001", taskId, attemptNumber: 5,
+    state: "failed", requestFingerprint: fp("a5"), reservationCostUsd: "0.01560000",
+    providerCostUsd: "0.01200000", plannedAt: NOW, completedAt: NOW, createdAt: NOW, updatedAt: NOW
+  } });
+  await db.keywordResearchTask.update({ where: { id: taskId }, data: { attemptCount: 5 } });
+  const ceilingSchedule = await repo.scheduleRetry({ taskId, token: dueToken, attemptNumber: 5 },
+    scheduled.retryAt);
+  assert.equal(ceilingSchedule.outcome, "conflict");
+  assert.equal(ceilingSchedule.code, "KEYWORD_PROVIDER_RETRY_EXHAUSTED");
+  await db.$disconnect();
+});
+
+test("claimAggregator readiness gating, competing tokens, expiry reclaim, and zero-count advancement", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_aggregator");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const stageId = initialized.stage.id;
+  const early = await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
+    owner: "a1", token: newLeaseToken() }, NOW);
+  assert.equal(early.outcome, "not_ready");
+  const stageBefore = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  assert.equal(stageBefore.state, "collecting");
+  assert.equal(stageBefore.aggregationLeaseToken, null);
+
+  await completeStageTasks(db, repo, stageId, initialized.tasks.map((task) => task.itemKey));
   const tokenA = newLeaseToken();
   assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
     owner: "a1", token: tokenA }, NOW)).outcome, "claimed");
   assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
     owner: "a2", token: newLeaseToken() }, NOW)).outcome, "lost");
-  const premature = await repo.publishStageCompletion({ researchId, stage: "expansion",
-    generation: 1, token: tokenA, nextStageTasks: [{ itemKey: "anchor", inputFingerprint: fp("a"),
-      endpointKey: "keyword_overview", requestFingerprint: fp("ra") }] }, NOW);
-  assert.equal(premature.outcome, "conflict");
-  const secondToken = newLeaseToken();
-  const secondTaskId = keywordTaskId(stageId, "1:suggestions");
-  await repo.claim({ taskId: secondTaskId, owner: "w", token: secondToken }, NOW);
-  await repo.terminalize({ taskId: secondTaskId, token: secondToken, state: "succeeded",
-    artifactS3Key: "runs/y.json", artifactFingerprint: fp("1") }, NOW);
-  assert.equal((await repo.publishCandidateManifest({ researchId, stage: "expansion", generation: 1,
-    token: newLeaseToken(), manifestS3Key: "runs/m.json", manifestFingerprint: fp("m") }, NOW)).outcome,
-    "lost");
-  const manifest = await repo.publishCandidateManifest({ researchId, stage: "expansion", generation: 1,
-    token: tokenA, manifestS3Key: "runs/m.json", manifestFingerprint: fp("m") }, NOW);
-  assert.equal(manifest.outcome, "terminal");
-  assert.equal(manifest.stage.state, "aggregating");
-  assert.equal((await repo.publishCandidateManifest({ researchId, stage: "expansion", generation: 1,
-    token: tokenA, manifestS3Key: "runs/m.json", manifestFingerprint: fp("m") }, NOW)).outcome, "found");
-  assert.equal((await repo.publishCandidateManifest({ researchId, stage: "expansion", generation: 1,
-    token: tokenA, manifestS3Key: "runs/other.json", manifestFingerprint: fp("m") }, NOW)).outcome,
-    "conflict");
-  const completed = await repo.publishStageCompletion({ researchId, stage: "expansion",
-    generation: 1, token: tokenA, nextStageTasks: [{ itemKey: "anchor", inputFingerprint: fp("a"),
-      endpointKey: "keyword_overview", requestFingerprint: fp("ra") }] }, NOW);
-  assert.equal(completed.outcome, "terminal");
-  assert.equal(completed.stage.state, "completed");
-  const anchorStage = await db.keywordResearchStage.findUnique({ where: {
-    id: keywordStageId(researchId, "anchor_screen", 1) } });
-  assert.ok(anchorStage, "anchor stage created");
-  assert.equal(anchorStage.expectedCount, 1);
-  assert.equal(anchorStage.state, "collecting");
+  assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
+    owner: "a1", token: tokenA }, NOW)).outcome, "found");
+  const expiredToken = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
+    owner: "a3", token: expiredToken }, LATER)).outcome, "claimed");
+  const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  assert.equal(stageAfter.aggregationLeaseToken, expiredToken);
+  assert.equal(stageAfter.state, "aggregating");
+
+  const research2 = newResearchId();
+  await freshResearch(repo, research2, "owner_kiw1", 2);
+  const init2 = await repo.initialize({ researchId: research2, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(2) }, NOW);
+  await completeStageTasks(db, repo, init2.stage.id, init2.tasks.map((task) => task.itemKey));
+  await db.keywordResearchStage.update({ where: { id: init2.stage.id },
+    data: { state: "ready", terminalCount: 1 } });
+  const corrupt = await repo.claimAggregator({ researchId: research2, stage: "expansion", generation: 1,
+    owner: "a", token: newLeaseToken() }, NOW);
+  assert.equal(corrupt.outcome, "conflict");
+
+  const research3 = newResearchId();
+  await freshResearch(repo, research3, "owner_kiw1", 1);
+  const zeroStage = await db.keywordResearchStage.create({ data: {
+    id: keywordStageId(research3, "expansion", 1), researchId: research3, stage: "expansion",
+    generation: 1, expectedCount: 0, state: "ready", createdAt: NOW, updatedAt: NOW
+  } });
+  const zeroClaim = await repo.claimAggregator({ researchId: research3, stage: "expansion", generation: 1,
+    owner: "a", token: newLeaseToken() }, NOW);
+  assert.equal(zeroClaim.outcome, "claimed");
+  assert.equal(zeroClaim.stage.id, zeroStage.id);
   await db.$disconnect();
 });
 
-test("full flow publishes result, selection CAS, run handoff idempotency", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_flow_${Date.now().toString(36)}`;
+test("publishCandidateManifest requires the exact US:0 task, is atomic, and replays", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_candidate");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const stageId = initialized.stage.id;
+  await completeStageTasks(db, repo, stageId, initialized.tasks.map((task) => task.itemKey));
+  const wrongSet = await repo.publishCandidateManifest({ researchId, generation: 1, token: newLeaseToken(),
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"),
+    nextStageTasks: [{ itemKey: "US:1", inputFingerprint: fp("i"), endpointKey: "keyword_overview",
+      requestFingerprint: fp("r") }] }, NOW);
+  assert.equal(wrongSet.outcome, "conflict");
+
+  const token = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId, stage: "expansion", generation: 1,
+    owner: "a", token }, NOW)).outcome, "claimed");
+  const expansionBefore = await db.keywordResearchStage.findUnique({ where: { id: stageId } });
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const published = await repo.publishCandidateManifest({ researchId, generation: 1, token,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(published.outcome, "terminal");
+  assert.equal(published.stage.state, "completed");
+  assert.equal(published.stage.manifestProducedAt.getTime(), expansionBefore.createdAt.getTime());
+  assert.equal(published.nextStage.stage, "anchor_screen");
+  assert.equal(published.tasks.length, 1);
+  assert.equal(published.tasks[0].itemKey, "US:0");
+
+  const replay = await repo.publishCandidateManifest({ researchId, generation: 1, token,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(replay.outcome, "found");
+  assert.deepEqual(replay.tasks.map((task) => task.itemKey), ["US:0"]);
+  const mismatch = await repo.publishCandidateManifest({ researchId, generation: 1, token,
+    manifestS3Key: "runs/other.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(mismatch.outcome, "conflict");
+
+  const research2 = newResearchId();
+  await freshResearch(repo, research2, "owner_kiw1", 1);
+  const init2 = await repo.initialize({ researchId: research2, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, init2.stage.id, init2.tasks.map((task) => task.itemKey));
+  const agg2 = newLeaseToken();
+  await repo.claimAggregator({ researchId: research2, stage: "expansion", generation: 1,
+    owner: "a", token: agg2 }, NOW);
+  const stale = await repo.publishCandidateManifest({ researchId: research2, generation: 1,
+    token: newLeaseToken(), manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"),
+    nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(stale.outcome, "lost");
+  const expStage2 = await db.keywordResearchStage.findUnique({ where: { id: init2.stage.id } });
+  assert.equal(expStage2.manifestS3Key, null);
+  assert.equal(expStage2.state, "aggregating");
+  const anchor2 = await db.keywordResearchStage.findUnique({ where: { id: keywordStageId(research2, "anchor_screen", 1) } });
+  assert.equal(anchor2, null);
+  await db.$disconnect();
+});
+
+test("publishCandidateManifest rollback: injected anchor-stage failure leaves expansion wholly unchanged", { skip: !enabled }, async (t) => {
+  const schema = `kir1_candidate_rollback_${Date.now().toString(36)}`;
   const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
   t.after(async () => {
     await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
@@ -431,37 +821,343 @@ test("full flow publishes result, selection CAS, run handoff idempotency", { ski
   });
   deployPrismaMigrations(scopedUrl);
   const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
+  const repo = new PrismaKeywordResearchRepository(
+    clientWithInjectedFailure(db, (path, args) =>
+      path === "keywordResearchStage.create" && args[0]?.data?.stage === "anchor_screen")
+  );
   const researchId = newResearchId();
-  await completeResearchFlow(db, repo, researchId, "owner_kiw1");
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const token = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  await assert.rejects(() => repo.publishCandidateManifest({ researchId, generation: 1, token,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW),
+  /injected:keywordResearchStage.create/);
+  const expStage = await db.keywordResearchStage.findUnique({ where: { id: initialized.stage.id } });
+  assert.equal(expStage.manifestS3Key, null);
+  assert.equal(expStage.manifestFingerprint, null);
+  assert.equal(expStage.state, "aggregating");
+  const anchor = await db.keywordResearchStage.findUnique({ where: { id: keywordStageId(researchId, "anchor_screen", 1) } });
+  assert.equal(anchor, null);
+  await db.$disconnect();
+});
 
-  assert.equal((await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 0,
-    items: [{ itemId: selectionItemId("calculated", "synthetic seed") }] }, NOW)).outcome, "conflict");
-  const published = await repo.publishResearchResult({ researchId, result: { summary: {} },
-    resultFingerprint: fp("z") }, NOW);
+test("publishShortlist requires the exact eight remaining-market tasks, is atomic, and replays", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_shortlist");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(candidate.outcome, "terminal");
+  const anchorStageId = candidate.nextStage.id;
+  await completeStageTasks(db, repo, anchorStageId, ["US:0"]);
+  const anchorBefore = await db.keywordResearchStage.findUnique({ where: { id: anchorStageId } });
+
+  const wrongSet = await repo.publishShortlist({ researchId, generation: 1, token: newLeaseToken(),
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor().slice(0, 7) },
+  NOW);
+  assert.equal(wrongSet.outcome, "conflict");
+
+  const ancAgg = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1,
+    owner: "a", token: ancAgg }, NOW)).outcome, "claimed");
+  const marketTasks = marketTasksFor();
+  const shortlist = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks }, NOW);
+  assert.equal(shortlist.outcome, "terminal");
+  assert.equal(shortlist.stage.state, "completed");
+  assert.equal(shortlist.stage.manifestProducedAt.getTime(), anchorBefore.createdAt.getTime());
+  assert.equal(shortlist.nextStage.stage, "market_overview");
+  assert.deepEqual(shortlist.tasks.map((task) => task.itemKey),
+    [...["GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"].map((code) => `${code}:0`)].sort());
+  const replay = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks }, NOW);
+  assert.equal(replay.outcome, "found");
+  const mismatch = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/other.json", manifestFingerprint: fp("s"), marketTasks }, NOW);
+  assert.equal(mismatch.outcome, "conflict");
+  await db.$disconnect();
+});
+
+test("publishShortlist rollback: injected market-task failure leaves anchor wholly unchanged", { skip: !enabled }, async (t) => {
+  const schema = `kir1_shortlist_rollback_${Date.now().toString(36)}`;
+  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
+  t.after(async () => {
+    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.$disconnect();
+  });
+  deployPrismaMigrations(scopedUrl);
+  const db = createPrismaClient(scopedUrl);
+  const repo = new PrismaKeywordResearchRepository(
+    clientWithInjectedFailure(db, (path, args) =>
+      path === "keywordResearchTask.createMany" && Array.isArray(args[0]?.data) &&
+      args[0].data.length === 8 && args[0].data[0]?.itemKey === "GB:0")
+  );
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(candidate.outcome, "terminal");
+  const anchorStageId = candidate.nextStage.id;
+  await completeStageTasks(db, repo, anchorStageId, ["US:0"]);
+  const ancAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token: ancAgg }, NOW);
+  await assert.rejects(() => repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() }, NOW),
+  /injected:keywordResearchTask.createMany/);
+  const anchorAfter = await db.keywordResearchStage.findUnique({ where: { id: anchorStageId } });
+  assert.equal(anchorAfter.manifestS3Key, null);
+  assert.equal(anchorAfter.state, "aggregating");
+  const market = await db.keywordResearchStage.findUnique({ where: { id: keywordStageId(researchId, "market_overview", 1) } });
+  assert.equal(market, null);
+  await db.$disconnect();
+});
+
+test("publishResearchResult requires completed stages, deep-equal W2 default selection, and publishes atomically with revision one", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_result");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(candidate.outcome, "terminal");
+  await completeStageTasks(db, repo, candidate.nextStage.id, ["US:0"]);
+  const ancAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token: ancAgg }, NOW);
+  const shortlist = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() }, NOW);
+  assert.equal(shortlist.outcome, "terminal");
+  await completeStageTasks(db, repo, shortlist.nextStage.id, shortlist.tasks.map((task) => task.itemKey));
+
+  const mktAgg = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId, stage: "market_overview", generation: 1,
+    owner: "a", token: mktAgg }, NOW)).outcome, "claimed");
+  const marketBefore = await db.keywordResearchStage.findUnique({ where: { id: shortlist.nextStage.id } });
+
+  const keywords = [makeKeywordRow("alpha keyword"), makeKeywordRow("beta keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+
+  const premature = await repo.publishResearchResult({ researchId, generation: 1, token: newLeaseToken(),
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
+  assert.equal(premature.outcome, "lost");
+
+  const altered = selectionItems.map((item, index) => index === 0
+    ? { ...item, itemId: selectionItemId("calculated", "different") } : item);
+  const rejected = await repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems: altered }, NOW);
+  assert.equal(rejected.outcome, "conflict");
+
+  const published = await repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
   assert.equal(published.outcome, "terminal");
-  assert.equal((await repo.publishResearchResult({ researchId, result: { summary: {} },
-    resultFingerprint: fp("z") }, NOW)).outcome, "found");
-  assert.equal((await repo.publishResearchResult({ researchId, result: { summary: { other: true } },
-    resultFingerprint: fp("y") }, NOW)).outcome, "conflict");
-  const completed = await repo.getOwned({ researchId, ownerId: "owner_kiw1" });
-  assert.equal(completed.research.state, "completed");
-  const selection = await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 0,
-    items: [{ itemId: selectionItemId("calculated", "synthetic seed") }] }, NOW);
-  assert.equal(selection.outcome, "created");
-  assert.equal(selection.selectionRevision, 1);
-  assert.equal((await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 0,
-    items: [] }, NOW)).outcome, "conflict");
-  assert.equal((await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 1,
-    items: [] }, NOW)).outcome, "created");
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(research.state, "completed");
+  assert.equal(research.resultFingerprint, fp("rf"));
+  assert.equal(research.selectionRevision, 1);
+  assert.deepEqual(research.selection.items, selectionItems);
+  const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: shortlist.nextStage.id } });
+  assert.equal(marketAfter.state, "completed");
+  assert.equal(marketAfter.manifestS3Key, "runs/final.json");
+  assert.equal(marketAfter.manifestProducedAt.getTime(), marketBefore.createdAt.getTime());
+  const expansionStage = await db.keywordResearchStage.findUnique({
+    where: { id: keywordStageId(researchId, "expansion", 1) } });
+  assert.equal(expansionStage.state, "completed");
+  const anchorStage = await db.keywordResearchStage.findUnique({
+    where: { id: keywordStageId(researchId, "anchor_screen", 1) } });
+  assert.equal(anchorStage.state, "completed");
 
-  const handoffInput = { researchId, ownerId: "owner_kiw1", expectedSelectionRevision: 2,
-    clientRequestId: "client-request-kw-0001", selectionFingerprint: fp("h"), runId: "run_kiw1_handoff_0001",
-    items: [{ itemId: selectionItemId("calculated", "synthetic seed"), keyword: "synthetic seed" }] };
+  const replay = await repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
+  assert.equal(replay.outcome, "found");
+  const resultMismatch = await repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("other"), selectionItems }, NOW);
+  assert.equal(resultMismatch.outcome, "conflict");
+
+  const saved = await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 1,
+    items: selectionItems }, NOW);
+  assert.equal(saved.outcome, "created");
+  assert.equal(saved.selectionRevision, 2);
+  await db.$disconnect();
+});
+
+test("publishResearchResult rollback: injected research-completion failure leaves result, selection, manifest, and research unchanged", { skip: !enabled }, async (t) => {
+  const schema = `kir1_result_rollback_${Date.now().toString(36)}`;
+  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
+  t.after(async () => {
+    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.$disconnect();
+  });
+  deployPrismaMigrations(scopedUrl);
+  const db = createPrismaClient(scopedUrl);
+  const repo = new PrismaKeywordResearchRepository(
+    clientWithInjectedFailure(db, (path, args) =>
+      path === "keywordResearch.updateMany" && args[0]?.data?.state === "completed" &&
+      args[0]?.data?.resultFingerprint !== undefined)
+  );
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  await completeStageTasks(db, repo, candidate.nextStage.id, ["US:0"]);
+  const ancAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token: ancAgg }, NOW);
+  const shortlist = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() }, NOW);
+  await completeStageTasks(db, repo, shortlist.nextStage.id, shortlist.tasks.map((task) => task.itemKey));
+  const mktAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "market_overview", generation: 1, owner: "a", token: mktAgg }, NOW);
+  const keywords = [makeKeywordRow("alpha keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+  await assert.rejects(() => repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW),
+  /injected:keywordResearch.updateMany/);
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(research.state, "running");
+  assert.equal(research.result, null);
+  assert.equal(research.resultFingerprint, null);
+  assert.equal(research.selection, null);
+  assert.equal(research.selectionRevision, 0);
+  const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: shortlist.nextStage.id } });
+  assert.equal(marketAfter.state, "aggregating");
+  assert.equal(marketAfter.manifestS3Key, null);
+  await db.$disconnect();
+});
+
+test("recover projects initialize/task/check messages with deterministic ordering and fingerprints", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_recover");
+  const queuedId = newResearchId();
+  await freshResearch(repo, queuedId, "owner_kiw1", 1);
+
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId, "owner_kiw1", 2);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(2) }, NOW);
+  const stageId = initialized.stage.id;
+  const claimedTaskId = keywordTaskId(stageId, "0:suggestions");
+  await repo.claim({ taskId: claimedTaskId, owner: "w", token: newLeaseToken() }, NOW);
+  await completeStageTasks(db, repo, stageId, ["0:related", "1:suggestions", "1:related"]);
+  await db.keywordResearchStage.update({ where: { id: stageId }, data: { state: "ready" } });
+  const staleAggStageId = keywordStageId(queuedId, "anchor_screen", 1);
+  await db.keywordResearchStage.create({ data: {
+    id: staleAggStageId, researchId: queuedId, stage: "anchor_screen", generation: 1,
+    expectedCount: 1, state: "aggregating",
+    aggregationLeaseExpiresAt: new Date(NOW.getTime() - 1_000),
+    createdAt: NOW, updatedAt: NOW
+  } });
+
+  const empty = await repo.recover(NOW);
+  assert.ok(empty.initializations.some(({ researchId: id }) => id === queuedId));
+  assert.equal(empty.taskDispatches.filter(({ taskId }) => taskId === claimedTaskId).length, 0);
+  assert.ok(empty.aggregateChecks.some(({ stageId: id }) => id === stageId));
+  assert.ok(empty.aggregateChecks.some(({ stageId: id }) => id === staleAggStageId));
+
+  const recovered = await repo.recover(LATER);
+  assert.ok(recovered.initializations.some(({ researchId: id }) => id === queuedId));
+  assert.ok(recovered.taskDispatches.some(({ taskId }) => taskId === claimedTaskId));
+  const dispatch = recovered.taskDispatches.find(({ taskId }) => taskId === claimedTaskId);
+  assert.equal(dispatch.researchId, researchId);
+  assert.equal(dispatch.generation, 1);
+  assert.equal(dispatch.stage, "expansion");
+  assert.equal(dispatch.stageId, stageId);
+  assert.equal(dispatch.itemKey, "0:suggestions");
+  assert.equal(dispatch.inputFingerprint, (await db.keywordResearchTask.findUnique({ where: { id: claimedTaskId } })).inputFingerprint);
+  assert.equal(dispatch.endpointKey, "keyword_suggestions");
+  assert.equal(dispatch.requestFingerprint, (await db.keywordResearchTask.findUnique({ where: { id: claimedTaskId } })).requestFingerprint);
+  const checks = recovered.aggregateChecks;
+  for (const check of checks) {
+    assert.match(check.stageInputFingerprint, /^[a-f0-9]{64}$/u);
+    assert.ok(check.researchId && check.generation && check.stage && check.stageId);
+  }
+  const orderedIds = recovered.taskDispatches.map(({ taskId }) => taskId);
+  assert.deepEqual(orderedIds, [...orderedIds].sort());
+  const orderedChecks = checks.map(({ stageId }) => stageId);
+  assert.deepEqual(orderedChecks, [...orderedChecks].sort());
+  const orderedInit = recovered.initializations.map(({ researchId: id }) => id);
+  assert.deepEqual(orderedInit, [...orderedInit].sort());
+
+  const again = await repo.recover(LATER);
+  assert.deepEqual(again.aggregateChecks.map((check) => check.stageInputFingerprint),
+    recovered.aggregateChecks.map((check) => check.stageInputFingerprint));
+  await db.$disconnect();
+});
+
+test("full durable flow: initialize → expansion → candidate → shortlist → result with owner API handoff intact", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_flow");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId, "owner_kiw1", 2);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(2) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  assert.equal(candidate.outcome, "terminal");
+  await completeStageTasks(db, repo, candidate.nextStage.id, ["US:0"]);
+  const ancAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token: ancAgg }, NOW);
+  const shortlist = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() }, NOW);
+  assert.equal(shortlist.outcome, "terminal");
+  await completeStageTasks(db, repo, shortlist.nextStage.id, shortlist.tasks.map((task) => task.itemKey));
+  const mktAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "market_overview", generation: 1, owner: "a", token: mktAgg }, NOW);
+
+  const keywords = [makeKeywordRow("alpha keyword"), makeKeywordRow("beta keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+  assert.equal((await repo.publishResearchResult({ researchId, generation: 1, token: mktAgg,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW)).outcome, "terminal");
+
+  const handoffInput = { researchId, ownerId: "owner_kiw1", expectedSelectionRevision: 1,
+    clientRequestId: "client-request-kw-0001", selectionFingerprint: fp("h"),
+    runId: "run_kir1_handoff_0001", items: selectionItems.map((item) => ({ itemId: item.itemId, keyword: item.keyword })) };
   const constructRun = async (tx, { runId, research, now, items }) => tx.run.create({ data: {
     id: runId, ownerId: research.ownerId, state: "queued", stage: "keyword_research",
     normalizedShopTypes: [], progress: {}, queryPlanSource: "keyword_research",
-    keywordResearchId: research.id, keywordSelectionRevision: 2,
+    keywordResearchId: research.id, keywordSelectionRevision: 1,
     keywordSelectionSnapshot: { items }, createdAt: now } });
   const constructQueries = async (tx, { run, items, now }) => Promise.all(items.map((item, index) =>
     tx.runQuery.create({ data: { id: `rq_${run.id}_${index}`, runId: run.id, categoryIndex: 0,
@@ -472,39 +1168,18 @@ test("full flow publishes result, selection CAS, run handoff idempotency", { ski
   assert.equal(created.run.queryPlanSource, "keyword_research");
   const retry = await repo.createRun({ ...handoffInput, constructRun, constructQueries }, NOW);
   assert.equal(retry.outcome, "found");
-  assert.equal(retry.run.id, handoffInput.runId);
-  const conflict = await repo.createRun({ ...handoffInput, selectionFingerprint: fp("x"),
-    constructRun, constructQueries }, NOW);
-  assert.equal(conflict.outcome, "conflict");
-  const staleRevision = await repo.createRun({ ...handoffInput,
-    clientRequestId: "client-request-kw-0002", expectedSelectionRevision: 1,
-    constructRun, constructQueries }, NOW);
-  assert.equal(staleRevision.outcome, "conflict");
   const runQueries = await db.runQuery.findMany({ where: { runId: handoffInput.runId } });
-  assert.equal(runQueries.length, 1);
-  assert.equal(runQueries[0].keywordResearchItemId, handoffInput.items[0].itemId);
-  const laterSave = await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 2,
-    items: [{ itemId: selectionItemId("calculated", "changed seed") }] }, LATER);
+  assert.equal(runQueries.length, selectionItems.length);
+  assert.equal(runQueries[0].keywordResearchItemId, selectionItems[0].itemId);
+  const laterSave = await repo.saveSelection({ researchId, ownerId: "owner_kiw1", expectedRevision: 1,
+    items: selectionItems }, LATER);
   assert.equal(laterSave.outcome, "created");
-  assert.equal(laterSave.selectionRevision, 3);
-  const storedRun = await db.run.findUnique({ where: { id: handoffInput.runId } });
-  assert.equal(storedRun.keywordSelectionRevision, 2);
-  assert.deepEqual(storedRun.keywordSelectionSnapshot.items, handoffInput.items);
-  const researchAfter = await repo.getOwned({ researchId, ownerId: "owner_kiw1" });
-  assert.equal(researchAfter.research.selectionRevision, 3);
+  assert.equal(laterSave.selectionRevision, 2);
   await db.$disconnect();
 });
 
 test("cache fresh/stale/conflict and throttle gap", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_cache_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
+  const { db, repo } = await setupRepo(t, "kir1_cache");
   assert.equal((await repo.cacheRead({ requestFingerprint: fp("c") }, NOW)).outcome, "not_found");
   const written = await repo.cacheWrite({ requestFingerprint: fp("c"), cacheKey: "kw:suggestions:abc",
     endpointKey: "keyword_suggestions", normalizedResponse: { keywords: ["a"] },
@@ -529,62 +1204,26 @@ test("cache fresh/stale/conflict and throttle gap", { skip: !enabled }, async (t
   await db.$disconnect();
 });
 
-test("recover finds expired task leases and due pending tasks", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_recov_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
+test("negative control: stale task token never mutates (task-token predicate)", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_neg_token");
   const researchId = newResearchId();
   await freshResearch(repo, researchId);
-  await repo.initialize({ researchId, ownerId: "owner_kiw1", stage: "expansion", generation: 1,
-    tasks: expansionTasks(2) }, NOW);
-  const stageId = keywordStageId(researchId, "expansion", 1);
-  const claimedTaskId = keywordTaskId(stageId, "0:suggestions");
-  await repo.claim({ taskId: claimedTaskId, owner: "w", token: newLeaseToken() }, NOW);
-  const pendingTaskId = keywordTaskId(stageId, "1:suggestions");
-  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a",
-    token: newLeaseToken() }, NOW);
-  const empty = await repo.recover(NOW);
-  assert.equal(empty.taskDispatches.length, 1);
-  assert.equal(empty.taskDispatches[0].taskId, pendingTaskId);
-  assert.equal(empty.aggregateChecks.length, 0);
-  const recovered = await repo.recover(LATER);
-  assert.equal(recovered.taskDispatches.length, 2);
-  assert.ok(recovered.taskDispatches.some(({ taskId }) => taskId === claimedTaskId));
-  assert.ok(recovered.taskDispatches.some(({ taskId }) => taskId === pendingTaskId));
-  assert.equal(recovered.aggregateChecks.length, 1);
-  assert.equal(recovered.aggregateChecks[0].researchId, researchId);
-  await db.$disconnect();
-});
-
-test("zero-count stage advancement", { skip: !enabled }, async (t) => {
-  const schema = `kiw1_zero_${Date.now().toString(36)}`;
-  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
-  t.after(async () => {
-    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-    await admin.$disconnect();
-  });
-  deployPrismaMigrations(scopedUrl);
-  const db = createPrismaClient(scopedUrl);
-  const repo = new PrismaKeywordResearchRepository(db);
-  const researchId = newResearchId();
-  await freshResearch(repo, researchId);
-  const initialized = await repo.initialize({ researchId, ownerId: "owner_kiw1",
-    stage: "expansion", generation: 1, tasks: [] }, NOW);
-  assert.equal(initialized.outcome, "created");
-  assert.equal(initialized.stage.state, "ready");
-  assert.equal(initialized.stage.expectedCount, 0);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
   const token = newLeaseToken();
-  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a",
-    token }, NOW);
-  const completed = await repo.publishStageCompletion({ researchId, stage: "expansion",
-    generation: 1, token }, NOW);
-  assert.equal(completed.outcome, "terminal");
-  assert.equal(completed.stage.state, "completed");
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const stale = await repo.recordAttempt({ taskId, token: newLeaseToken(),
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(stale.outcome, "lost");
+  const attemptCount = await db.keywordResearchProviderAttempt.count({ where: { taskId } });
+  assert.equal(attemptCount, 0);
+  const taskAfter = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskAfter.attemptCount, 0);
+  const terminalizeStale = await repo.terminalize({ taskId, token: newLeaseToken(), state: "succeeded",
+    artifactS3Key: "runs/x.json", artifactFingerprint: fp("x") }, NOW);
+  assert.equal(terminalizeStale.outcome, "lost");
   await db.$disconnect();
 });
