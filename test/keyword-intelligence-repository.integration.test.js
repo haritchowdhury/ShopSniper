@@ -134,6 +134,27 @@ async function completeStageTasks(db, repo, stageId, itemKeys, state = "succeede
   }
 }
 
+async function advanceToMarketStage(db, repo, researchId) {
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initialized.stage.id, initialized.tasks.map((task) => task.itemKey));
+  const expAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "expansion", generation: 1, owner: "a", token: expAgg }, NOW);
+  const anchorTask = { itemKey: "US:0", inputFingerprint: fp("anchor-input"),
+    endpointKey: "keyword_overview", requestFingerprint: fp("anchor-request") };
+  const candidate = await repo.publishCandidateManifest({ researchId, generation: 1, token: expAgg,
+    manifestS3Key: "runs/m.json", manifestFingerprint: fp("m"), nextStageTasks: [anchorTask] }, NOW);
+  await completeStageTasks(db, repo, candidate.nextStage.id, ["US:0"]);
+  const ancAgg = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "anchor_screen", generation: 1, owner: "a", token: ancAgg }, NOW);
+  const shortlist = await repo.publishShortlist({ researchId, generation: 1, token: ancAgg,
+    manifestS3Key: "runs/s.json", manifestFingerprint: fp("s"), marketTasks: marketTasksFor() }, NOW);
+  await completeStageTasks(db, repo, shortlist.nextStage.id, shortlist.tasks.map((task) => task.itemKey));
+  const mktToken = newLeaseToken();
+  await repo.claimAggregator({ researchId, stage: "market_overview", generation: 1, owner: "a", token: mktToken }, NOW);
+  return { mktToken, marketStageId: shortlist.nextStage.id };
+}
+
 function makeKeywordRow(keyword, overrides = {}) {
   return {
     itemId: selectionItemId("calculated", keyword),
@@ -190,6 +211,31 @@ function clientWithInjectedFailure(client, shouldFail) {
   const realTransaction = client.$transaction.bind(client);
   client.$transaction = (work, ...rest) => realTransaction((tx) => work(injectFailures(tx, shouldFail)), ...rest);
   return client;
+}
+
+function clientWithInjectedZeroCount(client, shouldZero) {
+  const realTransaction = client.$transaction.bind(client);
+  client.$transaction = (work, ...rest) => realTransaction((tx) => work(injectZeroCounts(tx, shouldZero)), ...rest);
+  return client;
+}
+
+function injectZeroCounts(target, shouldZero) {
+  const make = (obj, path) => new Proxy(obj, {
+    get(t, prop) {
+      if (prop === "then") return undefined;
+      const value = t[prop];
+      const nextPath = path ? `${path}.${String(prop)}` : String(prop);
+      if (typeof value === "function") {
+        return (...args) => {
+          if (shouldZero(nextPath, args)) return Promise.resolve({ count: 0 });
+          return value.apply(t, args);
+        };
+      }
+      if (value && typeof value === "object") return make(value, nextPath);
+      return value;
+    }
+  });
+  return make(target, "");
 }
 
 async function setupRepo(t, schemaPrefix) {
@@ -1225,5 +1271,200 @@ test("negative control: stale task token never mutates (task-token predicate)", 
   const terminalizeStale = await repo.terminalize({ taskId, token: newLeaseToken(), state: "succeeded",
     artifactS3Key: "runs/x.json", artifactFingerprint: fp("x") }, NOW);
   assert.equal(terminalizeStale.outcome, "lost");
+  await db.$disconnect();
+});
+
+test("SCN-KI-021: attempt-five planned/in_flight replay reconciles before the sixth-attempt ceiling", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_r21_ceiling");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  await db.keywordResearchTask.update({ where: { id: taskId }, data: { attemptCount: 5 } });
+  await db.keywordResearchProviderAttempt.create({ data: {
+    id: "kra_r21_planned5", taskId, attemptNumber: 5, state: "planned",
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    plannedAt: NOW, createdAt: NOW, updatedAt: NOW
+  } });
+
+  const equalReplay = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(equalReplay.outcome, "found");
+  assert.equal(equalReplay.mayCall, false);
+  assert.equal(equalReplay.attempt.attemptNumber, 5);
+  assert.equal(await db.keywordResearchProviderAttempt.count({ where: { taskId } }), 1);
+  assert.equal((await db.keywordResearchTask.findUnique({ where: { id: taskId } })).attemptCount, 5);
+
+  const unequal = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: fp("different"), reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(unequal.outcome, "conflict");
+
+  await db.keywordResearchProviderAttempt.update({
+    where: { taskId_attemptNumber: { taskId, attemptNumber: 5 } },
+    data: { state: "in_flight" }
+  });
+  const inFlightReplay = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(inFlightReplay.outcome, "found");
+  assert.equal(inFlightReplay.mayCall, false);
+  assert.equal(await db.keywordResearchProviderAttempt.count({ where: { taskId } }), 1);
+
+  await db.keywordResearchProviderAttempt.update({
+    where: { taskId_attemptNumber: { taskId, attemptNumber: 5 } },
+    data: { state: "failed", providerCostUsd: "0.01200000", completedAt: NOW }
+  });
+  const exhausted = await repo.recordAttempt({ taskId, token,
+    requestFingerprint: taskRow.requestFingerprint, reservationCostUsd: "0.01560000",
+    maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(exhausted.outcome, "conflict");
+  assert.equal(exhausted.code, "KEYWORD_PROVIDER_RETRY_EXHAUSTED");
+  await db.$disconnect();
+});
+
+test("SCN-KI-021: scheduleRetry replays the persisted due time before, at, and after it regardless of clock", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_r21_retry");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+  const taskRow = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  const token = newLeaseToken();
+  await repo.claim({ taskId, owner: "w", token }, NOW);
+  const attempt = await repo.recordAttempt({ taskId, token, requestFingerprint: taskRow.requestFingerprint,
+    reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+  assert.equal(attempt.outcome, "created");
+  await repo.settleAttempt({ taskId, token, attemptNumber: 1, state: "failed",
+    providerCostUsd: "0.01200000", safeErrorCode: "KEYWORD_PROVIDER_RETRYABLE", cacheEntry: null }, NOW);
+
+  const scheduled = await repo.scheduleRetry({ taskId, token, attemptNumber: 1 }, NOW);
+  assert.equal(scheduled.outcome, "delayed");
+  const storedAt = scheduled.retryAt;
+  assert.ok(storedAt instanceof Date);
+  const taskScheduled = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskScheduled.state, "pending");
+  assert.equal(taskScheduled.nextAttemptAt.getTime(), storedAt.getTime());
+  assert.equal(taskScheduled.leaseToken, null);
+
+  for (const offset of [-1, 0, 60_000]) {
+    const replay = await repo.scheduleRetry({ taskId, token, attemptNumber: 1 },
+      new Date(storedAt.getTime() + offset));
+    assert.equal(replay.outcome, "delayed");
+    assert.equal(replay.retryAt.getTime(), storedAt.getTime());
+  }
+  const taskAfter = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+  assert.equal(taskAfter.nextAttemptAt.getTime(), storedAt.getTime());
+  assert.equal(taskAfter.state, "pending");
+  assert.equal(taskAfter.attemptCount, 1);
+  assert.equal(await db.keywordResearchProviderAttempt.count({ where: { taskId } }), 1);
+
+  assert.equal((await repo.scheduleRetry({ taskId, token, attemptNumber: 2 }, storedAt)).outcome, "conflict");
+  const dueClaim = await repo.claim({ taskId, owner: "w", token: newLeaseToken() }, storedAt);
+  assert.equal(dueClaim.outcome, "claimed");
+  await db.$disconnect();
+});
+
+test("SCN-KI-021: zero-row market-stage conditional update returns lost and leaves the set wholly unchanged", { skip: !enabled }, async (t) => {
+  const schema = `kir1_r21_mktzero_${Date.now().toString(36)}`;
+  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
+  t.after(async () => {
+    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.$disconnect();
+  });
+  deployPrismaMigrations(scopedUrl);
+  const db = createPrismaClient(scopedUrl);
+  const repo = new PrismaKeywordResearchRepository(clientWithInjectedZeroCount(db, (path, args) =>
+    path === "keywordResearchStage.updateMany" && args[0]?.data?.manifestS3Key === "runs/final.json"));
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const { mktToken, marketStageId } = await advanceToMarketStage(db, repo, researchId);
+  const keywords = [makeKeywordRow("alpha keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+
+  const published = await repo.publishResearchResult({ researchId, generation: 1, token: mktToken,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
+  assert.equal(published.outcome, "lost");
+  const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+  assert.equal(marketAfter.state, "aggregating");
+  assert.equal(marketAfter.manifestS3Key, null);
+  assert.equal(marketAfter.manifestFingerprint, null);
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(research.state, "running");
+  assert.equal(research.result, null);
+  assert.equal(research.resultFingerprint, null);
+  assert.equal(research.selection, null);
+  assert.equal(research.selectionRevision, 0);
+  await db.$disconnect();
+});
+
+test("SCN-KI-021: zero-row research conditional update returns conflict and rolls back the market write", { skip: !enabled }, async (t) => {
+  const schema = `kir1_r21_reszero_${Date.now().toString(36)}`;
+  const { admin, scopedUrl } = await createIsolatedTestSchema(schema);
+  t.after(async () => {
+    await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.$disconnect();
+  });
+  deployPrismaMigrations(scopedUrl);
+  const db = createPrismaClient(scopedUrl);
+  const repo = new PrismaKeywordResearchRepository(clientWithInjectedZeroCount(db, (path, args) =>
+    path === "keywordResearch.updateMany" && args[0]?.data?.resultFingerprint !== undefined));
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const { mktToken, marketStageId } = await advanceToMarketStage(db, repo, researchId);
+  const keywords = [makeKeywordRow("alpha keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+
+  const published = await repo.publishResearchResult({ researchId, generation: 1, token: mktToken,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
+  assert.equal(published.outcome, "conflict");
+  const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+  assert.equal(marketAfter.state, "aggregating");
+  assert.equal(marketAfter.manifestS3Key, null);
+  assert.equal(marketAfter.manifestFingerprint, null);
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(research.state, "running");
+  assert.equal(research.result, null);
+  assert.equal(research.resultFingerprint, null);
+  assert.equal(research.selection, null);
+  assert.equal(research.selectionRevision, 0);
+  await db.$disconnect();
+});
+
+test("SCN-KI-021: completed market stage with running research is a conflicting partial state with no write", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir1_r21_partial");
+  const researchId = newResearchId();
+  await freshResearch(repo, researchId);
+  const { mktToken, marketStageId } = await advanceToMarketStage(db, repo, researchId);
+  await db.keywordResearchStage.update({ where: { id: marketStageId },
+    data: { state: "completed", manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"),
+      completedAt: NOW } });
+  const keywords = [makeKeywordRow("alpha keyword")];
+  const result = makeResult(keywords, researchId);
+  const selectionItems = defaultSelectionFor(keywords);
+
+  const published = await repo.publishResearchResult({ researchId, generation: 1, token: mktToken,
+    manifestS3Key: "runs/final.json", manifestFingerprint: fp("final"), result,
+    resultFingerprint: fp("rf"), selectionItems }, NOW);
+  assert.equal(published.outcome, "conflict");
+  const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+  assert.equal(marketAfter.state, "completed");
+  assert.equal(marketAfter.manifestS3Key, "runs/final.json");
+  const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
+  assert.equal(research.state, "running");
+  assert.equal(research.result, null);
+  assert.equal(research.resultFingerprint, null);
+  assert.equal(research.selection, null);
+  assert.equal(research.selectionRevision, 0);
   await db.$disconnect();
 });

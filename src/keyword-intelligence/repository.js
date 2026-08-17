@@ -39,6 +39,14 @@ export class KeywordRepositoryError extends Error {
   }
 }
 
+class FinalPublicationAbort extends Error {
+  constructor(mapping) {
+    super(mapping);
+    this.name = "FinalPublicationAbort";
+    this.mapping = mapping;
+  }
+}
+
 function conflict(code = "KEYWORD_INPUT_CONFLICT") {
   throw new KeywordRepositoryError(code);
 }
@@ -506,10 +514,6 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "lost" };
       }
       if (task.requestFingerprint !== requestFingerprint) return { outcome: "conflict" };
-      const attemptNumber = task.attemptCount + 1;
-      if (attemptNumber < 1 || attemptNumber > MAX_ATTEMPTS) {
-        return { outcome: "conflict", code: "KEYWORD_PROVIDER_RETRY_EXHAUSTED" };
-      }
       const latest = await tx.keywordResearchProviderAttempt.findFirst({
         where: { taskId }, orderBy: { attemptNumber: "desc" }
       });
@@ -527,12 +531,16 @@ export class PrismaKeywordResearchRepository {
         }
         return { outcome: "conflict" };
       }
+      if (latest && latest.state === "succeeded") return { outcome: "conflict" };
+      const attemptNumber = task.attemptCount + 1;
+      if (attemptNumber < 1 || attemptNumber > MAX_ATTEMPTS) {
+        return { outcome: "conflict", code: "KEYWORD_PROVIDER_RETRY_EXHAUSTED" };
+      }
       if (latest && latest.state === "failed") {
         if (task.nextAttemptAt === null) {
           return { outcome: "conflict", code: CODE_RETRY_NOT_SCHEDULED };
         }
       }
-      if (latest && latest.state === "succeeded") return { outcome: "conflict" };
       const stage = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
       if (!stage) return { outcome: "not_found" };
       const [exposure] = await tx.$queryRaw`
@@ -783,14 +791,14 @@ export class PrismaKeywordResearchRepository {
       if (!latest || latest.attemptNumber !== attemptNumber || latest.state !== "failed") {
         return { outcome: "conflict" };
       }
+      if (task.state === "pending" && task.leaseToken === null && task.leaseExpiresAt === null &&
+          task.nextAttemptAt instanceof Date) {
+        return { outcome: "delayed", retryAt: task.nextAttemptAt };
+      }
       if (attemptNumber >= MAX_ATTEMPTS) return { outcome: "conflict", code: "KEYWORD_PROVIDER_RETRY_EXHAUSTED" };
       const completedBase = latest.completedAt instanceof Date ? latest.completedAt.getTime() : now.getTime();
       const delaySeconds = retryDelaySeconds(taskId, attemptNumber);
       const retryAt = new Date(Math.max(completedBase + delaySeconds * 1000, now.getTime()));
-      if (task.state === "pending" && task.leaseToken === null && task.leaseExpiresAt === null &&
-          task.nextAttemptAt instanceof Date && task.nextAttemptAt.getTime() === retryAt.getTime()) {
-        return { outcome: "delayed", retryAt: task.nextAttemptAt };
-      }
       if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
       if (task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() <= now.getTime()) {
         return { outcome: "lost" };
@@ -1037,66 +1045,72 @@ export class PrismaKeywordResearchRepository {
     if (!expectedSelection.ok || canonicalJson(selectionItems) !== canonicalJson(expectedSelection.items)) {
       return { outcome: "conflict", code: "KEYWORD_SELECTION_MISMATCH" };
     }
-    return this._transaction(async (tx) => {
-      const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
-      if (!research) return { outcome: "not_found" };
-      if (research.generation !== generation) return { outcome: "conflict" };
-      const marketStageId = keywordStageId(researchId, "market_overview", generation);
-      const marketStage = await tx.keywordResearchStage.findUnique({ where: { id: marketStageId } });
-      if (!marketStage) return { outcome: "conflict" };
-      if (research.state === "completed") {
-        const selectionMatches = research.selection !== null && typeof research.selection === "object" &&
-          canonicalJson(research.selection.items) === canonicalJson(selectionItems);
-        const manifestMatches = marketStage.manifestS3Key === input.manifestS3Key &&
-          marketStage.manifestFingerprint === input.manifestFingerprint;
-        const resultMatches = research.resultFingerprint === input.resultFingerprint &&
-          research.selectionRevision === 1;
-        return selectionMatches && manifestMatches && resultMatches
-          ? { outcome: "found" }
-          : { outcome: "conflict" };
-      }
-      if (research.state !== "running") return { outcome: "conflict" };
-      const expansionStage = await tx.keywordResearchStage.findUnique({
-        where: { id: keywordStageId(researchId, "expansion", generation) }
-      });
-      const anchorStage = await tx.keywordResearchStage.findUnique({
-        where: { id: keywordStageId(researchId, "anchor_screen", generation) }
-      });
-      if (!expansionStage || !anchorStage || expansionStage.state !== "completed" || anchorStage.state !== "completed") {
-        return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
-      }
-      if (marketStage.state === "completed") {
-        return { outcome: "found" };
-      }
-      if (marketStage.state !== "aggregating") return { outcome: "conflict" };
-      if (marketStage.aggregationLeaseToken !== token) return { outcome: "lost" };
-      if (marketStage.terminalCount !== marketStage.expectedCount ||
-          marketStage.succeededCount + marketStage.skippedCount + marketStage.failedCount !== marketStage.expectedCount) {
-        return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
-      }
-      if (marketStage.manifestS3Key !== null &&
-          (marketStage.manifestS3Key !== input.manifestS3Key ||
-           marketStage.manifestFingerprint !== input.manifestFingerprint)) {
-        return { outcome: "conflict" };
-      }
-      const updated = await tx.keywordResearchStage.updateMany({
-        where: { id: marketStageId, state: "aggregating", aggregationLeaseToken: token },
-        data: {
-          manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
-          manifestProducedAt: marketStage.createdAt, state: "completed", completedAt: now, updatedAt: now
+    try {
+      return await this._transaction(async (tx) => {
+        const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
+        if (!research) return { outcome: "not_found" };
+        if (research.generation !== generation) return { outcome: "conflict" };
+        const marketStageId = keywordStageId(researchId, "market_overview", generation);
+        const marketStage = await tx.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+        if (!marketStage) return { outcome: "conflict" };
+        if (research.state === "completed") {
+          const selectionMatches = research.selection !== null && typeof research.selection === "object" &&
+            canonicalJson(research.selection.items) === canonicalJson(selectionItems);
+          const manifestMatches = marketStage.manifestS3Key === input.manifestS3Key &&
+            marketStage.manifestFingerprint === input.manifestFingerprint;
+          const resultMatches = research.resultFingerprint === input.resultFingerprint &&
+            research.selectionRevision === 1;
+          return selectionMatches && manifestMatches && resultMatches
+            ? { outcome: "found" }
+            : { outcome: "conflict" };
         }
-      });
-      if (updated.count !== 1) return { outcome: "lost" };
-      await tx.keywordResearch.updateMany({
-        where: { id: researchId, state: "running", generation },
-        data: {
-          state: "completed", result: input.result, resultFingerprint: input.resultFingerprint,
-          selection: { items: selectionItems }, selectionRevision: 1,
-          completedAt: now, updatedAt: now
+        if (research.state !== "running") return { outcome: "conflict" };
+        const expansionStage = await tx.keywordResearchStage.findUnique({
+          where: { id: keywordStageId(researchId, "expansion", generation) }
+        });
+        const anchorStage = await tx.keywordResearchStage.findUnique({
+          where: { id: keywordStageId(researchId, "anchor_screen", generation) }
+        });
+        if (!expansionStage || !anchorStage || expansionStage.state !== "completed" || anchorStage.state !== "completed") {
+          return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
         }
+        if (marketStage.state === "completed") {
+          return { outcome: "conflict" };
+        }
+        if (marketStage.state !== "aggregating") return { outcome: "conflict" };
+        if (marketStage.aggregationLeaseToken !== token) return { outcome: "lost" };
+        if (marketStage.terminalCount !== marketStage.expectedCount ||
+            marketStage.succeededCount + marketStage.skippedCount + marketStage.failedCount !== marketStage.expectedCount) {
+          return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
+        }
+        if (marketStage.manifestS3Key !== null &&
+            (marketStage.manifestS3Key !== input.manifestS3Key ||
+             marketStage.manifestFingerprint !== input.manifestFingerprint)) {
+          return { outcome: "conflict" };
+        }
+        const updated = await tx.keywordResearchStage.updateMany({
+          where: { id: marketStageId, state: "aggregating", aggregationLeaseToken: token },
+          data: {
+            manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
+            manifestProducedAt: marketStage.createdAt, state: "completed", completedAt: now, updatedAt: now
+          }
+        });
+        if (updated.count !== 1) throw new FinalPublicationAbort("lost");
+        const researchUpdated = await tx.keywordResearch.updateMany({
+          where: { id: researchId, state: "running", generation },
+          data: {
+            state: "completed", result: input.result, resultFingerprint: input.resultFingerprint,
+            selection: { items: selectionItems }, selectionRevision: 1,
+            completedAt: now, updatedAt: now
+          }
+        });
+        if (researchUpdated.count !== 1) throw new FinalPublicationAbort("conflict");
+        return { outcome: "terminal" };
       });
-      return { outcome: "terminal" };
-    });
+    } catch (error) {
+      if (error instanceof FinalPublicationAbort) return { outcome: error.mapping };
+      throw error;
+    }
   }
 
   async failStage(input, now) {

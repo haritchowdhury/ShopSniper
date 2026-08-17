@@ -3,6 +3,7 @@ import test from "node:test";
 import { KeywordRepositoryError, PrismaKeywordResearchRepository, keywordStageId,
   keywordTaskId, newLeaseToken, newResearchId, selectionItemId } from "../src/keyword-intelligence/repository.js";
 import { selectionItemId as w2SelectionItemId } from "../src/keyword-intelligence/selection.js";
+import * as repositoryModule from "../src/keyword-intelligence/repository.js";
 
 const RESEARCH = "kr_" + "a".repeat(24);
 const NOW = new Date("2026-08-17T00:00:00.000Z");
@@ -144,4 +145,15 @@ test("createRun validates client request id and item bounds", async () => {
     expectedSelectionRevision: 1, clientRequestId: "client-request-id-0001",
     selectionFingerprint: FP, items: [],
     constructRun: () => {}, constructQueries: () => {} }, NOW), KeywordRepositoryError);
+});
+
+test("corrective surface stays fail-closed: sentinel and transaction seam are private", () => {
+  assert.equal(Object.hasOwn(repositoryModule, "FinalPublicationAbort"), false);
+  assert.equal(Object.hasOwn(repositoryModule, "transaction"), false);
+  assert.equal(Object.hasOwn(repositoryModule, "completeStageAndCreateNext"), false);
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype.recordAttempt, "function");
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype.scheduleRetry, "function");
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype.publishResearchResult, "function");
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype._transaction, "function");
+  assert.equal(typeof PrismaKeywordResearchRepository.prototype._completeStageAndCreateNext, "function");
 });
