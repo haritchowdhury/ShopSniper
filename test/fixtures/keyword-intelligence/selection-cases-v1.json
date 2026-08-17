@@ -1,0 +1,388 @@
+{
+  "schemaVersion": 1,
+  "cases": {
+    "exact": {
+      "items": [
+        {
+          "itemId": "ksi_93d5b46a1262",
+          "sourceKind": "calculated",
+          "keyword": "s & s",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_3517139cf820",
+          "sourceKind": "calculated",
+          "keyword": "ss",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_65ca34ad3da4",
+          "sourceKind": "calculated",
+          "keyword": "women shoes",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        }
+      ],
+      "conflicts": [
+        {
+          "conflictId": "ksc_125bc6edb0b77af2",
+          "itemIds": [
+            "ksi_3517139cf820",
+            "ksi_93d5b46a1262"
+          ],
+          "pairs": [
+            {
+              "leftItemId": "ksi_93d5b46a1262",
+              "rightItemId": "ksi_3517139cf820",
+              "reason": "compact",
+              "similarity": 1
+            }
+          ],
+          "canonicalItemId": "ksi_3517139cf820"
+        }
+      ]
+    },
+    "near": {
+      "items": [
+        {
+          "itemId": "ksi_3c4db7c7700d",
+          "sourceKind": "calculated",
+          "keyword": "pickleball paddle",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_d37dfd3a393e",
+          "sourceKind": "calculated",
+          "keyword": "pickleball paddles",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_39aa3917d721",
+          "sourceKind": "calculated",
+          "keyword": "golf tee",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        }
+      ],
+      "conflicts": [
+        {
+          "conflictId": "ksc_744c91e4963ec2fb",
+          "itemIds": [
+            "ksi_3c4db7c7700d",
+            "ksi_d37dfd3a393e"
+          ],
+          "pairs": [
+            {
+              "leftItemId": "ksi_3c4db7c7700d",
+              "rightItemId": "ksi_d37dfd3a393e",
+              "reason": "similarity",
+              "similarity": 1
+            }
+          ],
+          "canonicalItemId": "ksi_3c4db7c7700d"
+        }
+      ]
+    },
+    "transitive": {
+      "items": [
+        {
+          "itemId": "ksi_65ca34ad3da4",
+          "sourceKind": "calculated",
+          "keyword": "women shoes",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_68f22c85f563",
+          "sourceKind": "calculated",
+          "keyword": "womens shoes",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_77399a0b8621",
+          "sourceKind": "calculated",
+          "keyword": "women shoe",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_21f72fbc4654",
+          "sourceKind": "calculated",
+          "keyword": "golf shoes",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        }
+      ],
+      "conflicts": [
+        {
+          "conflictId": "ksc_6d207c057d3fb5b9",
+          "itemIds": [
+            "ksi_65ca34ad3da4",
+            "ksi_68f22c85f563",
+            "ksi_77399a0b8621"
+          ],
+          "pairs": [
+            {
+              "leftItemId": "ksi_65ca34ad3da4",
+              "rightItemId": "ksi_68f22c85f563",
+              "reason": "similarity",
+              "similarity": 1
+            },
+            {
+              "leftItemId": "ksi_65ca34ad3da4",
+              "rightItemId": "ksi_77399a0b8621",
+              "reason": "similarity",
+              "similarity": 1
+            },
+            {
+              "leftItemId": "ksi_68f22c85f563",
+              "rightItemId": "ksi_77399a0b8621",
+              "reason": "similarity",
+              "similarity": 1
+            }
+          ],
+          "canonicalItemId": "ksi_77399a0b8621"
+        }
+      ]
+    },
+    "distinct": {
+      "items": [
+        {
+          "itemId": "ksi_39aa3917d721",
+          "sourceKind": "calculated",
+          "keyword": "golf tee",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_3c4db7c7700d",
+          "sourceKind": "calculated",
+          "keyword": "pickleball paddle",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        },
+        {
+          "itemId": "ksi_6796df426317",
+          "sourceKind": "calculated",
+          "keyword": "tennis racket",
+          "sourceSeeds": [
+            "pickleball"
+          ],
+          "lane": "category_discovery",
+          "facets": {
+            "audience": [],
+            "category": [],
+            "channel": [],
+            "fit": [],
+            "modifier": []
+          },
+          "recommended": true,
+          "opportunityScore": 80,
+          "searchVolume": 1000,
+          "metricsSnapshot": {
+            "opportunityScore": 80,
+            "searchVolume": 1000
+          }
+        }
+      ],
+      "conflicts": []
+    }
+  }
+}
