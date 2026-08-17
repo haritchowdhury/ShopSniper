@@ -60,9 +60,10 @@ export function jaccard(a, b) {
   return union ? inter / union : 0.0;
 }
 
-export function dedupVariants(records, config) {
+export function dedupVariants(records, config, operations = {}) {
   const threshold = config.dedup.similarityThreshold;
   const strip = config.dedup.stripTokens || [];
+  operations.pairComparisons = 0;
 
   const active = records.filter((r) => r.is_active);
   const sigs = new Map();
@@ -95,6 +96,7 @@ export function dedupVariants(records, config) {
     const ri = active[i];
     if (!sigs.get(ri).size) continue;
     for (let j = i + 1; j < n; j++) {
+      operations.pairComparisons += 1;
       const rj = active[j];
       if (!sigs.get(rj).size) continue;
       if (jaccard(sigs.get(ri), sigs.get(rj)) >= threshold ||

@@ -58,7 +58,7 @@ const keywordRowSchema = z.strictObject({
   searchVolume: z.number().int(),
   cpc: z.number().nullable(),
   competition: z.number(),
-  competitionLevel: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  competitionLevel: z.enum(["LOW", "MEDIUM", "HIGH"]).nullable(),
   keywordDifficulty: z.number().int().nullable(),
   mainIntent: z.enum(["transactional", "commercial", "informational", "navigational"]),
   commercialIntent: z.number(),

@@ -70,91 +70,52 @@
     "expansionAnchor": {
       "code": "US",
       "name": "United States",
-      "location_code": 2840,
-      "language_code": "en",
-      "language_name": "English"
+      "locationCode": 2840,
+      "languageCode": "en",
+      "languageName": "English"
     },
     "expansionPerSeedLimit": 60,
     "screenCandidateLimit": 300,
     "shortlistLimit": 200,
     "overviewBatchLimit": 700,
     "maxCostPerResearchUsd": "3.00000000",
+    "api": {
+      "baseUrl": "https://api.dataforseo.com/v3",
+      "timeoutSeconds": 120,
+      "rateLimit": {
+        "requestsPerMinute": 30
+      },
+      "retry": {
+        "maxAttempts": 4,
+        "backoffBaseSeconds": 2.0,
+        "backoffMaxSeconds": 60.0,
+        "retryableStatus": [
+          429,
+          500,
+          502,
+          503,
+          504
+        ],
+        "retryableApiCodes": [
+          40601,
+          40602,
+          50001,
+          50002,
+          40107
+        ]
+      }
+    },
     "search": {
-      "default_market": "all",
-      "markets": [
-        {
-          "code": "US",
-          "name": "United States",
-          "location_code": 2840,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "GB",
-          "name": "United Kingdom",
-          "location_code": 2826,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "CA",
-          "name": "Canada",
-          "location_code": 2124,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "AU",
-          "name": "Australia",
-          "location_code": 2036,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "NZ",
-          "name": "New Zealand",
-          "location_code": 2554,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "DE",
-          "name": "Germany",
-          "location_code": 2276,
-          "language_code": "de",
-          "language_name": "German"
-        },
-        {
-          "code": "FR",
-          "name": "France",
-          "location_code": 2250,
-          "language_code": "fr",
-          "language_name": "French"
-        },
-        {
-          "code": "IN",
-          "name": "India",
-          "location_code": 2356,
-          "language_code": "en",
-          "language_name": "English"
-        },
-        {
-          "code": "AE",
-          "name": "United Arab Emirates",
-          "location_code": 2784,
-          "language_code": "en",
-          "language_name": "English"
-        }
-      ],
-      "location_name": "United States",
-      "language_name": "English"
+      "defaultMarket": "all",
+      "locationName": "United States",
+      "languageName": "English"
     },
     "expansion": {
       "enabled": true,
-      "max_keywords_per_seed": 60,
-      "suggestions_limit": 30,
-      "related_limit": 30,
-      "related_depth": 2
+      "maxKeywordsPerSeed": 60,
+      "suggestionsLimit": 30,
+      "relatedLimit": 30,
+      "relatedDepth": 2
     },
     "intent": {
       "commercialLabels": [

@@ -225,9 +225,10 @@ function aggregateMetadata(cluster, records) {
   cluster.facets = Object.fromEntries([...facetValues.entries()].map(([name, set]) => [name, [...set].sort()]));
 }
 
-export function clusterKeywords(records, config) {
+export function clusterKeywords(records, config, operations = {}) {
   const threshold = config.clustering.similarityThreshold;
   const strip = config.dedup.stripTokens || [];
+  operations.pairComparisons = 0;
   const active = records.filter((r) => r.is_active);
   const topics = new Map();
   for (const record of active) {
@@ -247,7 +248,10 @@ export function clusterKeywords(records, config) {
       if (!compatible(record, rep)) continue;
       const repScore = jac(topics.get(record), topics.get(rep));
       let minimum = Infinity;
-      for (const m of members) minimum = Math.min(minimum, jac(topics.get(record), topics.get(m)));
+      for (const m of members) {
+        operations.pairComparisons += 1;
+        minimum = Math.min(minimum, jac(topics.get(record), topics.get(m)));
+      }
       if (repScore >= threshold && minimum > 0 && repScore > bestScore) {
         bestGroup = members;
         bestScore = repScore;
