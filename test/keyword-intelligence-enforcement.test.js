@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,9 @@ import { fileURLToPath } from "node:url";
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const fixtureDir = fileURLToPath(new URL("./fixtures/keyword-intelligence", import.meta.url));
 const MANIFEST = JSON.parse(readFileSync(`${fixtureDir}/ki-r3-enforcement-manifest-v1.json`, "utf8"));
+const R4_MANIFEST = JSON.parse(readFileSync(`${fixtureDir}/ki-r4-enforcement-manifest-v1.json`, "utf8"));
+const R3_BASE = "37a0e0203d265f539b566f1536642cd2f4eb2d99";
+const R3_HEAD = "077213cc7c33fa8209a1e5d8ff365b73766500dc";
 
 const EXPECTED_GROUP_COUNTS = {
   adapter: 16,
@@ -108,7 +112,7 @@ function privateDeclarations(filePath) {
 }
 
 function gitDiffHunks(path) {
-  const result = spawnSync("git", ["diff", "-U0", "--", path], { cwd: projectRoot, encoding: "utf8" });
+  const result = spawnSync("git", ["diff", "-U0", R3_BASE, R3_HEAD, "--", path], { cwd: projectRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   const hunks = [];
   const blocks = result.stdout.split(/^@@ /gmu).slice(1);
@@ -176,14 +180,17 @@ test("SCN-KI-032: conformance enforcement manifest executes every structural gat
         }
         case "R3-C05-production-symbol-diff-exact": {
           const adapterHunks = gitDiffHunks("src/aws-pipeline/keyword-intelligence/dataforseo-labs-adapter.js");
+          assert.ok(adapterHunks.length > 0, "adapter fixed-revision diff must be nonempty");
           for (const hunk of adapterHunks) {
             assert.ok(withinAny(hunk, [[46, 56]]), `adapter diff outside settlementFence: ${JSON.stringify(hunk)}`);
           }
           const dispatchHunks = gitDiffHunks("src/aws-pipeline/adapters/queue-dispatcher.js");
+          assert.ok(dispatchHunks.length > 0, "dispatcher fixed-revision diff must be nonempty");
           for (const hunk of dispatchHunks) {
             assert.ok(withinAny(hunk, [[28, 50]]), `dispatcher diff outside sendOne: ${JSON.stringify(hunk)}`);
           }
           const serviceHunks = gitDiffHunks("src/aws-pipeline/keyword-intelligence/service.js");
+          assert.ok(serviceHunks.length > 0, "service fixed-revision diff must be nonempty");
           const spans = [[305, 408], [410, 488], [490, 509]];
           for (const hunk of serviceHunks) {
             const isImport = hunk.removed.length === 0 && hunk.added.length > 0 &&
@@ -205,16 +212,16 @@ test("SCN-KI-032: conformance enforcement manifest executes every structural gat
           break;
         }
         case "R3-C06-write-file-set-exact": {
-          const status = spawnSync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" });
-          assert.equal(status.status, 0, status.stderr);
-          const changed = status.stdout.split("\n").filter(Boolean).map((line) => line.slice(3)).filter(Boolean);
+          const diff = spawnSync("git", ["diff", "--name-only", R3_BASE, R3_HEAD], { cwd: projectRoot, encoding: "utf8" });
+          assert.equal(diff.status, 0, diff.stderr);
+          const changed = diff.stdout.split("\n").filter(Boolean);
           assert.deepEqual([...changed].sort(), [...AUTHORIZED_WRITE_PATHS].sort(),
-            `nested changed-file set must be exactly the nine authorized paths, got ${JSON.stringify(changed)}`);
+            `fixed-revision changed-file set must be exactly the nine authorized paths, got ${JSON.stringify(changed)}`);
           break;
         }
         case "R3-C07-prohibited-import-set-empty": {
           const prohibited = /sqlite|python|subprocess|python-shell|node:worker/u;
-          const diff = spawnSync("git", ["diff", "--no-color"], { cwd: projectRoot, encoding: "utf8" });
+          const diff = spawnSync("git", ["diff", "--no-color", R3_BASE, R3_HEAD], { cwd: projectRoot, encoding: "utf8" });
           assert.equal(diff.status, 0, diff.stderr);
           const addedImports = diff.stdout.split("\n")
             .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
@@ -225,7 +232,8 @@ test("SCN-KI-032: conformance enforcement manifest executes every structural gat
             assert.equal(prohibited.test(statement), false, `prohibited added import: ${statement}`);
           }
           const newFiles = ["test/keyword-intelligence-enforcement.test.js",
-            "test/fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json"];
+            "test/fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json",
+            "test/fixtures/keyword-intelligence/ki-r4-enforcement-manifest-v1.json"];
           for (const path of newFiles) {
             const source = readFileSync(`${projectRoot}/${path}`, "utf8");
             for (const match of source.matchAll(/^import\s+[^;]+;/gmu)) {
@@ -260,4 +268,118 @@ test("SCN-KI-032: conformance enforcement manifest executes every structural gat
   const sortedExpected = [...MANIFEST.groups.conformance].sort();
   assert.deepEqual(sortedExecuted, sortedExpected, "every conformance manifest ID executed exactly once");
   assert.equal(executed.length, MANIFEST.groups.conformance.length);
+});
+
+test("SCN-KI-035: commit-stable R4 manifest and fixed-revision conformance", async (t) => {
+  const R4_GROUP_COUNTS = {
+    adapter_control: 1,
+    dispatcher: 2,
+    worker_component: 5,
+    aggregation_control: 1,
+    conformance: 6
+  };
+  const fd1 = (ids) => createHash("sha256").update(Buffer.from([...ids].sort().join("\n"), "utf8")).digest("hex");
+  const fd2 = (ids) => {
+    const sorted = [...new Set(ids)].sort((a, b) => Buffer.from(a, "utf8").compare(Buffer.from(b, "utf8")));
+    return createHash("sha256").update(Buffer.from(sorted.map((id) => `${id}\n`).join(""), "utf8")).digest("hex");
+  };
+
+  assert.deepEqual(Object.keys(R4_MANIFEST).sort(), ["contractVersion", "groups"]);
+  assert.equal(R4_MANIFEST.contractVersion, "ki-r4-enforcement-manifest-v1");
+  assert.deepEqual(Object.keys(R4_MANIFEST.groups).sort(),
+    ["adapter_control", "aggregation_control", "conformance", "dispatcher", "worker_component"]);
+  for (const [group, count] of Object.entries(R4_GROUP_COUNTS)) {
+    assert.equal(R4_MANIFEST.groups[group].length, count, `R4 group ${group} count`);
+  }
+  const r4All = Object.values(R4_MANIFEST.groups).flat();
+  assert.equal(r4All.length, 15, "R4 manifest holds exactly 15 total case IDs");
+  assert.equal(new Set(r4All).size, 15, "R4 case IDs globally unique");
+  assert.equal(fd2(r4All), "6adc8ab132496c58608734549fbbc596577e1bd71c1e730349575eb96badc941",
+    "R4 global F-D2 digest exact");
+
+  const executed = [];
+  for (const caseId of R4_MANIFEST.groups.conformance) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      switch (caseId) {
+        case "R4-C01-fixed-revision-diff-nonempty": {
+          for (const path of ["src/aws-pipeline/keyword-intelligence/dataforseo-labs-adapter.js",
+            "src/aws-pipeline/adapters/queue-dispatcher.js",
+            "src/aws-pipeline/keyword-intelligence/service.js"]) {
+            assert.ok(gitDiffHunks(path).length > 0, `fixed-revision diff for ${path} must be nonempty`);
+          }
+          break;
+        }
+        case "R4-C02-fixed-revision-file-set-exact": {
+          const diff = spawnSync("git", ["diff", "--name-only", R3_BASE, R3_HEAD], { cwd: projectRoot, encoding: "utf8" });
+          assert.equal(diff.status, 0, diff.stderr);
+          const changed = diff.stdout.split("\n").filter(Boolean);
+          assert.deepEqual([...changed].sort(), [...AUTHORIZED_WRITE_PATHS].sort(),
+            `fixed-revision changed-file set must be exactly the nine authorized paths, got ${JSON.stringify(changed)}`);
+          break;
+        }
+        case "R4-C03-fixed-revision-import-set-clean": {
+          const prohibited = /sqlite|python|subprocess|python-shell|node:worker/u;
+          const diff = spawnSync("git", ["diff", "-U0", R3_BASE, R3_HEAD], { cwd: projectRoot, encoding: "utf8" });
+          assert.equal(diff.status, 0, diff.stderr);
+          const addedImports = diff.stdout.split("\n")
+            .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+            .map((line) => line.slice(1))
+            .filter((line) => /^import\s/u.test(line));
+          assert.ok(addedImports.length > 0, "the fixed-revision diff adds import statements to inspect");
+          for (const statement of addedImports) {
+            assert.equal(prohibited.test(statement), false, `prohibited added import: ${statement}`);
+          }
+          break;
+        }
+        case "R4-C04-r3-group-digests-exact": {
+          const expected = {
+            adapter: "b4ede4c2a1a32fddc1a1ac67e023a81f93c6863632cdff2be421f20d51080e4f",
+            dispatcher: "962ad70760c71a6fcf08b73d5edf0cdccad27dea9c3414c552c1d8e3e2b99226",
+            task_component: "d6773f3749e9f68c3b270df9ad63aba6297328b5578d1e5f3346ee2683518110",
+            recovery_component: "b6d8b7a1435b6a62da061980afd370290f16b899774bba32578e3df9cc5f2737",
+            task_database: "9e8a3973d5430be70e26f68bb235b831b96f17162d30277a40b06942cc94e934",
+            aggregation: "c017cd869b11a93e86070112ed626a3cd299e00a518ed3a568dd8f1331c27b14",
+            conformance: "43bbc0bd4dd296447b989ee2125fc0f991c2451f29e3f4ef87c05f8685a607f8"
+          };
+          for (const [group, literal] of Object.entries(expected)) {
+            assert.equal(fd1(MANIFEST.groups[group]), literal, `R3 group ${group} F-D1 digest exact`);
+          }
+          break;
+        }
+        case "R4-C05-r3-global-digest-exact": {
+          assert.equal(fd1(Object.values(MANIFEST.groups).flat()),
+            "70bd758e68cb32aff7dc418356d68e3ca07dadf282f76e7484858a7ec0c9470b",
+            "R3 global F-D1 digest exact");
+          break;
+        }
+        case "R4-C06-live-worktree-independent": {
+          const runnerFiles = ["test/keyword-intelligence-adapter.test.js",
+            "test/aws-pipeline-runtime-adapters.test.js",
+            "test/keyword-intelligence-worker.test.js",
+            "test/keyword-intelligence-worker-flow.test.js",
+            "test/keyword-intelligence-enforcement.test.js"];
+          const gitSpawnArgs = /spawnSync\(\s*"git",\s*\[([^\]]*)\]/gu;
+          for (const path of runnerFiles) {
+            const source = readFileSync(`${projectRoot}/${path}`, "utf8");
+            for (const match of source.matchAll(gitSpawnArgs)) {
+              const args = match[1];
+              assert.ok(!/["']status["']/u.test(args), `${path} must not spawn live git status`);
+              if (/["']diff["']/u.test(args)) {
+                assert.ok(args.includes("R3_BASE") && args.includes("R3_HEAD"),
+                  `${path} contains a revision-less git diff spawn: ${args}`);
+              }
+            }
+          }
+          break;
+        }
+        default:
+          assert.fail(`unhandled R4 conformance case ${caseId}`);
+      }
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...R4_MANIFEST.groups.conformance].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 conformance manifest ID executed exactly once");
+  assert.equal(executed.length, R4_MANIFEST.groups.conformance.length);
 });
