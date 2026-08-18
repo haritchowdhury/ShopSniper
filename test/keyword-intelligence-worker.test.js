@@ -281,6 +281,13 @@ async function withIsolatedDb(schema, fn) {
   }
 }
 
+async function cleanDurableRows(db, repo) {
+  const schema = repo.schema;
+  await db.$executeRawUnsafe(`DELETE FROM "${schema}"."KeywordResearchCache"`);
+  await db.$executeRawUnsafe(`DELETE FROM "${schema}"."KeywordProviderThrottle"`);
+  await db.$executeRawUnsafe(`DELETE FROM "${schema}"."KeywordResearch"`);
+}
+
 function fakeMonitors() {
   const monitors = [];
   const factory = ({ intervalMs, now, renew }) => {
@@ -695,6 +702,9 @@ const ENFORCEMENT_MANIFEST = readFixture("ki-r3-enforcement-manifest-v1.json");
 const TASK_COMPONENT_IDS = ENFORCEMENT_MANIFEST.groups.task_component;
 const RECOVERY_COMPONENT_IDS = ENFORCEMENT_MANIFEST.groups.recovery_component;
 const DATABASE_IDS = ENFORCEMENT_MANIFEST.groups.task_database;
+const R4_MANIFEST = readFixture("ki-r4-enforcement-manifest-v1.json");
+const R4_WORKER_CONFLICT_IDS = R4_MANIFEST.groups.worker_component.filter((id) => id.endsWith("-conflict"));
+const R4_WORKER_FALSIFY_IDS = R4_MANIFEST.groups.worker_component.filter((id) => id.endsWith("-falsifies"));
 
 const COMPONENT_RESEARCH_ID = "kr_r3comp000000000000000000";
 const COMPONENT_TASK_ID = "krt_r3comp00000000000000000";
@@ -1157,7 +1167,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R09-planned-attempt-ambiguity-check": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "planned", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: null },
+        latestAttempt: { attemptNumber: 1, state: "planned", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: null },
         markAmbiguousOutcome: { outcome: "terminal" }
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1169,7 +1179,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R10-auth-failure-no-retry": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED },
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED },
         terminalizeOutcome: "terminal"
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1181,7 +1191,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R11-contract-failure-no-retry": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH },
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH },
         terminalizeOutcome: "terminal"
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1193,7 +1203,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R12-task-failure-no-retry": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED },
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED },
         terminalizeOutcome: "terminal"
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1205,7 +1215,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R13-retryable-delayed-send": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 2, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        latestAttempt: { attemptNumber: 2, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
         scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) }
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1217,7 +1227,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R14-attempt-five-exhausted-terminal": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 5, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        latestAttempt: { attemptNumber: 5, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
         terminalizeOutcome: "terminal"
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1229,7 +1239,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R15-delayed-send-failure-durable": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
         scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) },
         dispatchFailure: true
       });
@@ -1242,7 +1252,7 @@ async function runRecoveryComponentCase(caseId) {
     }
     case "R3-R16-monitor-stopped-before-dispatch": {
       const h = componentHarness({
-        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: COMPONENT_REQ_FP, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
         scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) }
       });
       const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
@@ -1291,25 +1301,144 @@ async function runRecoveryComponentCase(caseId) {
 }
 
 test("SCN-KI-029: task_component and recovery_component enforcement manifests execute every case with exact traces", async (t) => {
-  const executed = [];
+  const executedTask = [];
+  const executedRecovery = [];
   for (const caseId of TASK_COMPONENT_IDS) {
     await t.test(caseId, async () => {
-      executed.push(caseId);
+      executedTask.push(caseId);
       await runTaskComponentCase(caseId);
     });
   }
   for (const caseId of RECOVERY_COMPONENT_IDS) {
     await t.test(caseId, async () => {
-      executed.push(caseId);
+      executedRecovery.push(caseId);
       await runRecoveryComponentCase(caseId);
     });
   }
+  const sortedTask = [...executedTask].sort();
+  const sortedRecovery = [...executedRecovery].sort();
+  const sortedTaskExpected = [...TASK_COMPONENT_IDS].sort();
+  const sortedRecoveryExpected = [...RECOVERY_COMPONENT_IDS].sort();
+  assert.deepEqual(sortedTask, sortedTaskExpected, "every task_component manifest ID executed exactly once");
+  assert.equal(executedTask.length, TASK_COMPONENT_IDS.length);
+  assert.deepEqual(sortedRecovery, sortedRecoveryExpected, "every recovery_component manifest ID executed exactly once");
+  assert.equal(executedRecovery.length, RECOVERY_COMPONENT_IDS.length);
+  const taskHash = createHash("sha256").update(sortedTask.join("\n")).digest("hex");
+  assert.equal(taskHash, "d6773f3749e9f68c3b270df9ad63aba6297328b5578d1e5f3346ee2683518110");
+  const recoveryHash = createHash("sha256").update(sortedRecovery.join("\n")).digest("hex");
+  assert.equal(recoveryHash, "b6d8b7a1435b6a62da061980afd370290f16b899774bba32578e3df9cc5f2737");
+});
+
+async function runR4WorkerCase(caseId) {
+  switch (caseId) {
+    case "R4-W01-planned-identity-mismatch-conflict": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "planned", requestFingerprint: fp("r4-w01-other"), resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: null },
+        markAmbiguousOutcome: { outcome: "terminal" }
+      });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      assert.equal(countOp(h.trace, "markAmbiguous"), 0);
+      assert.equal(countOp(h.trace, "sendCheck"), 0);
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R4-W02-terminal-failure-identity-mismatch-conflict": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: fp("r4-w02-other"), resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED },
+        terminalizeOutcome: "terminal"
+      });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      assert.equal(countOp(h.trace, "terminalize"), 0);
+      assert.equal(countOp(h.trace, "sendCheck"), 0);
+      break;
+    }
+    case "R4-W03-retryable-failure-identity-mismatch-conflict": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: fp("r4-w03-other"), resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) }
+      });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      assert.equal(countOp(h.trace, "scheduleRetry"), 0);
+      assert.equal(countOp(h.trace, "sendTask"), 0);
+      break;
+    }
+    case "R4-W04-ordinary-lost-check-injection-falsifies": {
+      const h = componentHarness({ terminalizeOutcome: "lost" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      assertDecisiveTail(h.trace, ["s3.put", "renew", "stop", "assert", "terminalize"]);
+      assertNoOp(h.trace, "sendCheck");
+      const mutatedTrace = [...h.trace, "sendCheck"];
+      assert.throws(() => assertNoOp(mutatedTrace, "sendCheck"), (e) => e instanceof assert.AssertionError);
+      const fresh = componentHarness({ terminalizeOutcome: "lost" });
+      const freshResult = await processKeywordMessage(fresh.message, fresh.runtime, { createLeaseMonitor: fresh.monitorFactory });
+      assert.equal(freshResult.outcome, "lost");
+      assertNoOp(fresh.trace, "sendCheck");
+      break;
+    }
+    case "R4-W05-recovery-lost-write-injection-falsifies": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "lost"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertNoOp(h.trace, "sendCheck");
+      assert.equal(countOp(h.trace, "http"), 0);
+      const mutatedTrace = [...h.trace, "terminalize", "sendCheck"];
+      assert.throws(() => assertNoOp(mutatedTrace, "terminalize"), (e) => e instanceof assert.AssertionError);
+      assert.throws(() => assertNoOp(mutatedTrace, "sendCheck"), (e) => e instanceof assert.AssertionError);
+      const fresh = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "lost"
+      });
+      const freshResult = await processKeywordMessage(fresh.message, fresh.runtime, { createLeaseMonitor: fresh.monitorFactory });
+      assert.equal(freshResult.outcome, "recovered");
+      assertNoOp(fresh.trace, "sendCheck");
+      break;
+    }
+    default:
+      assert.fail(`unhandled R4 worker case ${caseId}`);
+  }
+}
+
+test("SCN-KI-033: durable attempt/task request identity fence rejects every unequal mismatch", async (t) => {
+  const executed = [];
+  for (const caseId of R4_WORKER_CONFLICT_IDS) {
+    await t.test(caseId, async () => {
+      await runR4WorkerCase(caseId);
+      executed.push(caseId);
+    });
+  }
   const sortedExecuted = [...executed].sort();
-  const sortedExpected = [...TASK_COMPONENT_IDS, ...RECOVERY_COMPONENT_IDS].sort();
-  assert.deepEqual(sortedExecuted, sortedExpected, "every task/recovery manifest ID executed exactly once");
-  assert.equal(executed.length, TASK_COMPONENT_IDS.length + RECOVERY_COMPONENT_IDS.length);
-  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  const sortedExpected = [...R4_WORKER_CONFLICT_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 identity-fence manifest ID executed exactly once");
+  assert.equal(executed.length, R4_WORKER_CONFLICT_IDS.length);
+});
+
+test("SCN-KI-034: worker oracle falsification controls mutate only captured evidence", async (t) => {
+  const executed = [];
+  for (const caseId of R4_WORKER_FALSIFY_IDS) {
+    await t.test(caseId, async () => {
+      await runR4WorkerCase(caseId);
+      executed.push(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...R4_WORKER_FALSIFY_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 falsification manifest ID executed exactly once");
+  assert.equal(executed.length, R4_WORKER_FALSIFY_IDS.length);
 });
 
 function r3AuthFailureHttp(calls) {
@@ -1355,24 +1484,26 @@ function r3FailOnAssertMonitorFactory(failOnAssert) {
   };
 }
 
-test("SCN-KI-030: task_database enforcement manifest executes every durable case exactly once", { skip: !enabled }, async () => {
+test("SCN-KI-030: task_database enforcement manifest executes every durable case exactly once", { skip: !enabled }, async (t) => {
   const executed = [];
-  for (const caseId of DATABASE_IDS) {
-    // Each case owns its own disposable schema via withIsolatedDb.
-    await t_scn030(caseId, executed);
-  }
+  await withIsolatedDb("kir4_scn030", async ({ db, repo }) => {
+    for (const caseId of DATABASE_IDS) {
+      await t.test(caseId, async () => {
+        await t_scn030(caseId, executed, { db, repo });
+      });
+    }
+  });
   const sortedExecuted = [...executed].sort();
   const sortedExpected = [...DATABASE_IDS].sort();
   assert.deepEqual(sortedExecuted, sortedExpected, "every task_database manifest ID executed exactly once");
   assert.equal(executed.length, DATABASE_IDS.length);
   const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(hash, "9e8a3973d5430be70e26f68bb235b831b96f17162d30277a40b06942cc94e934");
 });
 
-async function t_scn030(caseId, executed) {
-  await withIsolatedDb(`kir3_d_${caseId.split("-")[1].toLowerCase()}`, async ({ db, repo }) => {
-    executed.push(caseId);
-    switch (caseId) {
+async function t_scn030(caseId, executed, { db, repo }) {
+  executed.push(caseId);
+  switch (caseId) {
       case "R3-D01-after-settle-before-s3-recover": {
         const nowBox = { current: NOW.getTime() };
         const s3 = memoryS3();
@@ -1414,6 +1545,7 @@ async function t_scn030(caseId, executed) {
         assert.equal(artifact.costUsd, "0.01560000");
         const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
         assert.equal(checks.length, 2, "initialize check plus exactly one recovery check");
+        await cleanDurableRows(db, repo);
         break;
       }
       case "R3-D02-after-s3-before-terminal-recover": {
@@ -1459,6 +1591,7 @@ async function t_scn030(caseId, executed) {
         assert.equal(artifact.costUsd, "0.01560000");
         const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
         assert.equal(checks.length, 2);
+        await cleanDurableRows(db, repo);
         break;
       }
       case "R3-D03-terminal-failure-crash-no-retry": {
@@ -1495,6 +1628,7 @@ async function t_scn030(caseId, executed) {
           "terminal failure never creates a second attempt");
         const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
         assert.equal(checks.length, 2, "initialize check plus one terminal failure check");
+        await cleanDurableRows(db, repo);
         break;
       }
       case "R3-D04-retryable-crash-schedules-once": {
@@ -1542,6 +1676,7 @@ async function t_scn030(caseId, executed) {
         const redelivered = dispatch.sent.slice(sentBefore).filter((entry) =>
           entry.type === "keyword.expansion.task.v1" && entry.taskNaturalId === task.id);
         assert.equal(redelivered.length, 1, "one due retry dispatch");
+        await cleanDurableRows(db, repo);
         break;
       }
       case "R3-D05-renewed-expiry-stale-owner-denied": {
@@ -1585,10 +1720,10 @@ async function t_scn030(caseId, executed) {
         assert.equal(s3.objects.size, 1, "no stale S3 write");
         const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
         assert.equal(checks.length, 2, "initialize plus exactly one terminal check");
+        await cleanDurableRows(db, repo);
         break;
       }
       default:
         assert.fail(`unhandled task_database case ${caseId}`);
     }
-  });
 }
