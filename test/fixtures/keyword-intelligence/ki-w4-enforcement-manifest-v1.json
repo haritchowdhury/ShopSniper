@@ -1,0 +1,49 @@
+{
+  "contractVersion": "ki-w4-enforcement-manifest-v1",
+  "groups": {
+    "api_component": [
+      "W4-A01",
+      "W4-A02",
+      "W4-A03",
+      "W4-A04",
+      "W4-A05",
+      "W4-A06",
+      "W4-A07",
+      "W4-A08"
+    ],
+    "server_routes": [
+      "W4-S01",
+      "W4-S02",
+      "W4-S03",
+      "W4-S04",
+      "W4-S05",
+      "W4-S06"
+    ],
+    "query_review": [
+      "W4-Q01",
+      "W4-Q02",
+      "W4-Q03",
+      "W4-Q04",
+      "W4-Q05",
+      "W4-Q06",
+      "W4-Q07",
+      "W4-Q08"
+    ],
+    "handoff_database": [
+      "W4-D01",
+      "W4-D02",
+      "W4-D03",
+      "W4-D04",
+      "W4-D05",
+      "W4-D06"
+    ],
+    "conformance": [
+      "W4-C01",
+      "W4-C02",
+      "W4-C03",
+      "W4-C04",
+      "W4-C05",
+      "W4-C06"
+    ]
+  }
+}
