@@ -1005,6 +1005,7 @@ test("SCN-KI-034: aggregation post-loss operation injection falsifies the zero-l
         (error) => error?.code === "PIPELINE_LEASE_LOST"
       );
       assert.ok(aggCount(h.trace, "s3.get") >= 1, "loss during the first S3 read");
+      aggNoOp(h.trace, "s3.put");
       aggNoOp(h.trace, "publishCandidate");
       aggNoOp(h.trace, "sendTask");
       aggNoOp(h.trace, "sendCheck");
@@ -1018,6 +1019,7 @@ test("SCN-KI-034: aggregation post-loss operation injection falsifies the zero-l
         (error) => error?.code === "PIPELINE_LEASE_LOST"
       );
       assert.ok(aggCount(fresh.trace, "s3.get") >= 1, "loss during the first S3 read");
+      aggNoOp(fresh.trace, "s3.put");
       aggNoOp(fresh.trace, "publishCandidate");
       aggNoOp(fresh.trace, "sendTask");
       aggNoOp(fresh.trace, "sendCheck");

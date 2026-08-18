@@ -1395,8 +1395,9 @@ async function runR4WorkerCase(caseId) {
       assert.equal(result.outcome, "recovered");
       assertNoOp(h.trace, "sendCheck");
       assert.equal(countOp(h.trace, "http"), 0);
+      assert.equal(countOp(h.trace, "terminalize"), 1, "recovery-lost trace records exactly one terminalize");
       const mutatedTrace = [...h.trace, "terminalize", "sendCheck"];
-      assert.throws(() => assertNoOp(mutatedTrace, "terminalize"), (e) => e instanceof assert.AssertionError);
+      assert.throws(() => assert.equal(countOp(mutatedTrace, "terminalize"), 1), (e) => e instanceof assert.AssertionError);
       assert.throws(() => assertNoOp(mutatedTrace, "sendCheck"), (e) => e instanceof assert.AssertionError);
       const fresh = componentHarness({
         latestAttempt: succeededAttempt(),
@@ -1406,6 +1407,7 @@ async function runR4WorkerCase(caseId) {
       const freshResult = await processKeywordMessage(fresh.message, fresh.runtime, { createLeaseMonitor: fresh.monitorFactory });
       assert.equal(freshResult.outcome, "recovered");
       assertNoOp(fresh.trace, "sendCheck");
+      assert.equal(countOp(fresh.trace, "terminalize"), 1, "fresh recovery-lost trace also records exactly one terminalize");
       break;
     }
     default:
