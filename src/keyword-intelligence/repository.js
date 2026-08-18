@@ -47,6 +47,8 @@ class FinalPublicationAbort extends Error {
   }
 }
 
+class RunHandoffAbort extends Error {}
+
 function conflict(code = "KEYWORD_INPUT_CONFLICT") {
   throw new KeywordRepositoryError(code);
 }
@@ -350,6 +352,17 @@ export class PrismaKeywordResearchRepository {
     const ownerId = requireOwner(input?.ownerId);
     const research = await this.client.keywordResearch.findUnique({ where: { id: researchId } });
     if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
+    return { outcome: "found", research };
+  }
+
+  async getOwnedApiView(input) {
+    const researchId = requireResearchId(input?.researchId);
+    const ownerId = requireOwner(input?.ownerId);
+    const research = await this.client.keywordResearch.findFirst({
+      where: { id: researchId, ownerId },
+      include: { stages: { orderBy: [{ stage: "asc" }, { generation: "asc" }] } }
+    });
+    if (!research) return { outcome: "not_found" };
     return { outcome: "found", research };
   }
 
@@ -1216,43 +1229,51 @@ export class PrismaKeywordResearchRepository {
       requireNonempty(item?.keyword);
     }
     if (typeof input?.constructRun !== "function" || typeof input?.constructQueries !== "function") conflict();
-    return this._transaction(async (tx) => {
-      const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
-      if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
-      const existingHandoff = await tx.keywordResearchHandoff.findUnique({
-        where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } }
-      });
-      if (existingHandoff) {
-        if (existingHandoff.selectionFingerprint !== input.selectionFingerprint ||
-            existingHandoff.selectionRevision !== input.expectedSelectionRevision) {
-          return { outcome: "conflict" };
+    try {
+      return await this._transaction(async (tx) => {
+        const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
+        if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
+        const existingHandoff = await tx.keywordResearchHandoff.findUnique({
+          where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } }
+        });
+        if (existingHandoff) {
+          if (existingHandoff.selectionFingerprint !== input.selectionFingerprint ||
+              existingHandoff.selectionRevision !== input.expectedSelectionRevision) {
+            return { outcome: "conflict" };
+          }
+          const run = await tx.run.findUnique({ where: { id: existingHandoff.runId } });
+          return run ? { outcome: "found", run } : { outcome: "conflict" };
         }
-        const run = await tx.run.findUnique({ where: { id: existingHandoff.runId } });
-        return run ? { outcome: "found", run } : { outcome: "conflict" };
-      }
-      if (research.state !== "completed") return { outcome: "conflict", code: "KEYWORD_RESEARCH_NOT_COMPLETED" };
-      if (research.selectionRevision !== input.expectedSelectionRevision) {
-        return { outcome: "conflict", code: "KEYWORD_SELECTION_REVISION_CONFLICT" };
-      }
-      const runId = requireRunId(input?.runId);
-      const run = await input.constructRun(tx, { research, runId, now, items: input.items });
-      if (!run || run.id !== runId || run.keywordResearchId !== researchId ||
-          run.queryPlanSource !== "keyword_research") {
+        if (research.state !== "completed") return { outcome: "conflict", code: "KEYWORD_RESEARCH_NOT_COMPLETED" };
+        if (research.selectionRevision !== input.expectedSelectionRevision) {
+          return { outcome: "conflict", code: "KEYWORD_SELECTION_REVISION_CONFLICT" };
+        }
+        const runId = requireRunId(input?.runId);
+        const run = await input.constructRun(tx, { research, runId, now, items: input.items });
+        if (!run || run.id !== runId || run.ownerId !== research.ownerId ||
+            run.keywordResearchId !== researchId || run.queryPlanSource !== "keyword_research") {
+          throw new RunHandoffAbort();
+        }
+        const queries = await input.constructQueries(tx, { run, items: input.items, now });
+        if (!Array.isArray(queries) || queries.length !== input.items.length ||
+            queries.some((query, index) => query?.runId !== runId ||
+              query?.keywordResearchItemId !== input.items[index]?.itemId)) {
+          throw new RunHandoffAbort();
+        }
+        await tx.keywordResearchHandoff.create({ data: {
+          id: derivedId("krh_", [researchId, input.expectedSelectionRevision, input.clientRequestId]),
+          researchId, selectionRevision: input.expectedSelectionRevision,
+          clientRequestId: input.clientRequestId, selectionFingerprint: input.selectionFingerprint,
+          runId, createdAt: now
+        } });
+        return { outcome: "created", run };
+      });
+    } catch (error) {
+      if (error instanceof RunHandoffAbort) {
         return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_INVALID" };
       }
-      const queries = await input.constructQueries(tx, { run, items: input.items, now });
-      if (!Array.isArray(queries) || queries.length !== input.items.length ||
-          queries.some((query) => query?.runId !== runId)) {
-        return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_INVALID" };
-      }
-      await tx.keywordResearchHandoff.create({ data: {
-        id: derivedId("krh_", [researchId, input.expectedSelectionRevision, input.clientRequestId]),
-        researchId, selectionRevision: input.expectedSelectionRevision,
-        clientRequestId: input.clientRequestId, selectionFingerprint: input.selectionFingerprint,
-        runId, createdAt: now
-      } });
-      return { outcome: "created", run };
-    });
+      throw error;
+    }
   }
 
   async recover(now) {
