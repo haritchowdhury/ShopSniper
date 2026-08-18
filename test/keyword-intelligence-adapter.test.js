@@ -464,6 +464,7 @@ test("negative control: retry-after-ambiguity would require a second call (call-
 
 const ENFORCEMENT_MANIFEST = JSON.parse(readFileSync(`${fixtureDir}/ki-r3-enforcement-manifest-v1.json`, "utf8"));
 const ADAPTER_MANIFEST_IDS = ENFORCEMENT_MANIFEST.groups.adapter;
+const R4_MANIFEST = JSON.parse(readFileSync(`${fixtureDir}/ki-r4-enforcement-manifest-v1.json`, "utf8"));
 
 function tracedRepo(overrides = {}) {
   const trace = [];
@@ -719,7 +720,7 @@ test("SCN-KI-028: adapter enforcement manifest executes every case with exact tr
   assert.deepEqual(sortedExecuted, sortedExpected, "every adapter manifest ID executed exactly once");
   assert.equal(executed.length, ADAPTER_MANIFEST_IDS.length);
   const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(hash, "b4ede4c2a1a32fddc1a1ac67e023a81f93c6863632cdff2be421f20d51080e4f");
 });
 
 test("SCN-KI-028: negative control strips active cost and falsifies the A01 cost-projection oracle", async () => {
@@ -742,4 +743,57 @@ test("SCN-KI-028: negative control strips active cost and falsifies the A01 cost
   assert.notEqual(strippedResult.providerCostUsd, "0.01560000",
     "stripped active cost must falsify the A01 exact-cost oracle");
   assert.equal(strippedResult.providerCostUsd, "0.00000000");
+});
+
+async function runR4AdapterCase(caseId) {
+  const successCase = SUGGESTIONS_FIXTURE.cases.find((entry) => entry.id === "SG001");
+  switch (caseId) {
+    case "R4-A01-active-cost-output-omission-falsifies": {
+      let supplied;
+      const repo = tracedRepo({
+        settleAttempt: async (input) => { supplied = input.providerCostUsd; return { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run for a terminal success"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "succeeded");
+      assert.equal(result.providerCostUsd, supplied, "active result exposes the exact settled cost");
+      assert.equal(supplied, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      assert.equal(repo.calls.settle, 1);
+      assert.deepEqual(repo.trace, ["cache", "http", "json"]);
+
+      const mutated = { ...result };
+      delete mutated.providerCostUsd;
+      assert.throws(() => assert.equal(mutated.providerCostUsd, supplied), (e) => e instanceof assert.AssertionError);
+
+      let suppliedFresh;
+      const repoFresh = tracedRepo({
+        settleAttempt: async (input) => { suppliedFresh = input.providerCostUsd; return { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run for a terminal success"); }
+      });
+      const httpFresh = tracedHttp({ status: 200, body: successCase.payload, trace: repoFresh.trace });
+      const freshResult = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http: httpFresh, repo: repoFresh });
+      assert.equal(freshResult.outcome, "succeeded");
+      assert.equal(freshResult.providerCostUsd, suppliedFresh, "production path reruns unchanged and still passes");
+      assert.equal(suppliedFresh, "0.01560000");
+      break;
+    }
+    default:
+      assert.fail(`unhandled R4 adapter case ${caseId}`);
+  }
+}
+
+test("SCN-KI-034: adapter cost-output omission falsifies the unchanged oracle", async (t) => {
+  const executed = [];
+  for (const caseId of R4_MANIFEST.groups.adapter_control) {
+    await t.test(caseId, async () => {
+      await runR4AdapterCase(caseId);
+      executed.push(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...R4_MANIFEST.groups.adapter_control].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 adapter-control manifest ID executed exactly once");
+  assert.equal(executed.length, R4_MANIFEST.groups.adapter_control.length);
 });
