@@ -31,7 +31,7 @@ export class SqsDispatcher {
     let delaySeconds;
     if (options === null || typeof options !== "object" || Array.isArray(options) ||
         Object.getPrototypeOf(options) !== Object.prototype) invalid();
-    const keys = Object.keys(options);
+    const keys = Reflect.ownKeys(options);
     if (keys.length > 1 || (keys.length === 1 && keys[0] !== "delaySeconds")) invalid();
     if (keys.length === 1) {
       delaySeconds = options.delaySeconds;
