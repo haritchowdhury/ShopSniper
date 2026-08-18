@@ -504,6 +504,7 @@ test("SCN-KI-026: failStage returns its fence outcome and callers propagate lost
 });
 
 const AGG_MANIFEST = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json", import.meta.url)), "utf8"));
+const R4_MANIFEST = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/keyword-intelligence/ki-r4-enforcement-manifest-v1.json", import.meta.url)), "utf8"));
 const AGG_MANIFEST_IDS = AGG_MANIFEST.groups.aggregation;
 const AGG_CANDIDATES = ["seed one alpha", "seed one beta", "seed one gamma"];
 
@@ -991,5 +992,40 @@ test("SCN-KI-031: aggregation enforcement manifest executes every case with exac
   assert.deepEqual(sortedExecuted, sortedExpected, "every aggregation manifest ID executed exactly once");
   assert.equal(executed.length, AGG_MANIFEST_IDS.length);
   const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(hash, "c017cd869b11a93e86070112ed626a3cd299e00a518ed3a568dd8f1331c27b14");
+});
+
+test("SCN-KI-034: aggregation post-loss operation injection falsifies the zero-later-call oracle", async (t) => {
+  const executed = [];
+  for (const caseId of R4_MANIFEST.groups.aggregation_control) {
+    await t.test(caseId, async () => {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal", failOnAssert: 4 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(aggCount(h.trace, "s3.get") >= 1, "loss during the first S3 read");
+      aggNoOp(h.trace, "publishCandidate");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+
+      const mutatedTrace = [...h.trace, "s3.put"];
+      assert.throws(() => aggNoOp(mutatedTrace, "s3.put"), (e) => e instanceof assert.AssertionError);
+
+      const fresh = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal", failOnAssert: 4 });
+      await assert.rejects(
+        processKeywordMessage(fresh.message, fresh.runtime, { createLeaseMonitor: fresh.monitorFactory }),
+        (error) => error?.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(aggCount(fresh.trace, "s3.get") >= 1, "loss during the first S3 read");
+      aggNoOp(fresh.trace, "publishCandidate");
+      aggNoOp(fresh.trace, "sendTask");
+      aggNoOp(fresh.trace, "sendCheck");
+      executed.push(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...R4_MANIFEST.groups.aggregation_control].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 aggregation-control manifest ID executed exactly once");
+  assert.equal(executed.length, R4_MANIFEST.groups.aggregation_control.length);
 });
