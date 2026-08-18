@@ -344,3 +344,8 @@ export function attachVariants(clusters, allRecords) {
     aggregateMetadata(cluster, rows);
   }
 }
+
+export function classifyKeywordForSelection(keyword, { mainIntent = null, stripTokens = [] } = {}) {
+  const toks = tokens(keyword, stripTokens);
+  return { lane: lane({ keyword, mainIntent }, toks), facets: facets(toks, keyword) };
+}
