@@ -539,12 +539,21 @@ function requestedKeywordResearchId(pathname, suffix = "") {
   return identifier;
 }
 
-function keywordResearchBody(payload) {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return {};
-  const body = { ...payload };
-  delete body.ownerId;
-  delete body.researchId;
-  return body;
+const KEYWORD_RESEARCH_CREATE_BODY_KEYS = ["seeds"];
+const KEYWORD_RESEARCH_SELECTION_BODY_KEYS = ["expectedRevision", "items"];
+const KEYWORD_RESEARCH_RUNS_BODY_KEYS = ["expectedSelectionRevision", "clientRequestId"];
+
+function keywordResearchBody(payload, allowedKeys) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new ApiError(400, "KEYWORD_RESEARCH_INPUT_INVALID", "The keyword research request body is invalid.");
+  }
+  const unknownKeys = Object.keys(payload).filter((key) => !allowedKeys.includes(key));
+  if (unknownKeys.length) {
+    throw new ApiError(400, "KEYWORD_RESEARCH_INPUT_INVALID", "The keyword research request body is invalid.", {
+      unknownKeys
+    });
+  }
+  return { ...payload };
 }
 
 function parseRunListPagination(searchParams) {
@@ -1747,7 +1756,7 @@ export function createLeadServer(
       const payload = await readJsonBody(request);
       const created = await researchApi.createResearch({
         ownerId,
-        ...keywordResearchBody(payload)
+        ...keywordResearchBody(payload, KEYWORD_RESEARCH_CREATE_BODY_KEYS)
       });
       return sendJson(response, 202, created);
     }
@@ -1777,7 +1786,7 @@ export function createLeadServer(
       const saved = await researchApi.saveSelection({
         ownerId,
         researchId: selectionIdentifier,
-        ...keywordResearchBody(payload)
+        ...keywordResearchBody(payload, KEYWORD_RESEARCH_SELECTION_BODY_KEYS)
       });
       return sendJson(response, 200, saved);
     }
@@ -1789,7 +1798,7 @@ export function createLeadServer(
       const handoff = await researchApi.createRun({
         ownerId,
         researchId: runsIdentifier,
-        ...keywordResearchBody(payload)
+        ...keywordResearchBody(payload, KEYWORD_RESEARCH_RUNS_BODY_KEYS)
       });
       return sendJson(response, handoff.created ? 201 : 200, {
         run: handoff.run,
