@@ -424,6 +424,7 @@ async function processTask(message, runtime, kind, dependencies) {
 async function recoverClaimedTask({ taskId, token, current, message, kind, runtime, research, stage, config, monitor }) {
   const latestAttempt = current.latestAttempt;
   if (!latestAttempt) return { outcome: "proceed" };
+  if (latestAttempt.requestFingerprint !== current.task.requestFingerprint) invariant();
   const now = () => nowOf(runtime);
 
   if (latestAttempt.state === "planned" || latestAttempt.state === "in_flight") {
