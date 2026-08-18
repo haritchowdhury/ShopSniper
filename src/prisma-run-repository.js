@@ -15,6 +15,7 @@ import {
   serializeLead,
   trafficCacheRecordToUpsert
 } from "./api-serializer.js";
+import { mapSelectionToQueries } from "./keyword-intelligence/query-mapper.js";
 import { loadConfig } from "./config.js";
 import { finalizeLeadScoresV3 } from "./lead-score-finalizer.js";
 import { assertLeadScoreState } from "./lead-state.js";
@@ -172,6 +173,10 @@ export function stableLeadId(runIdentifier, record, index) {
     throw new Error("A stable lead identity or deterministic index is required");
   }
   return childId("lead", runIdentifier, identity || index);
+}
+
+export function newRunId() {
+  return runId();
 }
 
 function isUniqueConstraint(error) {
@@ -858,6 +863,81 @@ function resultOrder(filters) {
   ];
 }
 
+function requireHandoffInput(input, keys) {
+  if (!input || typeof input !== "object") {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  for (const key of keys) {
+    if (input[key] === undefined) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+  }
+}
+
+function keywordResearchCategoryIndex(item, seeds) {
+  const sourceSeeds = Array.isArray(item?.sourceSeeds) ? item.sourceSeeds : [];
+  for (const seed of sourceSeeds) {
+    const index = seeds.indexOf(seed);
+    if (index !== -1) return index;
+  }
+  throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+}
+
+function buildKeywordResearchReplacementRows(run, queries, now) {
+  const existingById = new Map(run.queries.map((row) => [row.id, row]));
+  const persistedIds = new Set(existingById.keys());
+  const incomingIds = queries.map((item) => item.id);
+  if (new Set(incomingIds).size !== incomingIds.length) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  for (const id of incomingIds) {
+    if (!persistedIds.has(id)) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+  }
+  if (persistedIds.size !== incomingIds.length) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  const persistedItemIds = new Set();
+  for (const row of run.queries) {
+    if (!row.keywordResearchItemId || persistedItemIds.has(row.keywordResearchItemId)) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    persistedItemIds.add(row.keywordResearchItemId);
+  }
+  return queries.map((item, sequence) => {
+    const existing = existingById.get(item.id);
+    if (existing.categoryIndex !== item.categoryIndex) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    if (existing.query === item.query) {
+      return { ...existing, sequence, updatedAt: now };
+    }
+    return {
+      id: existing.id,
+      runId: existing.runId,
+      categoryIndex: existing.categoryIndex,
+      sequence,
+      query: item.query,
+      source: "user_edited",
+      validationState: "pending",
+      rejectionReason: null,
+      queryScore: existing.queryScore,
+      generationReason: existing.generationReason,
+      sourceUrls: existing.sourceUrls,
+      categoryVocabulary: jsonValue(existing.categoryVocabulary),
+      probeSummary: undefined,
+      probeResults: undefined,
+      probeContractVersion: null,
+      probeFingerprint: null,
+      probedAt: null,
+      keywordResearchItemId: existing.keywordResearchItemId,
+      createdAt: existing.createdAt,
+      updatedAt: now
+    };
+  });
+}
+
 export class PrismaRunRepository {
   constructor(prisma = getPrismaClient(), runtimeConfig = {}) {
     this.prisma = prisma;
@@ -1199,6 +1279,82 @@ export class PrismaRunRepository {
     return run;
   }
 
+  async createKeywordResearchRun(tx, input) {
+    requireHandoffInput(input, [
+      "research",
+      "runId",
+      "now",
+      "items",
+      "selectionRevision",
+      "selectionFingerprint",
+      "snapshot"
+    ]);
+    const { research, runId, now, selectionRevision, snapshot } = input;
+    if (!Array.isArray(research?.seeds)) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    const categories = research.seeds.map((seed) => ({
+      originalShopType: seed,
+      shopType: seed,
+      businessQualifier: "unspecified"
+    }));
+    const base = this.runCreateData(research.ownerId, categories, runId);
+    return tx.run.create({
+      data: {
+        ...base,
+        state: "awaiting_query_confirmation",
+        phase: "query_review",
+        stage: "awaiting_query_confirmation",
+        queryRevision: 1,
+        queryPlanReadyAt: now,
+        keywordResearchId: research.id,
+        keywordSelectionRevision: selectionRevision,
+        keywordSelectionSnapshot: snapshot,
+        queryPlanSource: "keyword_research"
+      }
+    });
+  }
+
+  async createKeywordResearchQueries(tx, input) {
+    requireHandoffInput(input, ["run", "items", "now", "snapshot"]);
+    const { run, items, now, snapshot } = input;
+    if (fingerprintJson(items) !== fingerprintJson(snapshot?.items)) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    const mapped = mapSelectionToQueries(items);
+    if (!mapped.ok) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    const seeds = Array.isArray(snapshot?.seeds) ? snapshot.seeds : [];
+    const rows = mapped.rows.map((row, sequence) => ({
+      id: queryId(),
+      runId: run.id,
+      categoryIndex: keywordResearchCategoryIndex(items[sequence], seeds),
+      sequence,
+      query: row.sequence,
+      source: "generated",
+      validationState: "pending",
+      rejectionReason: null,
+      queryScore: null,
+      generationReason: "keyword_research",
+      sourceUrls: [],
+      categoryVocabulary: null,
+      probeSummary: null,
+      probeResults: null,
+      probeContractVersion: null,
+      probeFingerprint: null,
+      probedAt: null,
+      keywordResearchItemId: row.itemId,
+      createdAt: now,
+      updatedAt: now
+    }));
+    const created = await tx.runQuery.createMany({ data: rows });
+    if (created.count !== rows.length) {
+      throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+    }
+    return rows;
+  }
+
   async replaceEditableQueries(
     runIdentifier,
     ownerId,
@@ -1218,6 +1374,12 @@ export class PrismaRunRepository {
       if (run.queryRevision !== expectedRevision) {
         throw new QueryRevisionConflictError(run.queryRevision);
       }
+      let rows;
+      if (run.queryPlanSource === "keyword_research") {
+        rows = buildKeywordResearchReplacementRows(run, queries, now);
+      } else if (run.queryPlanSource !== "legacy") {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+      }
       const advanced = await transaction.run.updateMany({
         where: {
           id: runIdentifier,
@@ -1235,8 +1397,9 @@ export class PrismaRunRepository {
         });
         throw new QueryRevisionConflictError(current?.queryRevision ?? expectedRevision);
       }
-      const existingById = new Map(run.queries.map((row) => [row.id, row]));
-      const rows = queries.map((item, sequence) => {
+      if (run.queryPlanSource === "legacy") {
+        const existingById = new Map(run.queries.map((row) => [row.id, row]));
+        rows = queries.map((item, sequence) => {
         const existing = item.id ? existingById.get(item.id) : null;
         const unchanged = existing &&
           existing.categoryIndex === item.categoryIndex &&
@@ -1264,6 +1427,7 @@ export class PrismaRunRepository {
           updatedAt: now
         };
       });
+      }
       await transaction.runQuery.deleteMany({ where: { runId: runIdentifier } });
       if (rows.length) await transaction.runQuery.createMany({ data: rows });
       return transaction.run.findUnique({
