@@ -1894,7 +1894,13 @@ const CASE_BODIES = {
     } catch {
       absent = true;
     }
-    assert.equal(absent, true, "DB handoff registry is not yet authored at this leaf");
+    if (!absent) {
+      const dbRegistry = readFileSync(`${projectRoot}/test/keyword-intelligence-handoff.integration.test.js`, "utf8");
+      assert.ok(dbRegistry.includes("ALLOW_DATABASE_TESTS"), "DB registry keeps its database opt-in guard");
+      for (const id of MANIFEST.groups.handoff_database) {
+        assert.ok(dbRegistry.includes(id), `DB registry registers ${id}`);
+      }
+    }
   }
 };
 
