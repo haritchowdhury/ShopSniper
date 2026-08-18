@@ -94,3 +94,138 @@ for (const handlerName of LAMBDA_HANDLERS) {
     }
   });
 }
+
+test("SCN-KI-027: keyword build removes only its own paths, is two-run reproducible, and preserves siblings", async () => {
+  const {
+    buildKeywordWorkerPackage,
+    KEYWORD_LAMBDA_HANDLERS
+  } = await import("../scripts/build-keyword-worker.js");
+  const {
+    readFile, readdir, writeFile, mkdir, rm, stat
+  } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const sha = (value) => createHash("sha256").update(value).digest("hex");
+  const stagingRoot = path.join(projectRoot, ".lambda-build");
+  const archiveRoot = path.join(projectRoot, "dist", "lambda");
+  const sentinels = [];
+  const sentinelPaths = [];
+  const recordSentinel = (absolute) => { sentinels.push(absolute); sentinelPaths.push(path.relative(projectRoot, absolute)); };
+
+  async function treeHash(root) {
+    const entries = await readdir(root, { withFileTypes: true });
+    const lines = [];
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = path.join(root, entry.name);
+      if (entry.isDirectory()) lines.push(`${entry.name}/\n${await treeHash(absolute)}`);
+      else lines.push(`${entry.name}:${sha(await readFile(absolute))}\n`);
+    }
+    return sha(lines.join(""));
+  }
+
+  const siblings = LAMBDA_HANDLERS.filter((name) => !KEYWORD_LAMBDA_HANDLERS.includes(name));
+  const siblingStagingHashes = {};
+  const siblingZipHashes = {};
+  for (const name of siblings) {
+    siblingStagingHashes[name] = await treeHash(path.join(stagingRoot, name));
+    siblingZipHashes[name] = sha(await readFile(path.join(archiveRoot, `${name}.zip`)));
+  }
+  const measurementsHash = sha(await readFile(path.join(archiveRoot, "measurements.json")));
+  const ownStaging = path.join(stagingRoot, "keyword-worker");
+  const ownArchive = path.join(archiveRoot, "keyword-worker.zip");
+
+  const obsoleteMember = path.join(ownStaging, "obsolete-member.json");
+  recordSentinel(obsoleteMember);
+  await mkdir(ownStaging, { recursive: true });
+  await writeFile(obsoleteMember, "{}");
+  await writeFile(path.join(ownStaging, "sentinel-staging.txt"), "stale");
+  recordSentinel(path.join(ownStaging, "sentinel-staging.txt"));
+  await mkdir(archiveRoot, { recursive: true });
+  const seededZip = spawnSync("zip", ["-X", "-q", ownArchive, "obsolete-member.json", "sentinel-staging.txt"], {
+    cwd: ownStaging, encoding: "utf8"
+  });
+  if (seededZip.status !== 0) throw new Error(`seed zip failed: ${seededZip.stderr.trim()}`);
+
+  await buildKeywordWorkerPackage();
+  const firstZipHash = sha(await readFile(ownArchive));
+  await buildKeywordWorkerPackage();
+  const secondZipHash = sha(await readFile(ownArchive));
+  assert.equal(firstZipHash, secondZipHash, "two keyword builds are byte-identical");
+
+  const listing = spawnSync("unzip", ["-l", ownArchive], { encoding: "utf8" });
+  assert.equal(listing.status, 0, listing.stderr);
+  assert.equal(listing.stdout.includes("obsolete-member.json"), false, "obsolete own member removed from ZIP");
+  assert.equal(listing.stdout.includes("sentinel-staging.txt"), false, "stale staging sentinel absent from ZIP");
+
+  for (const name of siblings) {
+    assert.equal(await treeHash(path.join(stagingRoot, name)), siblingStagingHashes[name], `sibling staging ${name} unchanged`);
+    assert.equal(sha(await readFile(path.join(archiveRoot, `${name}.zip`))), siblingZipHashes[name], `sibling ZIP ${name} unchanged`);
+  }
+  assert.equal(sha(await readFile(path.join(archiveRoot, "measurements.json"))), measurementsHash, "measurements unchanged");
+
+  const inventory = spawnSync("unzip", ["-l", ownArchive], { encoding: "utf8" });
+  assert.ok(inventory.stdout.includes("index.mjs"), "keyword bundle present");
+  assert.equal((inventory.stdout.match(/libquery_engine-rhel-openssl-3\.0\.x\.so\.node/gu) ?? []).length, 1,
+    "exactly one AL2023 engine");
+  assert.equal(inventory.stdout.includes(".env"), false, "no env paths");
+  const unzipped = spawnSync("unzip", ["-t", ownArchive], { encoding: "utf8" });
+  assert.equal(unzipped.status, 0, unzipped.stderr);
+
+  const temporary = mkdtempSync(path.join(tmpdir(), "storesignal-keyword-build-"));
+  try {
+    const extraction = path.join(temporary, "kw");
+    const extract = spawnSync("unzip", ["-q", ownArchive, "-d", extraction], { encoding: "utf8" });
+    assert.equal(extract.status, 0, extract.stderr);
+    const entries = await readdir(extraction, { recursive: true });
+    assert.ok(entries.includes("index.mjs"), "cold import entry exists");
+    const engineCount = entries.filter((entry) => /libquery_engine-rhel-openssl-3\.0\.x\.so\.node$/u.test(entry)).length;
+    assert.equal(engineCount, 1, "exactly one engine file in extraction");
+    const forbidden = entries.some((entry) => /(^|\/)\.env(?:\.|$)|(^|\/)tests?\/|(^|\/)fixtures?\/|(^|\/)docs?\/|\.map$|\.md$/i.test(entry));
+    assert.equal(forbidden, false, "no forbidden paths in extraction");
+    const sizes = await Promise.all(entries.map(async (entry) => (await stat(path.join(extraction, entry))).size));
+    const total = sizes.reduce((sum, value) => sum + value, 0);
+    const zipped = (await stat(ownArchive)).size;
+    assert.ok(zipped <= 45 * 1024 * 1024, `ZIP <= 45MiB (${zipped})`);
+    assert.ok(total <= 200 * 1024 * 1024, `unzipped <= 200MiB (${total})`);
+    const importProgram = `import{writeFileSync}from"node:fs";const module=await import(${JSON.stringify(pathToFileURL(path.join(extraction, "index.mjs")).href)});writeFileSync(${JSON.stringify(path.join(temporary, "cold.json"))},JSON.stringify({handler:typeof module.handler}));`;
+    const cold = spawnSync(process.execPath, ["--input-type=module", "--eval", importProgram], {
+      cwd: projectRoot, encoding: "utf8", env: { PATH: process.env.PATH }
+    });
+    assert.equal(cold.status, 0, cold.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(temporary, "cold.json"), "utf8")), { handler: "function" },
+      "cold ESM import exports handler");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+
+  try {
+    for (const sentinel of sentinels) {
+      await rm(sentinel, { recursive: true, force: true });
+    }
+  } catch {}
+});
+
+test("SCN-KI-027: shared-root deletion negative control falsifies the sibling-preservation oracle", async () => {
+  const { readFile, readdir, rm, mkdir, writeFile, cp } = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const sha = (value) => createHash("sha256").update(value).digest("hex");
+  const stagingRoot = path.join(projectRoot, ".lambda-build");
+  const temporary = mkdtempSync(path.join(tmpdir(), "storesignal-keyword-negctl-"));
+  try {
+    const copyRoot = path.join(temporary, "lambda-build-copy");
+    await cp(stagingRoot, copyRoot, { recursive: true });
+    const sentinel = path.join(copyRoot, "sibling-sentinel.json");
+    await writeFile(sentinel, "{}");
+    const pre = sha(await readFile(sentinel));
+    await rm(copyRoot, { recursive: true, force: true });
+    const removed = await readdir(copyRoot).then(() => false).catch(() => true);
+    assert.equal(removed, true, "shared-root deletion removes the sibling sentinel in the copy");
+    const productionRootIntact = await readdir(stagingRoot).then(() => true).catch(() => false);
+    assert.equal(productionRootIntact, true, "production staging root untouched by the negative control");
+    const realSibling = path.join(stagingRoot, "discovery-worker", "index.mjs");
+    const intact = await readFile(realSibling).then(() => true).catch(() => false);
+    assert.equal(intact, true, "production sibling staging remains present");
+    assert.notEqual(pre, sha("missing"), "buggy shared-root deletion changes the sibling sentinel hash oracle");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});

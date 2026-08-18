@@ -92,8 +92,11 @@ async function buildHandler(name) {
 
 export async function buildKeywordWorkerPackage() {
   await assertRequiredInputs();
-  await rm(buildRoot, { recursive: true, force: true });
-  await mkdir(buildRoot, { recursive: true });
+  const ownStaging = path.join(buildRoot, "keyword-worker");
+  const ownArchive = path.join(outputRoot, "keyword-worker.zip");
+  await rm(ownStaging, { recursive: true, force: true });
+  await rm(ownArchive, { force: true });
+  await mkdir(ownStaging, { recursive: true });
   await mkdir(outputRoot, { recursive: true });
   await buildHandler("keyword-worker");
 }

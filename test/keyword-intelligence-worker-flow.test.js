@@ -65,8 +65,9 @@ function statefulRepository(seeds) {
       return { outcome: "not_found" };
     },
     heartbeat: async () => ({ outcome: "claimed" }),
+    heartbeatAggregator: async () => ({ outcome: "claimed" }),
     recordAttempt: async () => ({ outcome: "created", attempt: { attemptNumber: 1 }, mayCall: true }),
-    settleAttempt: async () => ({ outcome: "terminal", attempt: { attemptNumber: 1 } }),
+    settleAttempt: async () => ({ outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }),
     markAttemptAmbiguous: async () => ({ outcome: "terminal" }),
     scheduleRetry: async () => ({ outcome: "delayed", retryAt: new Date(NOW.getTime() + 4000) }),
     deferTask: async () => ({ outcome: "delayed", retryAt: new Date(NOW.getTime() + 2000) }),
@@ -128,6 +129,8 @@ function statefulRepository(seeds) {
     },
     failStage: async () => ({ outcome: "terminal" })
   };
+  repo.stages = stages;
+  repo.tasksByStage = tasksByStage;
   return { repo, get finalPublished() { return finalPublished; }, get stageOrder() { return stageOrder; } };
 }
 
@@ -156,11 +159,14 @@ function memoryS3() {
 
 function memoryDispatcher() {
   const sent = [];
+  const options = [];
   return {
     sent,
-    async sendOne(_queueUrl, message, schema) {
+    options,
+    async sendOne(_queueUrl, message, schema, opts) {
       const result = schema.safeParse(message);
       if (!result.success) throw new Error("PIPELINE_MESSAGE_INVALID");
+      options.push(opts);
       sent.push(result.data);
       return { sentItemIds: [message.taskNaturalId ?? message.researchId ?? message.stage], failedItemIds: [] };
     }
@@ -307,4 +313,169 @@ test("component handler builds a keyword-only store at maxBytes 33554432 and nev
   assert.equal(pipelineDefault.maxBytes, 5000000);
   assert.notEqual(keywordStore.maxBytes, pipelineDefault.maxBytes);
   assert.notEqual(keywordStore, pipelineDefault, "stores are not shared");
+});
+
+function preFailedMonitor(code = "PIPELINE_LEASE_LOST") {
+  return function factory() {
+    const error = new Error(code);
+    error.code = code;
+    return {
+      assertActive() { throw error; },
+      async renewNow() { throw error; },
+      async stop() { throw error; }
+    };
+  };
+}
+
+function stopFailsMonitor(code) {
+  return function factory() {
+    const error = new Error(code);
+    error.code = code;
+    return {
+      assertActive() {},
+      async renewNow() {},
+      async stop() { throw error; }
+    };
+  };
+}
+
+function capturingMonitors(records) {
+  return ({ intervalMs, now, renew }) => {
+    const record = { intervalMs, renewals: 0 };
+    records.push(record);
+    const state = { failure: null, stopped: false };
+    const monitor = {
+      record,
+      async renewNow() {
+        record.renewals += 1;
+        if (state.stopped) return;
+        try { await renew(now()); } catch (error) { state.failure ??= error; throw error; }
+      },
+      assertActive() { if (state.failure) throw state.failure; },
+      async stop() { state.stopped = true; if (state.failure) throw state.failure; }
+    };
+    return monitor;
+  };
+}
+
+async function driveWithFactory(initial, runtime, factory, seen) {
+  const queue = [initial];
+  let prevSent = 0;
+  while (queue.length) {
+    const message = queue.shift();
+    const dedup = message.type.endsWith(".task.v1") ? `${message.type}:${message.taskNaturalId}` : null;
+    if (dedup !== null) {
+      if (seen.has(dedup)) continue;
+      seen.add(dedup);
+    }
+    const dependencies = message.type === "keyword.aggregate.check.v1"
+      ? { createLeaseMonitor: factory } : undefined;
+    await processKeywordMessage(message, runtime, dependencies);
+    for (let index = prevSent; index < runtime.dispatcher.sent.length; index += 1) {
+      queue.push(runtime.dispatcher.sent[index]);
+    }
+    prevSent = runtime.dispatcher.sent.length;
+  }
+}
+
+function throttledTaskSetup(seeds) {
+  const factory = statefulRepository(seeds);
+  const repo = factory.repo;
+  const s3 = memoryS3();
+  const dispatch = memoryDispatcher();
+  const http = keywordHttp();
+  const nowBox = { current: NOW.getTime() };
+  const runtime = { ...runtimeFor(repo, s3, dispatch, http.http), clock: () => new Date(nowBox.current) };
+  repo.claimThrottle = async () => ({ outcome: "delayed", retryAt: new Date(nowBox.current + 3000) });
+  repo.deferTask = async () => ({ outcome: "delayed", retryAt: new Date(nowBox.current + 3000) });
+  return { factory, repo, s3, dispatch, runtime, nowBox };
+}
+
+test("SCN-KI-025: voluntary release stops the monitor and emits one exactly-delayed redelivery", async () => {
+  const { dispatch, runtime } = throttledTaskSetup(["seed one"]);
+  await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId: runtime.repository.researchId, generation: 1 }, runtime);
+  const taskMsg = dispatch.sent.find((m) => m.type === "keyword.expansion.task.v1");
+  const sentBefore = dispatch.sent.length;
+  const result = await processKeywordMessage(taskMsg, runtime);
+  assert.equal(result.outcome, "retryAt", "throttle deferral returns retryAt");
+  const redelivered = dispatch.sent.slice(sentBefore).filter((m) => m.type === "keyword.expansion.task.v1");
+  assert.equal(redelivered.length, 1, "one delayed redelivery after monitor stop");
+  assert.equal(redelivered[0].taskNaturalId, taskMsg.taskNaturalId, "same strict task message");
+  assert.deepEqual(dispatch.options.at(-1), { delaySeconds: 3 }, "exact SQS DelaySeconds");
+});
+
+test("SCN-KI-025: stopReleasedLease suppresses only PIPELINE_LEASE_LOST and propagates other errors", async () => {
+  const loss = { ...throttledTaskSetup(["seed two"]) };
+  await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId: loss.runtime.repository.researchId, generation: 1 }, loss.runtime);
+  const lossMsg = loss.dispatch.sent.find((m) => m.type === "keyword.expansion.task.v1");
+  const lossResult = await processKeywordMessage(lossMsg, loss.runtime, { createLeaseMonitor: stopFailsMonitor("PIPELINE_LEASE_LOST") });
+  assert.equal(lossResult.outcome, "retryAt", "PIPELINE_LEASE_LOST on voluntary-release stop is suppressed");
+
+  const other = throttledTaskSetup(["seed three"]);
+  await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId: other.runtime.repository.researchId, generation: 1 }, other.runtime);
+  const otherMsg = other.dispatch.sent.find((m) => m.type === "keyword.expansion.task.v1");
+  await assert.rejects(
+    processKeywordMessage(otherMsg, other.runtime, { createLeaseMonitor: stopFailsMonitor("PIPELINE_OTHER") }),
+    (error) => error?.code === "PIPELINE_OTHER",
+    "non-lease monitor errors propagate"
+  );
+});
+
+test("SCN-KI-026: aggregation monitors use 40000ms, renew on every terminal path, and publish once", async () => {
+  const factory = statefulRepository(["seed one"]);
+  const repo = factory.repo;
+  const s3 = memoryS3();
+  const dispatch = memoryDispatcher();
+  const runtime = runtimeFor(repo, s3, dispatch, keywordHttp().http);
+  const records = [];
+  const seen = new Set();
+  await driveWithFactory({ contractVersion: 1, type: "keyword.initialize.v1", researchId: repo.researchId, generation: 1 }, runtime, capturingMonitors(records), seen);
+  assert.equal(factory.finalPublished, true, "market aggregation published");
+  assert.equal(records.length, 3, "exactly three aggregation monitors");
+  assert.ok(records.every((record) => record.intervalMs === 40000), "aggregation monitors use 40000ms");
+  assert.ok(records.every((record) => record.renewals >= 1), "each published aggregation renewed before its fence transaction");
+  assert.ok(s3.objects.has(keywordResultKey(repo.researchId, 1)), "final result written");
+  const marketManifest = s3.objects.get(keywordManifestKey(repo.researchId, 1, "market_overview"));
+  assert.ok(marketManifest, "market manifest written");
+});
+
+test("SCN-KI-026: detected aggregation lease loss before a read blocks all later S3/Neon/SQS", async () => {
+  const factory = statefulRepository(["seed one"]);
+  const repo = factory.repo;
+  const s3 = memoryS3();
+  const dispatch = memoryDispatcher();
+  const runtime = runtimeFor(repo, s3, dispatch, keywordHttp().http);
+  await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId: repo.researchId, generation: 1 }, runtime);
+  const expansionTasks = dispatch.sent.filter((m) => m.type === "keyword.expansion.task.v1");
+  assert.equal(expansionTasks.length, 2);
+  for (const message of expansionTasks) await processKeywordMessage(message, runtime);
+  const expansionCheck = dispatch.sent.find((m) => m.type === "keyword.aggregate.check.v1" && m.stage === "expansion");
+  const expResult = await processKeywordMessage(expansionCheck, runtime);
+  assert.equal(expResult.outcome, "published");
+  const anchorTask = dispatch.sent.find((m) => m.type === "keyword.overview.task.v1" && m.stage === "anchor_screen");
+  await processKeywordMessage(anchorTask, runtime);
+  const anchorCheck = dispatch.sent.find((m) => m.type === "keyword.aggregate.check.v1" && m.stage === "anchor_screen");
+  const tasksBefore = dispatch.sent.length;
+  await assert.rejects(
+    processKeywordMessage(anchorCheck, runtime, { createLeaseMonitor: preFailedMonitor("PIPELINE_LEASE_LOST") }),
+    (error) => error?.code === "PIPELINE_LEASE_LOST"
+  );
+  assert.ok(!s3.objects.has(keywordManifestKey(repo.researchId, 1, "anchor_screen")), "no shortlist manifest after loss");
+  assert.equal(dispatch.sent.length, tasksBefore, "no market task or check dispatched after loss");
+});
+
+test("SCN-KI-026: failStage returns its fence outcome and callers propagate lost instead of stage_failed", async () => {
+  const factory = statefulRepository(["seed one"]);
+  const repo = factory.repo;
+  const s3 = memoryS3();
+  const dispatch = memoryDispatcher();
+  const runtime = runtimeFor(repo, s3, dispatch, keywordHttp().http);
+  await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId: repo.researchId, generation: 1 }, runtime);
+  repo.tasksByStage.expansion[0].state = "failed";
+  repo.stages.expansion.state = "ready";
+  repo.failStage = async () => ({ outcome: "lost" });
+  const check = dispatch.sent.find((m) => m.type === "keyword.aggregate.check.v1" && m.stage === "expansion");
+  const result = await processKeywordMessage(check, runtime);
+  assert.equal(result.outcome, "lost", "lost failStage propagates, not stage_failed");
+  assert.equal(factory.finalPublished, false, "no publication follows a lost failStage");
 });

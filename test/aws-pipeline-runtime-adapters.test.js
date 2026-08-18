@@ -277,6 +277,49 @@ test("SQS single and whole-batch failures return recoverable logical IDs", async
   });
 });
 
+test("SCN-KI-025: sendOne optional delaySeconds emits the exact DelaySeconds and preserves omitted-option commands", async () => {
+  const commands = [];
+  const client = { async send(command) {
+    commands.push({ input: command.input, name: command.constructor.name });
+    return { Successful: [{ Id: "id-1" }] };
+  } };
+  const dispatcher = new SqsDispatcher({ client });
+  const url = "https://sqs.example/q";
+  const message = work(1);
+  await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 0 });
+  await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 1 });
+  await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 75 });
+  await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 900 });
+  await dispatcher.sendOne(url, message, workMessageSchema);
+  assert.deepEqual(commands.map(({ input }) => input.DelaySeconds), [0, 1, 75, 900, undefined]);
+  assert.deepEqual(commands.slice(0, 4).map(({ input }) => JSON.parse(input.MessageBody)), Array(4).fill(message));
+  const omitted = commands.at(-1).input;
+  assert.deepEqual(Object.keys(omitted), ["QueueUrl", "MessageBody"]);
+  assert.equal(omitted.QueueUrl, url);
+});
+
+test("SCN-KI-025: sendOne rejects invalid delaySeconds options and extra option keys", async () => {
+  const sent = [];
+  const client = { async send(command) { sent.push(command.input); return {}; } };
+  const dispatcher = new SqsDispatcher({ client });
+  const message = work(1);
+  for (const options of [
+    { delaySeconds: -1 },
+    { delaySeconds: 901 },
+    { delaySeconds: 1.5 },
+    { delaySeconds: "1" },
+    { delaySeconds: 1, extra: 2 },
+    { other: 3 }
+  ]) {
+    await assert.rejects(
+      dispatcher.sendOne("https://sqs.example/q", message, workMessageSchema, options),
+      (error) => error.code === "PIPELINE_MESSAGE_INVALID",
+      JSON.stringify(options)
+    );
+  }
+  assert.equal(sent.length, 0);
+});
+
 test("mixed SQS batches isolate malformed and nonterminal records while accepting terminal replay", async () => {
   const event = { Records: [
     { messageId: "a", body: JSON.stringify({ result: "ok" }) },

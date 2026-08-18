@@ -267,6 +267,263 @@ async function withIsolatedDb(schema, fn) {
   }
 }
 
+function fakeMonitors() {
+  const monitors = [];
+  const factory = ({ intervalMs, now, renew }) => {
+    const state = { failure: null, stopped: false, renewals: 0 };
+    const monitor = {
+      state,
+      intervalMs,
+      async renewNow() {
+        if (state.stopped) return;
+        state.renewals += 1;
+        try {
+          await renew(now());
+        } catch (error) {
+          state.failure ??= error;
+          throw error;
+        }
+      },
+      assertActive() {
+        if (state.failure) throw state.failure;
+      },
+      async stop() {
+        state.stopped = true;
+        if (state.failure) throw state.failure;
+      },
+      async tick() {
+        await monitor.renewNow();
+      }
+    };
+    monitors.push(monitor);
+    return monitor;
+  };
+  return { factory, monitors };
+}
+
+function clockedRuntime(repo, s3, dispatch, httpSeam, nowBox) {
+  return {
+    ...runtimeFor(repo, s3, dispatch, httpSeam),
+    clock: () => new Date(nowBox.current)
+  };
+}
+
+function countingHttp() {
+  const calls = [];
+  return {
+    calls,
+    async http(url, init) {
+      const payload = JSON.parse(init.body)[0];
+      calls.push({ url, payload });
+      if (url.includes("keyword_suggestions")) return { status: 200, json: async () => expansionResponse(payload.keyword, "suggestions") };
+      return { status: 200, json: async () => expansionResponse(payload.keyword, "related") };
+    }
+  };
+}
+
+async function createAndInitialize(db, repo, runtime, seeds) {
+  const researchId = newResearchId();
+  assert.equal((await repo.create({
+    researchId, ownerId: "owner", configSnapshot: CONFIG, configFingerprint: fp("c"),
+    seeds, markets: CONFIG.markets
+  }, NOW)).outcome, "created");
+  const initialized = await processInitialize({ contractVersion: 1, type: "keyword.initialize.v1", researchId, generation: 1 }, runtime);
+  assert.equal(initialized.outcome, "initialized");
+  return { researchId, expansionTask: runtime.dispatcher.sent.find((entry) => entry.type === "keyword.expansion.task.v1") };
+}
+
+test("SCN-KI-012: competing task owners at exact lease expiry keep one live fence, one terminal, and immutable replay", { skip: !enabled }, async () => {
+  await withIsolatedDb("kiw3_scn012", async ({ db, repo }) => {
+    const nowBox = { current: NOW.getTime() };
+    const s3 = memoryS3();
+    const dispatch = memoryDispatcher();
+    const http = countingHttp();
+    const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    const monitors = fakeMonitors();
+    const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+    const message = { ...expansionTask };
+    const taskId = message.taskNaturalId;
+    const aToken = "a".repeat(32);
+
+    const claimedA = await repo.claim({ taskId, owner: "owner-A", token: aToken }, new Date(nowBox.current));
+    assert.equal(claimedA.outcome, "claimed", "owner A holds the lease at T0");
+    for (const seconds of [20, 40, 60, 80, 100, 120]) {
+      nowBox.current = NOW.getTime() + seconds * 1000;
+      assert.equal((await repo.heartbeat({ taskId, token: aToken }, new Date(nowBox.current))).outcome, "claimed",
+        `A heartbeat at T0+${seconds}s renews while live`);
+    }
+    nowBox.current = NOW.getTime() + 180000;
+    assert.equal((await repo.heartbeat({ taskId, token: aToken }, new Date(nowBox.current))).outcome, "lost",
+      "stale A heartbeat at exact last expiry changes zero rows");
+
+    const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitors.factory });
+    assert.equal(resultB.outcome, "succeeded", "B reclaims at exact expiry and completes the task");
+    const task = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+    assert.equal(task.state, "succeeded");
+    assert.equal(task.attemptCount, 1, "one live fence produced one attempt");
+
+    const staleTerminal = await repo.terminalize({
+      taskId, token: aToken, state: "failed", safeErrorCode: "KEYWORD_PROVIDER_RETRY_EXHAUSTED"
+    }, new Date(nowBox.current));
+    assert.equal(staleTerminal.outcome, "conflict", "stale A terminal cannot overwrite the immutable succeeded row");
+    const afterStale = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+    assert.equal(afterStale.state, "succeeded", "terminal state is immutable under a stale owner");
+    assert.equal((await db.keywordResearchProviderAttempt.findMany({ where: { taskId } })).length, 1,
+      "one attempt row total");
+
+    const checkMessages = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+    assert.equal(checkMessages.length, 2, "initialize check plus exactly one check from the single terminal owner");
+
+    const replay = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitors.factory });
+    assert.equal(replay.outcome, "conflict", "terminal task is immutable on service replay");
+    assert.equal((await db.keywordResearchProviderAttempt.findMany({ where: { taskId } })).length, 1);
+  });
+});
+
+test("SCN-KI-024: crash after settle before S3 then B recovery writes the byte-identical artifact with zero HTTP", { skip: !enabled }, async () => {
+  await withIsolatedDb("kiw3_scn024a", async ({ db, repo }) => {
+    const nowBox = { current: NOW.getTime() };
+    const s3 = memoryS3();
+    const dispatch = memoryDispatcher();
+    const http = countingHttp();
+    const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    runtimeA.artifactStore = {
+      async putImmutable() { const error = new Error("simulated S3 crash before put"); error.code = "PIPELINE_ARTIFACT_INVALID"; throw error; },
+      async getValidated() { throw new Error("must not read during A"); }
+    };
+    const monitors = fakeMonitors();
+    const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+    const message = { ...expansionTask };
+
+    await assert.rejects(
+      processKeywordMessage(message, runtimeA, { createLeaseMonitor: monitors.factory }),
+      (error) => error?.code === "PIPELINE_ARTIFACT_INVALID"
+    );
+    const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+    assert.equal(task.state, "processing", "A crash leaves the task processing");
+    const attempt = await db.keywordResearchProviderAttempt.findFirst({ where: { taskId: task.id } });
+    assert.equal(attempt.state, "succeeded", "known success settled durably despite the crash");
+    assert.equal(attempt.providerCostUsd.toFixed(8), "0.01560000");
+    const cache = await db.keywordResearchCache.findUnique({ where: { requestFingerprint: task.requestFingerprint } });
+    assert.ok(cache, "normalized cache written in the same settlement transaction");
+    assert.equal(s3.objects.size, 0, "no artifact written before the crash");
+
+    nowBox.current = NOW.getTime() + 60000;
+    const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    const monitorsB = fakeMonitors();
+    const beforeCalls = http.calls.length;
+    const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+    assert.equal(resultB.outcome, "recovered", "B reclaims and reconstructs from attempt+cache");
+    assert.equal(http.calls.length, beforeCalls, "B performs zero additional HTTP calls");
+    assert.equal(s3.objects.size, 1, "exactly one immutable artifact");
+    const terminal = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+    assert.equal(terminal.state, "succeeded");
+    assert.equal(terminal.attemptCount, 1);
+    const artifactKey = terminal.artifactS3Key;
+    const object = s3.objects.get(artifactKey);
+    const artifact = JSON.parse(object.Body.toString("utf8"));
+    assert.equal(artifact.costUsd, "0.01560000", "succeeded recovery writes the durable cost");
+    assert.ok(terminal.artifactFingerprint, "artifact fingerprint recorded");
+    const checkMessages = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+    assert.equal(checkMessages.length, 2, "initialize check plus exactly one recovery check");
+  });
+});
+
+test("SCN-KI-024: crash after S3 before terminal then B recovery exact-matches the immutable artifact with zero HTTP", { skip: !enabled }, async () => {
+  await withIsolatedDb("kiw3_scn024b", async ({ db, repo }) => {
+    const nowBox = { current: NOW.getTime() };
+    const s3 = memoryS3();
+    const dispatch = memoryDispatcher();
+    const http = countingHttp();
+    const realStore = new S3ArtifactStore({ client: s3, bucket: "keyword-bucket", maxBytes: KEYWORD_ARTIFACT_MAX_BYTES });
+    const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    runtimeA.artifactStore = {
+      async putImmutable(input) {
+        const result = await realStore.putImmutable(input);
+        const error = new Error("simulated S3 crash after put");
+        error.code = "PIPELINE_ARTIFACT_INVALID";
+        throw error;
+      },
+      async getValidated(input) { return realStore.getValidated(input); }
+    };
+    const monitors = fakeMonitors();
+    const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+    const message = { ...expansionTask };
+
+    await assert.rejects(
+      processKeywordMessage(message, runtimeA, { createLeaseMonitor: monitors.factory }),
+      (error) => error?.code === "PIPELINE_ARTIFACT_INVALID"
+    );
+    const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+    assert.equal(task.state, "processing");
+    const orphanKey = [...s3.objects.keys()][0];
+    assert.equal(s3.objects.size, 1, "the immutable orphan exists before terminalization");
+    assert.ok(orphanKey, "orphan artifact key captured from S3");
+
+    nowBox.current = NOW.getTime() + 60000;
+    const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    const monitorsB = fakeMonitors();
+    const beforeCalls = http.calls.length;
+    const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+    assert.equal(resultB.outcome, "recovered");
+    assert.equal(http.calls.length, beforeCalls, "B performs zero HTTP calls");
+    assert.equal(s3.objects.size, 1, "no second artifact object");
+    const terminal = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+    assert.equal(terminal.state, "succeeded");
+    assert.equal(terminal.artifactS3Key, orphanKey, "B reconciles the exact orphan key");
+    const object = s3.objects.get(orphanKey);
+    const artifact = JSON.parse(object.Body.toString("utf8"));
+    assert.equal(artifact.costUsd, "0.01560000");
+    const checkMessages = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+    assert.equal(checkMessages.length, 2, "initialize check plus exactly one recovery check");
+  });
+});
+
+test("SCN-KI-025: delayed retry redelivery is dispatched only when due and early duplicate acknowledges without a call", { skip: !enabled }, async () => {
+  await withIsolatedDb("kiw3_scn025", async ({ db, repo }) => {
+    const nowBox = { current: NOW.getTime() };
+    const s3 = memoryS3();
+    const dispatch = memoryDispatcher();
+    const http = countingHttp();
+    const runtime = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+    const monitors = fakeMonitors();
+    const { expansionTask } = await createAndInitialize(db, repo, runtime, ["seed one"]);
+    const message = { ...expansionTask };
+
+    await db.$executeRawUnsafe(
+      `INSERT INTO "${repo.schema}"."KeywordProviderThrottle" ("provider", "nextAllowedAt", "updatedAt") VALUES ('dataforseo_labs_keyword', now() + interval '10 seconds', now())`
+    );
+    const sentBefore = dispatch.sent.length;
+    const first = await processKeywordMessage(message, runtime, { createLeaseMonitor: monitors.factory });
+    assert.equal(first.outcome, "retryAt", "throttle defers durably");
+    const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+    assert.equal(task.state, "pending");
+    assert.equal(task.leaseToken, null, "voluntary release clears the lease");
+    assert.ok(task.nextAttemptAt, "durable due time stored");
+    assert.equal(http.calls.length, 0, "deferral performs no HTTP call");
+    const attempts = await db.keywordResearchProviderAttempt.count({ where: { taskId: task.id } });
+    assert.equal(attempts, 0, "deferral consumes no attempt");
+    const redelivered = dispatch.sent.slice(sentBefore).filter((entry) =>
+      entry.type === "keyword.expansion.task.v1" && entry.taskNaturalId === task.id);
+    assert.equal(redelivered.length, 1, "one delayed same-task redelivery after monitor stop");
+    assert.equal(redelivered[0].taskNaturalId, message.taskNaturalId, "same strict task message redelivered");
+
+    await db.$executeRawUnsafe(`UPDATE "${repo.schema}"."KeywordProviderThrottle" SET "nextAllowedAt" = now() - interval '10 seconds'`);
+    const early = await processKeywordMessage(message, runtime, { createLeaseMonitor: monitors.factory });
+    assert.equal(early.outcome, "delayed", "early duplicate before due acknowledges without a call");
+    assert.equal(http.calls.length, 0, "early duplicate performs zero HTTP");
+    assert.equal((await db.keywordResearchProviderAttempt.count({ where: { taskId: task.id } })), 0);
+
+    await db.$executeRawUnsafe(
+      `UPDATE "${repo.schema}"."KeywordResearchTask" SET "nextAttemptAt" = '${new Date(nowBox.current - 10000).toISOString()}' WHERE "id" = '${task.id}'`
+    );
+    const due = await processKeywordMessage(message, runtime, { createLeaseMonitor: monitors.factory });
+    assert.equal(due.outcome, "succeeded", "due redelivery runs the provider once");
+    assert.equal(http.calls.length, 1);
+  });
+});
+
 test("initialize creates the exact immutable expansion task set and replay dispatches without conflict", { skip: !enabled }, async () => {
   await withIsolatedDb("kiw3_init_1", async ({ db, repo }) => {
     const s3 = memoryS3();

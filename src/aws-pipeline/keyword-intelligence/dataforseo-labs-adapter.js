@@ -43,6 +43,25 @@ function invariant(code = "PIPELINE_INPUT_CONFLICT") {
   throw new PipelineInvariantError(code);
 }
 
+function settlementFence(settled, { attempt, providerCostUsd }) {
+  const kind = settled?.outcome;
+  if ((kind === "terminal" || kind === "found") && settled?.fenceActive === true) {
+    return { outcome: "active", attempt: settled.attempt ?? attempt };
+  }
+  if (kind === "lost" || kind === "not_found" ||
+      (kind === "found" && settled?.fenceActive === false)) {
+    return { outcome: "lost", attempt: settled?.attempt ?? attempt, providerCostUsd };
+  }
+  invariant();
+}
+
+async function markAmbiguousOnce(repository, { taskId, attemptNumber, requestFingerprint }, now) {
+  const marked = await repository.markAttemptAmbiguous({
+    taskId, attemptNumber, requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
+  }, now);
+  if (marked.outcome !== "terminal" && marked.outcome !== "found") invariant();
+}
+
 function moneyString(value) {
   return Number(value).toFixed(8);
 }
@@ -207,16 +226,9 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
     invariant();
   }
   if (recorded.outcome === "found") {
-    const marked = await repository.markAttemptAmbiguous({
-      taskId,
-      attemptNumber: recorded.attempt.attemptNumber,
-      requestFingerprint: task.requestFingerprint,
-      safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
-    }, now);
-    if (marked.outcome !== "conflict") {
-      return { outcome: "ambiguous", code: KEYWORD_PROVIDER_AMBIGUOUS };
-    }
-    invariant();
+    await markAmbiguousOnce(repository, { taskId, attemptNumber: recorded.attempt.attemptNumber,
+      requestFingerprint: task.requestFingerprint }, now);
+    return { outcome: "ambiguous", code: KEYWORD_PROVIDER_AMBIGUOUS };
   }
   if (recorded.outcome !== "created" || recorded.mayCall !== true) invariant();
 
@@ -237,18 +249,18 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       signal: AbortSignal.timeout(timeoutSeconds * 1000)
     });
   } catch {
-    await repository.markAttemptAmbiguous({
-      taskId, attemptNumber, requestFingerprint: task.requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
-    }, now);
+    await markAmbiguousOnce(repository, { taskId, attemptNumber, requestFingerprint: task.requestFingerprint }, now);
     return { outcome: "ambiguous", code: KEYWORD_PROVIDER_AMBIGUOUS };
   }
 
   const status = response?.status;
   let body;
+  let decoded = true;
   try {
     body = await response.json();
   } catch {
     body = null;
+    decoded = false;
   }
 
   if (status === 401) {
@@ -256,34 +268,15 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_AUTH_FAILED, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: bodyCost(body) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_AUTH_FAILED, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
-  if (body === null) {
-    const retryableStatus = config.api.retry?.retryableStatus ?? [];
-    if (retryableStatus.includes(status)) {
-      const settled = await repository.settleAttempt({
-        taskId, token, attemptNumber, state: "failed", providerCostUsd: moneyString(0),
-        safeErrorCode: KEYWORD_PROVIDER_RETRYABLE, resultFingerprint: null, cacheEntry: null
-      }, now);
-      if (settled.outcome === "conflict") invariant();
-      return await scheduleKnownRetry({ taskId, token, attemptNumber, config, clock, repository, recorded });
-    }
-    if (status === 200) {
-      await repository.markAttemptAmbiguous({
-        taskId, attemptNumber, requestFingerprint: task.requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
-      }, now);
-      return { outcome: "ambiguous", code: KEYWORD_PROVIDER_AMBIGUOUS };
-    }
-    const settled = await repository.settleAttempt({
-      taskId, token, attemptNumber, state: "failed", providerCostUsd: moneyString(0),
-      safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED, resultFingerprint: null, cacheEntry: null
-    }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_TASK_FAILED, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: moneyString(0) };
+  if (!decoded) {
+    await markAmbiguousOnce(repository, { taskId, attemptNumber, requestFingerprint: task.requestFingerprint }, now);
+    return { outcome: "ambiguous", code: KEYWORD_PROVIDER_AMBIGUOUS };
   }
 
   const root = parseRoot(body);
@@ -292,9 +285,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: bodyCost(body) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   if (root.status_code === 40100) {
@@ -302,9 +296,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_AUTH_FAILED, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: bodyCost(body) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_AUTH_FAILED, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   const retryableStatus = config.api.retry?.retryableStatus ?? [];
@@ -314,8 +309,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_RETRYABLE, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return await scheduleKnownRetry({ taskId, token, attemptNumber, config, clock, repository, recorded });
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return scheduleKnownRetry({ taskId, token, attemptNumber, config, clock, repository, recorded,
+      attempt: fence.attempt, providerCostUsd: fence.providerCostUsd });
   }
 
   if (status !== 200 || root.status_code !== 20000) {
@@ -323,9 +320,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_TASK_FAILED, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: bodyCost(body) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_TASK_FAILED, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   const taskEnvelope = parseTaskEnvelope(body);
@@ -334,9 +332,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: bodyCost(body),
       safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: bodyCost(body) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: bodyCost(body) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   if (taskEnvelope.status_code !== 20000) {
@@ -344,9 +343,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: taskCost(taskEnvelope, 0),
       safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_TASK_FAILED, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: taskCost(taskEnvelope, 0) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: taskCost(taskEnvelope, 0) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_TASK_FAILED, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   const taskBody = parseEndpointTask(endpointKey, body);
@@ -355,9 +355,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: taskCost(taskEnvelope, 0),
       safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: taskCost(taskEnvelope, 0) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: taskCost(taskEnvelope, 0) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   let normalized;
@@ -368,9 +369,10 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       taskId, token, attemptNumber, state: "failed", providerCostUsd: taskCost(taskEnvelope, 0),
       safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH, resultFingerprint: null, cacheEntry: null
     }, now);
-    if (settled.outcome === "conflict") invariant();
-    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: settled.attempt ?? recorded.attempt,
-      providerCostUsd: taskCost(taskEnvelope, 0) };
+    const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: taskCost(taskEnvelope, 0) });
+    if (fence.outcome === "lost") return fence;
+    return { outcome: "failed", code: KEYWORD_PROVIDER_CONTRACT_MISMATCH, attempt: fence.attempt,
+      providerCostUsd: fence.providerCostUsd };
   }
 
   const costUsd = taskCost(taskEnvelope, 0);
@@ -387,27 +389,29 @@ export async function executeProviderAttempt({ task, config, clock, http, reposi
       ttlSeconds: CACHE_TTL_SECONDS
     }
   }, now);
-  if (settled.outcome === "conflict") invariant();
+  const fence = settlementFence(settled, { attempt: recorded.attempt, providerCostUsd: costUsd });
+  if (fence.outcome === "lost") return fence;
   return {
     outcome: "succeeded",
     normalized,
-    attempt: settled.attempt ?? recorded.attempt,
+    attempt: fence.attempt,
     providerCostUsd: costUsd
   };
 }
 
-async function scheduleKnownRetry({ taskId, token, attemptNumber, config, clock, repository, recorded }) {
+async function scheduleKnownRetry({ taskId, token, attemptNumber, config, clock, repository, recorded, attempt, providerCostUsd }) {
   const now = clock();
   const scheduled = await repository.scheduleRetry({ taskId, token, attemptNumber }, now);
   if (scheduled.outcome === "delayed") {
-    return { outcome: "retryAt", retryAt: scheduled.retryAt, reason: "retry", attempt: recorded.attempt,
-      providerCostUsd: null };
+    return { outcome: "retryAt", retryAt: scheduled.retryAt, reason: "retry", attempt: attempt ?? recorded.attempt,
+      providerCostUsd: providerCostUsd ?? null };
   }
   if (scheduled.outcome === "conflict" && scheduled.code === KEYWORD_PROVIDER_RETRY_EXHAUSTED) {
-    return { outcome: "failed", code: KEYWORD_PROVIDER_RETRY_EXHAUSTED, attempt: recorded.attempt, providerCostUsd: null };
+    return { outcome: "failed", code: KEYWORD_PROVIDER_RETRY_EXHAUSTED, attempt: attempt ?? recorded.attempt,
+      providerCostUsd: providerCostUsd ?? null };
   }
   if (scheduled.outcome === "not_found" || scheduled.outcome === "lost") {
-    return { outcome: "lost", attempt: recorded.attempt, providerCostUsd: null };
+    return { outcome: "lost", attempt: attempt ?? recorded.attempt, providerCostUsd: providerCostUsd ?? null };
   }
   invariant();
 }

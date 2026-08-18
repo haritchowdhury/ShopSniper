@@ -59,6 +59,62 @@ function nowOf(runtime) {
   return value;
 }
 
+const LEASE_LOST_CODE = "PIPELINE_LEASE_LOST";
+
+function leaseLostError() {
+  const error = new Error(LEASE_LOST_CODE);
+  error.code = LEASE_LOST_CODE;
+  return error;
+}
+
+function createKeywordLeaseMonitor({ kind, runtime, createLeaseMonitor, taskId, token, researchId, stage, generation }) {
+  const factory = createLeaseMonitor ?? createPipelineLeaseMonitor;
+  if (kind === "task") {
+    return factory({
+      intervalMs: 20000,
+      now: () => nowOf(runtime),
+      renew: async (now) => {
+        const renewed = await runtime.repository.heartbeat({ taskId, token }, now);
+        if (renewed.outcome !== "claimed") throw leaseLostError();
+        return renewed;
+      }
+    });
+  }
+  if (kind === "aggregation") {
+    return factory({
+      intervalMs: 40000,
+      now: () => nowOf(runtime),
+      renew: async (now) => {
+        const renewed = await runtime.repository.heartbeatAggregator({ researchId, stage, generation, token }, now);
+        if (renewed.outcome !== "claimed") throw leaseLostError();
+        return renewed;
+      }
+    });
+  }
+  invariant();
+}
+
+async function withLeaseBoundary(monitor, operation) {
+  monitor.assertActive();
+  const result = await operation();
+  monitor.assertActive();
+  return result;
+}
+
+async function prepareTerminalLease(monitor) {
+  await monitor.renewNow();
+  await monitor.stop();
+  monitor.assertActive();
+}
+
+async function stopReleasedLease(monitor) {
+  try {
+    await monitor.stop();
+  } catch (error) {
+    if (error?.code !== LEASE_LOST_CODE) throw error;
+  }
+}
+
 function httpOf(runtime) {
   return typeof runtime.http === "function" ? runtime.http : globalThis.fetch;
 }
@@ -169,8 +225,8 @@ async function overviewRequestForTask(task, message, context, runtime, config) {
   return { request, inputFingerprint, marketCode };
 }
 
-async function sendKeywordMessage(runtime, message, schema) {
-  const sent = await runtime.dispatcher.sendOne(queueUrlOf(runtime), message, schema);
+async function sendKeywordMessage(runtime, message, schema, options) {
+  const sent = await runtime.dispatcher.sendOne(queueUrlOf(runtime), message, schema, options);
   if (sent.sentItemIds.length !== 1) return false;
   return true;
 }
@@ -183,11 +239,11 @@ async function sendCheck(runtime, { researchId, generation, stage, tasks }) {
   }, keywordMessageSchema);
 }
 
-export async function processKeywordMessage(message, runtime) {
-  if (message.type === KEYWORD_MESSAGE_INITIALIZE) return processInitialize(message, runtime);
-  if (message.type === KEYWORD_MESSAGE_EXPANSION_TASK) return processTask(message, runtime, "expansion");
-  if (message.type === KEYWORD_MESSAGE_OVERVIEW_TASK) return processTask(message, runtime, "overview");
-  if (message.type === KEYWORD_MESSAGE_AGGREGATE_CHECK) return processAggregateCheck(message, runtime);
+export async function processKeywordMessage(message, runtime, dependencies = {}) {
+  if (message.type === KEYWORD_MESSAGE_INITIALIZE) return processInitialize(message, runtime, dependencies);
+  if (message.type === KEYWORD_MESSAGE_EXPANSION_TASK) return processTask(message, runtime, "expansion", dependencies);
+  if (message.type === KEYWORD_MESSAGE_OVERVIEW_TASK) return processTask(message, runtime, "overview", dependencies);
+  if (message.type === KEYWORD_MESSAGE_AGGREGATE_CHECK) return processAggregateCheck(message, runtime, dependencies);
   invariant();
 }
 
@@ -246,7 +302,7 @@ export async function processInitialize(message, runtime) {
   return { terminal: true, outcome: "initialized" };
 }
 
-async function processTask(message, runtime, kind) {
+async function processTask(message, runtime, kind, dependencies) {
   const taskId = message.taskNaturalId;
   const initial = await runtime.repository.getTaskContext({ taskId });
   if (initial.outcome !== "found") return { terminal: true, outcome: initial.outcome };
@@ -265,78 +321,88 @@ async function processTask(message, runtime, kind) {
   const stage = current.stage;
   const config = configOf(research);
 
-  const monitor = createPipelineLeaseMonitor({
-    intervalMs: 20000,
-    renew: async (now) => {
-      const renewed = await runtime.repository.heartbeat({ taskId, token }, now);
-      if (renewed.outcome !== "claimed") throw new Error("PIPELINE_LEASE_LOST");
-      return renewed;
-    }
+  const monitor = createKeywordLeaseMonitor({
+    kind: "task", runtime, createLeaseMonitor: dependencies?.createLeaseMonitor, taskId, token
   });
 
   try {
-    const recovered = await recoverClaimedTask({
-      taskId, token, current, message, kind, runtime, research, stage, config
+    let recovered;
+    let reconstructed;
+    await withLeaseBoundary(monitor, async () => {
+      recovered = await recoverClaimedTask({
+        taskId, token, current, message, kind, runtime, research, stage, config
+      });
+      if (recovered.outcome === "proceed") {
+        reconstructed = kind === "expansion"
+          ? expansionRequestForTask(task, research, config)
+          : await overviewRequestForTask(task, message, current, runtime, config);
+      }
     });
     if (recovered.outcome === "recovered") {
-      await monitor.stop();
+      await stopReleasedLease(monitor);
       return { terminal: true, outcome: "recovered" };
     }
-
-    const reconstructed = kind === "expansion"
-      ? expansionRequestForTask(task, research, config)
-      : await overviewRequestForTask(task, message, current, runtime, config);
     if (reconstructed.inputFingerprint !== task.inputFingerprint) invariant();
     if (keywordRequestFingerprint(task.endpointKey, reconstructed.request) !== task.requestFingerprint) invariant();
 
-    const attempt = await runProviderAttempt({
-      task, research, config, runtime, request: reconstructed.request
+    let attempt;
+    await withLeaseBoundary(monitor, async () => {
+      attempt = await runProviderAttempt({
+        task, research, config, runtime, request: reconstructed.request
+      });
     });
 
     if (attempt.outcome === "retryAt") {
-      await sendSameTaskMessage(runtime, message);
-      await monitor.stop();
+      const delaySeconds = Math.max(0, Math.ceil((attempt.retryAt.getTime() - nowOf(runtime).getTime()) / 1000));
+      if (delaySeconds > 900) invariant();
+      await stopReleasedLease(monitor);
+      await sendSameTaskMessage(runtime, message, { delaySeconds });
       return { terminal: true, outcome: "retryAt" };
     }
     if (attempt.outcome === "ambiguous" || attempt.outcome === "lost") {
-      await monitor.stop();
+      await stopReleasedLease(monitor);
       return { terminal: true, outcome: attempt.outcome };
     }
     if (attempt.outcome === "failed") {
       const state = stage.stage === "expansion" && attempt.code !== KEYWORD_PROVIDER_BUDGET_EXHAUSTED
         ? "skipped" : "failed";
+      await prepareTerminalLease(monitor);
       const terminalized = await runtime.repository.terminalize({
         taskId, token, state, safeErrorCode: attempt.code
       }, nowOf(runtime));
       await sendCheckForStage(runtime, current);
-      await monitor.stop();
+      await stopReleasedLease(monitor);
       return { terminal: true, outcome: terminalized.outcome === "terminal" ? "terminal" : terminalized.outcome };
     }
     if (attempt.outcome !== "succeeded" && attempt.outcome !== "cacheHit") invariant();
 
     const { schema, value: artifact } = buildTaskArtifact(research, task, stage, attempt);
     const key = keywordTaskArtifactKey(research.id, research.generation, stage.stage, task.itemKey);
-    const stored = await runtime.artifactStore.putImmutable({
-      key,
-      contractVersion: artifact.contractVersion,
-      runId: research.id,
-      stage: stage.stage,
-      generation: research.generation,
-      itemId: task.itemKey,
-      inputFingerprint: task.inputFingerprint,
-      producedAt: task.createdAt,
-      value: artifact,
-      schema
+    let stored;
+    await withLeaseBoundary(monitor, async () => {
+      stored = await runtime.artifactStore.putImmutable({
+        key,
+        contractVersion: artifact.contractVersion,
+        runId: research.id,
+        stage: stage.stage,
+        generation: research.generation,
+        itemId: task.itemKey,
+        inputFingerprint: task.inputFingerprint,
+        producedAt: task.createdAt,
+        value: artifact,
+        schema
+      });
     });
+    await prepareTerminalLease(monitor);
     const terminalized = await runtime.repository.terminalize({
       taskId, token, state: "succeeded",
       artifactS3Key: stored.key, artifactFingerprint: stored.contentFingerprint
     }, nowOf(runtime));
     await sendCheckForStage(runtime, current);
-    await monitor.stop();
+    await stopReleasedLease(monitor);
     return { terminal: true, outcome: terminalized.outcome === "terminal" ? "succeeded" : terminalized.outcome };
   } catch (error) {
-    await monitor.stop().catch(() => {});
+    await stopReleasedLease(monitor);
     throw error;
   }
 }
@@ -356,18 +422,28 @@ async function recoverClaimedTask({ taskId, token, current, message, kind, runti
     const cached = await runtime.repository.cacheRead({
       requestFingerprint: current.task.requestFingerprint
     }, nowOf(runtime));
-    if (cached.outcome !== "found") {
+    const ambiguousFromCache = async () => {
       await runtime.repository.markAttemptAmbiguous({
         taskId, attemptNumber: latestAttempt.attemptNumber,
         requestFingerprint: latestAttempt.requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
       }, nowOf(runtime));
+    };
+    if (cached.outcome !== "found") {
+      await ambiguousFromCache();
+      return { outcome: "recovered" };
+    }
+    if (cached.cache.resultFingerprint !== latestAttempt.resultFingerprint) {
+      await ambiguousFromCache();
       return { outcome: "recovered" };
     }
     const reconstructed = kind === "expansion"
       ? expansionRequestForTask(current.task, research, config)
       : await overviewRequestForTask(current.task, message, current, runtime, config);
+    if (reconstructed.inputFingerprint !== current.task.inputFingerprint) invariant();
+    if (keywordRequestFingerprint(current.task.endpointKey, reconstructed.request) !== current.task.requestFingerprint) invariant();
     const { schema, value: artifact } = buildTaskArtifact(research, current.task, stage,
-      { outcome: "cacheHit", normalized: cached.cache.normalizedResponse });
+      { outcome: "succeeded", normalized: cached.cache.normalizedResponse,
+        providerCostUsd: latestAttempt.providerCostUsd });
     const key = keywordTaskArtifactKey(research.id, research.generation, stage.stage, current.task.itemKey);
     const stored = await runtime.artifactStore.putImmutable({
       key, contractVersion: artifact.contractVersion, runId: research.id,
@@ -394,7 +470,9 @@ async function recoverClaimedTask({ taskId, token, current, message, kind, runti
       taskId, token, attemptNumber: latestAttempt.attemptNumber
     }, nowOf(runtime));
     if (scheduled.outcome === "delayed") {
-      await sendSameTaskMessage(runtime, message);
+      const delaySeconds = Math.max(0, Math.ceil((scheduled.retryAt.getTime() - nowOf(runtime).getTime()) / 1000));
+      if (delaySeconds > 900) invariant();
+      await sendSameTaskMessage(runtime, message, { delaySeconds });
       return { outcome: "recovered" };
     }
     if (scheduled.outcome === "conflict" && scheduled.code === KEYWORD_PROVIDER_RETRY_EXHAUSTED) {
@@ -482,12 +560,12 @@ function buildTaskArtifact(research, task, stage, attempt) {
   invariant();
 }
 
-async function sendSameTaskMessage(runtime, message) {
+async function sendSameTaskMessage(runtime, message, options) {
   return sendKeywordMessage(runtime, {
     contractVersion: 1, type: message.type, researchId: message.researchId,
     generation: message.generation, stage: message.stage,
     taskNaturalId: message.taskNaturalId, inputFingerprint: message.inputFingerprint
-  }, keywordMessageSchema);
+  }, keywordMessageSchema, options);
 }
 
 async function sendCheckForStage(runtime, context) {
@@ -504,7 +582,7 @@ async function stageTasks(runtime, researchId, stageName, generation) {
   return loaded.tasks;
 }
 
-export async function processAggregateCheck(message, runtime) {
+export async function processAggregateCheck(message, runtime, dependencies = {}) {
   const token = newToken();
   const claimed = await runtime.repository.claimAggregator({
     researchId: message.researchId, stage: message.stage, generation: message.generation,
@@ -512,57 +590,74 @@ export async function processAggregateCheck(message, runtime) {
   }, nowOf(runtime));
   if (claimed.outcome !== "claimed") return { terminal: true, outcome: claimed.outcome };
 
-  const context = await runtime.repository.getStageContext({
-    researchId: message.researchId, stage: message.stage, generation: message.generation
+  const monitor = createKeywordLeaseMonitor({
+    kind: "aggregation", runtime, createLeaseMonitor: dependencies.createLeaseMonitor,
+    researchId: message.researchId, stage: message.stage, generation: message.generation, token
   });
-  if (context.outcome !== "found") return { terminal: true, outcome: "lost" };
-  const stage = context.stage;
-  const research = context.research;
-  const config = configOf(research);
-  const tasks = context.tasks;
 
-  if (message.stageInputFingerprint !== undefined &&
-      keywordStageInputFingerprint({
-        researchId: research.id, generation: message.generation, stage: message.stage, tasks
-      }) !== message.stageInputFingerprint) {
+  try {
+    let context;
+    await withLeaseBoundary(monitor, async () => {
+      context = await runtime.repository.getStageContext({
+        researchId: message.researchId, stage: message.stage, generation: message.generation
+      });
+    });
+    if (context.outcome !== "found") return { terminal: true, outcome: "lost" };
+    const stage = context.stage;
+    const research = context.research;
+    const config = configOf(research);
+    const tasks = context.tasks;
+
+    if (message.stageInputFingerprint !== undefined &&
+        keywordStageInputFingerprint({
+          researchId: research.id, generation: message.generation, stage: message.stage, tasks
+        }) !== message.stageInputFingerprint) {
+      invariant();
+    }
+
+    const failedTask = tasks.find((entry) => entry.state === "failed");
+    if (failedTask) {
+      await prepareTerminalLease(monitor);
+      const failedOutcome = await failStage(runtime, research, stage, token,
+        failedTask.safeErrorCode ?? KEYWORD_RESEARCH_STAGE_FAILED);
+      if (failedOutcome !== "terminal" && failedOutcome !== "found") {
+        return { terminal: true, outcome: failedOutcome };
+      }
+      return { terminal: true, outcome: "stage_failed" };
+    }
+
+    if (message.stage === "expansion") {
+      return { terminal: true, outcome: await aggregateExpansion({ research, stage, config, tasks, token, runtime, monitor }) };
+    }
+    if (message.stage === "anchor_screen") {
+      return { terminal: true, outcome: await aggregateAnchor({ research, stage, config, tasks, token, runtime, monitor }) };
+    }
+    if (message.stage === "market_overview") {
+      return { terminal: true, outcome: await aggregateMarket({ research, stage, config, tasks, token, runtime, monitor }) };
+    }
     invariant();
+  } finally {
+    await stopReleasedLease(monitor);
   }
-
-  const failedTask = tasks.find((entry) => entry.state === "failed");
-  if (failedTask) {
-    await runtime.repository.failStage({
-      researchId: research.id, stage: message.stage, generation: message.generation,
-      token, safeErrorCode: failedTask.safeErrorCode ?? KEYWORD_RESEARCH_STAGE_FAILED
-    }, nowOf(runtime));
-    return { terminal: true, outcome: "stage_failed" };
-  }
-
-  if (message.stage === "expansion") {
-    return { terminal: true, outcome: await aggregateExpansion({ research, stage, config, tasks, token, runtime }) };
-  }
-  if (message.stage === "anchor_screen") {
-    return { terminal: true, outcome: await aggregateAnchor({ research, stage, config, tasks, token, runtime }) };
-  }
-  if (message.stage === "market_overview") {
-    return { terminal: true, outcome: await aggregateMarket({ research, stage, config, tasks, token, runtime }) };
-  }
-  invariant();
 }
 
-async function readArtifact(runtime, research, stage, task, schema, contractVersion) {
-  const stored = await runtime.artifactStore.getValidated({
-    key: task.artifactS3Key,
-    expected: {
-      contractVersion, runId: research.id, stage: stage.stage, generation: stage.generation,
-      itemId: task.itemKey, inputFingerprint: task.inputFingerprint,
-      contentFingerprint: task.artifactFingerprint, producedAt: task.createdAt
-    },
-    schema
-  });
-  return stored.value;
+async function readArtifact(runtime, research, stage, task, schema, contractVersion, monitor) {
+  const read = async () => {
+    const stored = await runtime.artifactStore.getValidated({
+      key: task.artifactS3Key,
+      expected: {
+        contractVersion, runId: research.id, stage: stage.stage, generation: stage.generation,
+        itemId: task.itemKey, inputFingerprint: task.inputFingerprint,
+        contentFingerprint: task.artifactFingerprint, producedAt: task.createdAt
+      },
+      schema
+    });
+    return stored.value;
+  };
+  return monitor ? withLeaseBoundary(monitor, read) : read();
 }
 
-async function readManifest(runtime, research, stage, manifestStage, contractVersion, schema) {
+async function readManifest(runtime, research, stage, manifestStage, contractVersion, schema, monitor) {
   const manifestContext = await runtime.repository.getStageContext({
     researchId: research.id, stage: manifestStage, generation: stage.generation
   });
@@ -572,19 +667,22 @@ async function readManifest(runtime, research, stage, manifestStage, contractVer
   const stageInputFingerprint = keywordStageInputFingerprint({
     researchId: research.id, generation: stage.generation, stage: manifestStage, tasks: manifestContext.tasks
   });
-  const stored = await runtime.artifactStore.getValidated({
-    key: source.manifestS3Key,
-    expected: {
-      contractVersion, runId: research.id, stage: manifestStage, generation: stage.generation,
-      itemId: "manifest", inputFingerprint: stageInputFingerprint,
-      contentFingerprint: source.manifestFingerprint, producedAt: source.manifestProducedAt
-    },
-    schema
-  });
-  return stored.value;
+  const read = async () => {
+    const stored = await runtime.artifactStore.getValidated({
+      key: source.manifestS3Key,
+      expected: {
+        contractVersion, runId: research.id, stage: manifestStage, generation: stage.generation,
+        itemId: "manifest", inputFingerprint: stageInputFingerprint,
+        contentFingerprint: source.manifestFingerprint, producedAt: source.manifestProducedAt
+      },
+      schema
+    });
+    return stored.value;
+  };
+  return monitor ? withLeaseBoundary(monitor, read) : read();
 }
 
-async function aggregateExpansion({ research, stage, config, tasks, token, runtime }) {
+async function aggregateExpansion({ research, stage, config, tasks, token, runtime, monitor }) {
   const bySeed = [];
   const globalList = [];
   const seen = new Set();
@@ -595,7 +693,7 @@ async function aggregateExpansion({ research, stage, config, tasks, token, runti
       const task = tasks.find((entry) => entry.itemKey === `${index}:${endpoint}`);
       if (task && task.state === "succeeded") {
         const artifact = await readArtifact(runtime, research, stage, task,
-          keywordExpansionResultSchema, KEYWORD_ARTIFACT_EXPANSION_RESULT);
+          keywordExpansionResultSchema, KEYWORD_ARTIFACT_EXPANSION_RESULT, monitor);
         list.push(...artifact.normalized.keywords);
       }
     }
@@ -633,12 +731,15 @@ async function aggregateExpansion({ research, stage, config, tasks, token, runti
     candidates: globalList
   };
   keywordExpansionManifestSchema.parse(manifest);
-  const stored = await runtime.artifactStore.putImmutable({
-    key: keywordManifestKey(research.id, stage.generation, "expansion"),
-    contractVersion: KEYWORD_ARTIFACT_EXPANSION_MANIFEST,
-    runId: research.id, stage: "expansion", generation: stage.generation, itemId: "manifest",
-    inputFingerprint: manifest.inputFingerprint, producedAt: manifest.producedAt,
-    value: manifest, schema: keywordExpansionManifestSchema
+  let stored;
+  await withLeaseBoundary(monitor, async () => {
+    stored = await runtime.artifactStore.putImmutable({
+      key: keywordManifestKey(research.id, stage.generation, "expansion"),
+      contractVersion: KEYWORD_ARTIFACT_EXPANSION_MANIFEST,
+      runId: research.id, stage: "expansion", generation: stage.generation, itemId: "manifest",
+      inputFingerprint: manifest.inputFingerprint, producedAt: manifest.producedAt,
+      value: manifest, schema: keywordExpansionManifestSchema
+    });
   });
 
   const anchorKeywords = globalList.map((entry) => entry.keyword);
@@ -657,6 +758,7 @@ async function aggregateExpansion({ research, stage, config, tasks, token, runti
     endpointKey: KEYWORD_ENDPOINT_OVERVIEW,
     requestFingerprint: keywordRequestFingerprint(KEYWORD_ENDPOINT_OVERVIEW, request)
   }];
+  await prepareTerminalLease(monitor);
   const published = await runtime.repository.publishCandidateManifest({
     researchId: research.id, generation: stage.generation, token,
     manifestS3Key: stored.key, manifestFingerprint: stored.contentFingerprint, nextStageTasks
@@ -676,18 +778,20 @@ async function aggregateExpansion({ research, stage, config, tasks, token, runti
   return "published";
 }
 
-async function aggregateAnchor({ research, stage, config, tasks, token, runtime }) {
+async function aggregateAnchor({ research, stage, config, tasks, token, runtime, monitor }) {
   const anchorTask = tasks[0];
   const artifact = await readArtifact(runtime, research, stage, anchorTask,
-    keywordAnchorScreenResultSchema, KEYWORD_ARTIFACT_ANCHOR_RESULT);
+    keywordAnchorScreenResultSchema, KEYWORD_ARTIFACT_ANCHOR_RESULT, monitor);
   const metrics = artifact.normalized.metrics;
   if (!metrics.length) {
-    await failStage(runtime, research, stage, token);
+    await prepareTerminalLease(monitor);
+    const failedOutcome = await failStage(runtime, research, stage, token);
+    if (failedOutcome !== "terminal" && failedOutcome !== "found") return failedOutcome;
     return "stage_failed";
   }
 
   const expansionManifest = await readManifest(runtime, research, stage, "expansion",
-    KEYWORD_ARTIFACT_EXPANSION_MANIFEST, keywordExpansionManifestSchema);
+    KEYWORD_ARTIFACT_EXPANSION_MANIFEST, keywordExpansionManifestSchema, monitor);
   const expansion = Object.fromEntries(expansionManifest.bySeed.map((entry) => [entry.seed, entry.keywords]));
   const usMarket = config.markets.find((entry) => entry.code === "US");
   if (!usMarket) invariant();
@@ -701,7 +805,9 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime 
   const sorted = [...usable].sort(shortlistComparator);
   const shortlist = sorted.slice(0, config.shortlistLimit).map((entry) => entry.keyword);
   if (!shortlist.length) {
-    await failStage(runtime, research, stage, token);
+    await prepareTerminalLease(monitor);
+    const failedOutcome = await failStage(runtime, research, stage, token);
+    if (failedOutcome !== "terminal" && failedOutcome !== "found") return failedOutcome;
     return "stage_failed";
   }
 
@@ -718,12 +824,15 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime 
     keywords: shortlist
   };
   keywordShortlistManifestSchema.parse(manifest);
-  const stored = await runtime.artifactStore.putImmutable({
-    key: keywordManifestKey(research.id, stage.generation, "anchor_screen"),
-    contractVersion: KEYWORD_ARTIFACT_SHORTLIST_MANIFEST,
-    runId: research.id, stage: "anchor_screen", generation: stage.generation, itemId: "manifest",
-    inputFingerprint: manifest.inputFingerprint, producedAt: manifest.producedAt,
-    value: manifest, schema: keywordShortlistManifestSchema
+  let stored;
+  await withLeaseBoundary(monitor, async () => {
+    stored = await runtime.artifactStore.putImmutable({
+      key: keywordManifestKey(research.id, stage.generation, "anchor_screen"),
+      contractVersion: KEYWORD_ARTIFACT_SHORTLIST_MANIFEST,
+      runId: research.id, stage: "anchor_screen", generation: stage.generation, itemId: "manifest",
+      inputFingerprint: manifest.inputFingerprint, producedAt: manifest.producedAt,
+      value: manifest, schema: keywordShortlistManifestSchema
+    });
   });
 
   const marketTasks = [];
@@ -745,6 +854,7 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime 
       requestFingerprint: keywordRequestFingerprint(KEYWORD_ENDPOINT_OVERVIEW, request)
     });
   }
+  await prepareTerminalLease(monitor);
   const published = await runtime.repository.publishShortlist({
     researchId: research.id, generation: stage.generation, token,
     manifestS3Key: stored.key, manifestFingerprint: stored.contentFingerprint, marketTasks
@@ -765,25 +875,25 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime 
   return "published";
 }
 
-async function aggregateMarket({ research, stage, config, tasks, token, runtime }) {
+async function aggregateMarket({ research, stage, config, tasks, token, runtime, monitor }) {
   const anchorContext = await runtime.repository.getStageContext({
     researchId: research.id, stage: "anchor_screen", generation: stage.generation
   });
   if (anchorContext.outcome !== "found") invariant();
   const anchorTask = anchorContext.tasks[0];
   const anchorArtifact = await readArtifact(runtime, research, anchorContext.stage, anchorTask,
-    keywordAnchorScreenResultSchema, KEYWORD_ARTIFACT_ANCHOR_RESULT);
+    keywordAnchorScreenResultSchema, KEYWORD_ARTIFACT_ANCHOR_RESULT, monitor);
 
   const overview = { US: anchorArtifact.normalized.metrics };
   for (const task of tasks) {
     const code = task.itemKey.split(":")[0];
     const artifact = await readArtifact(runtime, research, stage, task,
-      keywordMarketOverviewResultSchema, KEYWORD_ARTIFACT_MARKET_RESULT);
+      keywordMarketOverviewResultSchema, KEYWORD_ARTIFACT_MARKET_RESULT, monitor);
     overview[code] = artifact.normalized.metrics;
   }
 
   const expansionManifest = await readManifest(runtime, research, stage, "expansion",
-    KEYWORD_ARTIFACT_EXPANSION_MANIFEST, keywordExpansionManifestSchema);
+    KEYWORD_ARTIFACT_EXPANSION_MANIFEST, keywordExpansionManifestSchema, monitor);
   const expansion = Object.fromEntries(expansionManifest.bySeed.map((entry) => [entry.seed, entry.keywords]));
 
   let result;
@@ -793,7 +903,9 @@ async function aggregateMarket({ research, stage, config, tasks, token, runtime 
       researchId: research.id, generation: stage.generation, configFingerprint: research.configFingerprint
     });
   } catch {
-    await failStage(runtime, research, stage, token);
+    await prepareTerminalLease(monitor);
+    const failedOutcome = await failStage(runtime, research, stage, token);
+    if (failedOutcome !== "terminal" && failedOutcome !== "found") return failedOutcome;
     return "stage_failed";
   }
 
@@ -812,26 +924,32 @@ async function aggregateMarket({ research, stage, config, tasks, token, runtime 
     overview
   };
   keywordMarketOverviewManifestSchema.parse(marketManifest);
-  const manifestStored = await runtime.artifactStore.putImmutable({
-    key: keywordManifestKey(research.id, stage.generation, "market_overview"),
-    contractVersion: KEYWORD_ARTIFACT_MARKET_MANIFEST,
-    runId: research.id, stage: "market_overview", generation: stage.generation, itemId: "manifest",
-    inputFingerprint: stageInputFingerprint, producedAt,
-    value: marketManifest, schema: keywordMarketOverviewManifestSchema
+  let manifestStored;
+  await withLeaseBoundary(monitor, async () => {
+    manifestStored = await runtime.artifactStore.putImmutable({
+      key: keywordManifestKey(research.id, stage.generation, "market_overview"),
+      contractVersion: KEYWORD_ARTIFACT_MARKET_MANIFEST,
+      runId: research.id, stage: "market_overview", generation: stage.generation, itemId: "manifest",
+      inputFingerprint: stageInputFingerprint, producedAt,
+      value: marketManifest, schema: keywordMarketOverviewManifestSchema
+    });
   });
 
   const resultArtifact = { ...result, contractVersion: KEYWORD_ARTIFACT_RESEARCH_RESULT };
   keywordResearchResultArtifactSchema.parse(resultArtifact);
-  await runtime.artifactStore.putImmutable({
-    key: keywordResultKey(research.id, stage.generation),
-    contractVersion: KEYWORD_ARTIFACT_RESEARCH_RESULT,
-    runId: research.id, stage: "market_overview", generation: stage.generation, itemId: "result",
-    inputFingerprint: stageInputFingerprint, producedAt,
-    value: resultArtifact, schema: keywordResearchResultArtifactSchema
+  await withLeaseBoundary(monitor, async () => {
+    await runtime.artifactStore.putImmutable({
+      key: keywordResultKey(research.id, stage.generation),
+      contractVersion: KEYWORD_ARTIFACT_RESEARCH_RESULT,
+      runId: research.id, stage: "market_overview", generation: stage.generation, itemId: "result",
+      inputFingerprint: stageInputFingerprint, producedAt,
+      value: resultArtifact, schema: keywordResearchResultArtifactSchema
+    });
   });
 
   const selection = createDefaultSelection(result.keywords);
   if (!selection.ok) invariant();
+  await prepareTerminalLease(monitor);
   const published = await runtime.repository.publishResearchResult({
     researchId: research.id, generation: stage.generation, token,
     manifestS3Key: manifestStored.key, manifestFingerprint: manifestStored.contentFingerprint,
@@ -841,11 +959,12 @@ async function aggregateMarket({ research, stage, config, tasks, token, runtime 
     ? "published" : published.outcome;
 }
 
-async function failStage(runtime, research, stage, token) {
-  await runtime.repository.failStage({
+async function failStage(runtime, research, stage, token, safeErrorCode = KEYWORD_RESEARCH_STAGE_FAILED) {
+  const outcome = await runtime.repository.failStage({
     researchId: research.id, stage: stage.stage, generation: stage.generation,
-    token, safeErrorCode: KEYWORD_RESEARCH_STAGE_FAILED
+    token, safeErrorCode
   }, nowOf(runtime));
+  return outcome.outcome;
 }
 
 function shortlistComparator(left, right) {

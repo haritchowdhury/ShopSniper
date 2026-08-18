@@ -120,7 +120,7 @@ export const relatedRequestSchema = z.object({
 }).strict();
 
 export const overviewRequestSchema = z.object({
-  keywords: z.array(z.string().min(1).max(100)).min(1).max(700),
+  keywords: z.array(z.string().min(1).max(160)).min(1).max(700),
   location_code: z.number().int(),
   language_code: z.string()
 }).strict();
