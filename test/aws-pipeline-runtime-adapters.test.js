@@ -324,6 +324,7 @@ test("SCN-KI-025: sendOne rejects invalid delaySeconds options and extra option 
 
 const ENFORCEMENT_MANIFEST = JSON.parse(readFileSync(new URL("./fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json", import.meta.url), "utf8"));
 const DISPATCHER_MANIFEST_IDS = ENFORCEMENT_MANIFEST.groups.dispatcher;
+const R4_MANIFEST = JSON.parse(readFileSync(new URL("./fixtures/keyword-intelligence/ki-r4-enforcement-manifest-v1.json", import.meta.url), "utf8"));
 
 function dispatcherCommandHarness() {
   const commands = [];
@@ -422,6 +423,36 @@ async function runDispatcherCase(caseId) {
   }
 }
 
+async function runR4DispatcherCase(caseId) {
+  const { commands, dispatcher } = dispatcherCommandHarness();
+  const url = "https://sqs.example/q";
+  const message = work(1);
+  switch (caseId) {
+    case "R4-Q01-symbol-extra-key-rejected": {
+      const symbolExtra = Symbol("extra");
+      const options = { delaySeconds: 5, [symbolExtra]: 1 };
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, options),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    }
+    case "R4-Q02-nonenumerable-extra-key-rejected": {
+      const options = { delaySeconds: 5 };
+      Object.defineProperty(options, "extra", { value: 1, enumerable: false });
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, options),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    }
+    default:
+      assert.fail(`unhandled R4 dispatcher case ${caseId}`);
+  }
+}
+
 test("SCN-KI-028: dispatcher enforcement manifest executes every case with exact command/delay oracles", async (t) => {
   const executed = [];
   for (const caseId of DISPATCHER_MANIFEST_IDS) {
@@ -435,7 +466,7 @@ test("SCN-KI-028: dispatcher enforcement manifest executes every case with exact
   assert.deepEqual(sortedExecuted, sortedExpected, "every dispatcher manifest ID executed exactly once");
   assert.equal(executed.length, DISPATCHER_MANIFEST_IDS.length);
   const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(hash, "962ad70760c71a6fcf08b73d5edf0cdccad27dea9c3414c552c1d8e3e2b99226");
 });
 
 test("SCN-KI-028: negative control accepting null options must falsify the Q05 rejection oracle", async () => {
@@ -457,6 +488,20 @@ test("SCN-KI-028: negative control accepting null options must falsify the Q05 r
   assert.deepEqual(permissiveResult, { sentItemIds: ["query_1"], failedItemIds: [] },
     "a permissive collaborator that accepts null would reach SQS, falsifying the rejection oracle");
   assert.notDeepEqual(permissiveResult, null);
+});
+
+test("SCN-KI-033: dispatcher own-key partition rejects symbol and non-enumerable extras", async (t) => {
+  const executed = [];
+  for (const caseId of R4_MANIFEST.groups.dispatcher) {
+    await t.test(caseId, async () => {
+      await runR4DispatcherCase(caseId);
+      executed.push(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...R4_MANIFEST.groups.dispatcher].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every R4 dispatcher manifest ID executed exactly once");
+  assert.equal(executed.length, R4_MANIFEST.groups.dispatcher.length);
 });
 
 test("mixed SQS batches isolate malformed and nonterminal records while accepting terminal replay", async () => {
