@@ -1,0 +1,30 @@
+{
+  "contractVersion": "ki-r4-enforcement-manifest-v1",
+  "groups": {
+    "adapter_control": [
+      "R4-A01-active-cost-output-omission-falsifies"
+    ],
+    "dispatcher": [
+      "R4-Q01-symbol-extra-key-rejected",
+      "R4-Q02-nonenumerable-extra-key-rejected"
+    ],
+    "worker_component": [
+      "R4-W01-planned-identity-mismatch-conflict",
+      "R4-W02-terminal-failure-identity-mismatch-conflict",
+      "R4-W03-retryable-failure-identity-mismatch-conflict",
+      "R4-W04-ordinary-lost-check-injection-falsifies",
+      "R4-W05-recovery-lost-write-injection-falsifies"
+    ],
+    "aggregation_control": [
+      "R4-G01-post-loss-operation-injection-falsifies"
+    ],
+    "conformance": [
+      "R4-C01-fixed-revision-diff-nonempty",
+      "R4-C02-fixed-revision-file-set-exact",
+      "R4-C03-fixed-revision-import-set-clean",
+      "R4-C04-r3-group-digests-exact",
+      "R4-C05-r3-global-digest-exact",
+      "R4-C06-live-worktree-independent"
+    ]
+  }
+}
