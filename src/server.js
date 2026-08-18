@@ -39,7 +39,14 @@ import {
   createPrismaRunRepository,
   stableLeadId
 } from "./prisma-run-repository.js";
-import { validateEditableQueryList } from "./query-review.js";
+import {
+  validateEditableQueryList,
+  validateResearchBackedQueryList,
+  validateResearchBackedConfirmedQueryRows
+} from "./query-review.js";
+import { createKeywordResearchApi } from "./keyword-intelligence/api.js";
+import { PrismaKeywordResearchRepository } from "./keyword-intelligence/repository.js";
+import { keywordMessageSchema } from "./aws-pipeline/keyword-intelligence/contracts.js";
 import { readJsonBody } from "./request-json.js";
 import { createInitialStatus } from "./status.js";
 import { parseAwsProviderConfig } from "./aws-pipeline/contracts/aws-provider-config.js";
@@ -60,6 +67,7 @@ import { searchGooglePage } from "./search.js";
 
 export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{16,80}$/u;
 export const RUN_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
+const KEYWORD_RESEARCH_ID_PATTERN = /^kr_[A-Za-z0-9_-]{24}$/u;
 const RUN_LIST_PARAMETERS = new Set(["page", "pageSize"]);
 const RESULT_PARAMETERS = new Set([
   "page",
@@ -513,6 +521,32 @@ function requestedIntentId(pathname) {
   return identifier;
 }
 
+function requestedKeywordResearchId(pathname, suffix = "") {
+  const expression = suffix
+    ? new RegExp(`^/api/keyword-research/([^/]+)/${suffix}$`, "u")
+    : /^\/api\/keyword-research\/([^/]+)$/u;
+  const match = pathname.match(expression);
+  if (!match) return null;
+  let identifier;
+  try {
+    identifier = decodeURIComponent(match[1]);
+  } catch {
+    throw new ApiError(400, "KEYWORD_RESEARCH_INPUT_INVALID", "The keyword research ID is invalid.");
+  }
+  if (!KEYWORD_RESEARCH_ID_PATTERN.test(identifier)) {
+    throw new ApiError(400, "KEYWORD_RESEARCH_INPUT_INVALID", "The keyword research ID is invalid.");
+  }
+  return identifier;
+}
+
+function keywordResearchBody(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const body = { ...payload };
+  delete body.ownerId;
+  delete body.researchId;
+  return body;
+}
+
 function parseRunListPagination(searchParams) {
   const unknown = [...searchParams.keys()].filter(
     (name) => !RUN_LIST_PARAMETERS.has(name)
@@ -932,6 +966,7 @@ export async function executeRun({
   pipeline,
   planningPipeline,
   queryValidationPipeline,
+  researchQueryValidationPipeline,
   discoveryPipeline,
   storeDiscoveryPipeline,
   leadDiscoveryPipeline,
@@ -939,6 +974,8 @@ export async function executeRun({
   trafficOrchestrator,
   trafficDependencyOverrides,
   trafficSnapshot,
+  queryPlanSource,
+  keywordSelectionSnapshot,
   repository,
   logger,
   now,
@@ -1038,13 +1075,27 @@ export async function executeRun({
           throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
         }
         const validationConfig = awsValidationConfig(snapshot);
-        const validation = await queryValidationPipeline(validationConfig, tracker.status, {
-          rows, categories: categories.items, now: confirmedAt,
-          freshnessMs: validationConfig.queryProbeFreshnessMs,
-          searchPage: awsProbeSearchPage({ runId: identifier,
-            confirmedRevision: categories.confirmedQueryRevision,
-            queriesConfirmedAt: confirmedAt, snapshot, runtime })
-        });
+        let validation;
+        if (queryPlanSource === "keyword_research") {
+          validation = await researchQueryValidationPipeline(rows, categories.items, validationConfig, tracker.status, {
+            now: confirmedAt,
+            freshnessMs: validationConfig.queryProbeFreshnessMs,
+            searchPage: awsProbeSearchPage({ runId: identifier,
+              confirmedRevision: categories.confirmedQueryRevision,
+              queriesConfirmedAt: confirmedAt, snapshot, runtime }),
+            snapshot: keywordSelectionSnapshot
+          });
+        } else if (queryPlanSource === "legacy" || queryPlanSource == null) {
+          validation = await queryValidationPipeline(validationConfig, tracker.status, {
+            rows, categories: categories.items, now: confirmedAt,
+            freshnessMs: validationConfig.queryProbeFreshnessMs,
+            searchPage: awsProbeSearchPage({ runId: identifier,
+              confirmedRevision: categories.confirmedQueryRevision,
+              queriesConfirmedAt: confirmedAt, snapshot, runtime })
+          });
+        } else {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
         await repository.saveQueryValidation(identifier, lease, validation.rows, currentDate(now));
         await tracker.flush();
         if (!validation.valid) {
@@ -1101,11 +1152,20 @@ export async function executeRun({
             lease,
             currentDate(now)
           );
-          validation = await queryValidationPipeline(config, tracker.status, {
-            rows,
-            categories: categories.items,
-            now: currentDate(now)
-          });
+          if (queryPlanSource === "keyword_research") {
+            validation = await researchQueryValidationPipeline(rows, categories.items, config, tracker.status, {
+              now: currentDate(now),
+              snapshot: keywordSelectionSnapshot
+            });
+          } else if (queryPlanSource === "legacy" || queryPlanSource == null) {
+            validation = await queryValidationPipeline(config, tracker.status, {
+              rows,
+              categories: categories.items,
+              now: currentDate(now)
+            });
+          } else {
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          }
           await repository.saveQueryValidation(
             identifier,
             lease,
@@ -1391,6 +1451,7 @@ export function createLeadServer(
     pipeline = runPipeline,
     planningPipeline = planQueriesForReview,
     queryValidationPipeline = validateConfirmedQueries,
+    researchQueryValidationPipeline = validateResearchBackedConfirmedQueryRows,
     discoveryPipeline = runDiscoveryFromQueryPlans,
     storeDiscoveryPipeline = discoverStoresFromQueryPlans,
     leadDiscoveryPipeline = discoverLeadForRunStore,
@@ -1407,7 +1468,8 @@ export function createLeadServer(
     recoveryIntervalMs = DEFAULT_RECOVERY_INTERVAL_MS,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
-    pipelineRuntimeFactory = createPipelineRuntime
+    pipelineRuntimeFactory = createPipelineRuntime,
+    keywordResearchApi
   } = {}
 ) {
   const acceptedRunTimes = [];
@@ -1416,6 +1478,30 @@ export function createLeadServer(
   let drainScheduled = false;
   let draining = false;
   let drainRequested = false;
+
+  const dispatchInitialize = async (message) => {
+    const runtime = await pipelineRuntimeFactory({ baseConfig: config, prisma: repository.prisma, repository });
+    const queueUrl = runtime.config?.awsPipelineKeywordResearchQueueUrl;
+    let validUrl = typeof queueUrl === "string" && queueUrl.length > 0;
+    if (validUrl) {
+      try {
+        validUrl = new URL(queueUrl).protocol === "https:";
+      } catch {
+        validUrl = false;
+      }
+    }
+    if (!runtime.dispatcher || typeof runtime.dispatcher.sendOne !== "function" || !validUrl) {
+      return { sentItemIds: [], failedItemIds: [] };
+    }
+    return runtime.dispatcher.sendOne(queueUrl, message, keywordMessageSchema);
+  };
+
+  const researchApi = keywordResearchApi ?? createKeywordResearchApi({
+    keywordRepository: new PrismaKeywordResearchRepository(repository.prisma),
+    runRepository: repository,
+    now: () => currentDate(now),
+    dispatchInitialize
+  });
 
   function checkRunConfiguration() {
     try {
@@ -1524,6 +1610,7 @@ export function createLeadServer(
             pipeline,
             planningPipeline,
             queryValidationPipeline,
+            researchQueryValidationPipeline,
             discoveryPipeline,
             storeDiscoveryPipeline,
             leadDiscoveryPipeline,
@@ -1531,6 +1618,8 @@ export function createLeadServer(
             trafficOrchestrator,
             trafficDependencyOverrides,
             trafficSnapshot: run.run.trafficEnrichmentConfig,
+            queryPlanSource: run.run.queryPlanSource,
+            keywordSelectionSnapshot: run.run.keywordSelectionSnapshot,
             repository,
             logger,
             now,
@@ -1653,6 +1742,68 @@ export function createLeadServer(
       return;
     }
 
+    if (request.method === "POST" && requestUrl.pathname === "/api/keyword-research") {
+      const ownerId = trustedUserId(request);
+      const payload = await readJsonBody(request);
+      const created = await researchApi.createResearch({
+        ownerId,
+        ...keywordResearchBody(payload)
+      });
+      return sendJson(response, 202, created);
+    }
+
+    const exportIdentifier = requestedKeywordResearchId(requestUrl.pathname, "export.csv");
+    if (request.method === "GET" && exportIdentifier) {
+      const ownerId = trustedUserId(request);
+      const csv = await researchApi.exportCsv({
+        ownerId,
+        researchId: exportIdentifier,
+        searchParams: requestUrl.searchParams
+      });
+      const filename = `keyword-research-${exportIdentifier}.csv`;
+      response.writeHead(200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "cache-control": "no-store",
+        "content-length": Buffer.byteLength(csv)
+      });
+      return response.end(csv);
+    }
+
+    const selectionIdentifier = requestedKeywordResearchId(requestUrl.pathname, "selection");
+    if (request.method === "PUT" && selectionIdentifier) {
+      const ownerId = trustedUserId(request);
+      const payload = await readJsonBody(request);
+      const saved = await researchApi.saveSelection({
+        ownerId,
+        researchId: selectionIdentifier,
+        ...keywordResearchBody(payload)
+      });
+      return sendJson(response, 200, saved);
+    }
+
+    const runsIdentifier = requestedKeywordResearchId(requestUrl.pathname, "runs");
+    if (request.method === "POST" && runsIdentifier) {
+      const ownerId = trustedUserId(request);
+      const payload = await readJsonBody(request);
+      const handoff = await researchApi.createRun({
+        ownerId,
+        researchId: runsIdentifier,
+        ...keywordResearchBody(payload)
+      });
+      return sendJson(response, handoff.created ? 201 : 200, {
+        run: handoff.run,
+        statusUrl: handoff.statusUrl
+      });
+    }
+
+    const researchIdentifier = requestedKeywordResearchId(requestUrl.pathname);
+    if (request.method === "GET" && researchIdentifier) {
+      const ownerId = trustedUserId(request);
+      const view = await researchApi.getResearch({ ownerId, researchId: researchIdentifier });
+      return sendJson(response, 200, view);
+    }
+
     if (request.method === "PUT") {
       const identifier = requestedRunId(requestUrl.pathname, "queries");
       if (identifier) {
@@ -1681,11 +1832,18 @@ export function createLeadServer(
             .flatMap((row) => Array.isArray(row.categoryVocabulary) ? row.categoryVocabulary : []))
         ]);
         const policy = queryReviewPolicy(run, config);
-        const checked = validateEditableQueryList(payload.queries, categories, {
-          maxQueries: policy.maxQueries,
-          generatedQueryCount: policy.generatedQueryCount,
-          categoryVocabularyByIndex
-        });
+        let checked;
+        if (run.queryPlanSource === "keyword_research") {
+          checked = validateResearchBackedQueryList(payload.queries, run);
+        } else if (run.queryPlanSource === "legacy" || run.queryPlanSource == null) {
+          checked = validateEditableQueryList(payload.queries, categories, {
+            maxQueries: policy.maxQueries,
+            generatedQueryCount: policy.generatedQueryCount,
+            categoryVocabularyByIndex
+          });
+        } else {
+          throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+        }
         if (!checked.valid) {
           throw new ApiError(
             422,
@@ -1734,19 +1892,27 @@ export function createLeadServer(
               .filter((row) => row.categoryIndex === categoryIndex)
               .flatMap((row) => Array.isArray(row.categoryVocabulary) ? row.categoryVocabulary : []))
           ]);
-          const checked = validateEditableQueryList(
-            (current.queries || []).map(({ id, categoryIndex, query }) => ({
-              id,
-              categoryIndex,
-              query
-            })),
-            categories,
-            {
-              maxQueries: queryReviewPolicy(current, config).maxQueries,
-              generatedQueryCount: queryReviewPolicy(current, config).generatedQueryCount,
-              categoryVocabularyByIndex
-            }
-          );
+          const checkedEditable = (current.queries || []).map(({ id, categoryIndex, query }) => ({
+            id,
+            categoryIndex,
+            query
+          }));
+          let checked;
+          if (current.queryPlanSource === "keyword_research") {
+            checked = validateResearchBackedQueryList(checkedEditable, current);
+          } else if (current.queryPlanSource === "legacy" || current.queryPlanSource == null) {
+            checked = validateEditableQueryList(
+              checkedEditable,
+              categories,
+              {
+                maxQueries: queryReviewPolicy(current, config).maxQueries,
+                generatedQueryCount: queryReviewPolicy(current, config).generatedQueryCount,
+                categoryVocabularyByIndex
+              }
+            );
+          } else {
+            throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+          }
           if (!checked.valid) {
             throw new ApiError(
               422,
