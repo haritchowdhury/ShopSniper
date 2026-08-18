@@ -973,7 +973,14 @@ export function serializeRun(run) {
             run.safeErrorMessage ||
             "The run could not be completed. Please try again."
         }
-      : null
+      : null,
+    ...(run.queryPlanSource === "keyword_research"
+      ? {
+          queryPlanSource: "keyword_research",
+          keywordResearchId: run.keywordResearchId,
+          keywordSelectionRevision: run.keywordSelectionRevision
+        }
+      : {})
   };
 }
 
@@ -988,7 +995,8 @@ export function serializeRunQuery(row) {
     rejectionReason: row.rejectionReason || null,
     queryScore: row.queryScore ?? null,
     generationReason: row.generationReason || null,
-    probedAt: row.probedAt?.toISOString?.() || (row.probedAt ? new Date(row.probedAt).toISOString() : null)
+    probedAt: row.probedAt?.toISOString?.() || (row.probedAt ? new Date(row.probedAt).toISOString() : null),
+    ...(row.keywordResearchItemId != null ? { keywordResearchItemId: row.keywordResearchItemId } : {})
   };
 }
 
@@ -1002,6 +1010,83 @@ export function serializeEditableQueries(run) {
     editable: run.state === "awaiting_query_confirmation" && run.phase === "query_review",
     categories,
     queries: (run.queries || []).map(serializeRunQuery)
+  };
+}
+
+export function serializeSelectionItem(item) {
+  return {
+    itemId: item.itemId,
+    sourceKind: item.sourceKind,
+    sourceKeywordId: item.sourceKeywordId ?? null,
+    originalKeyword: item.originalKeyword,
+    keyword: item.keyword,
+    sourceSeeds: Array.isArray(item.sourceSeeds) ? item.sourceSeeds : [],
+    lane: item.lane,
+    facets: item.facets,
+    metricsSnapshot: item.metricsSnapshot ?? null
+  };
+}
+
+export function serializeKeywordResearch(research) {
+  const stages = Array.isArray(research.stages) ? research.stages : [];
+  const latestByStage = new Map();
+  for (const stage of stages) {
+    if (stage && typeof stage.stage === "string") latestByStage.set(stage.stage, stage);
+  }
+  const stageCounts = (name) => {
+    const row = latestByStage.get(name);
+    return {
+      expected: row?.expectedCount ?? 0,
+      terminal: row?.terminalCount ?? 0,
+      succeeded: row?.succeededCount ?? 0,
+      skipped: row?.skippedCount ?? 0,
+      failed: row?.failedCount ?? 0
+    };
+  };
+  let stage;
+  if (research.state === "completed") {
+    stage = "completed";
+  } else if (research.state === "failed") {
+    stage = "failed";
+  } else if (stages.length === 0) {
+    stage = "queued";
+  } else {
+    stage = "finalizing";
+    for (const name of ["expansion", "anchor_screen", "market_overview"]) {
+      const row = latestByStage.get(name);
+      if (!row || row.state !== "completed") {
+        stage = name;
+        break;
+      }
+    }
+  }
+  return {
+    id: research.id,
+    statusUrl: `/api/keyword-research/${encodeURIComponent(research.id)}`,
+    state: research.state,
+    generation: research.generation,
+    contractVersion: research.contractVersion,
+    seeds: Array.isArray(research.seeds) ? research.seeds : [],
+    markets: Array.isArray(research.markets) ? research.markets : [],
+    progress: {
+      stage,
+      expansion: stageCounts("expansion"),
+      anchorScreen: stageCounts("anchor_screen"),
+      marketOverview: stageCounts("market_overview")
+    },
+    result: research.state === "completed" ? (research.result ?? null) : null,
+    selection: Array.isArray(research.selection?.items)
+      ? research.selection.items.map(serializeSelectionItem)
+      : [],
+    selectionRevision: research.selectionRevision ?? 0,
+    selectionConflicts: Array.isArray(research.selectionConflicts) ? research.selectionConflicts : [],
+    safeError: research.safeErrorCode
+      ? { code: research.safeErrorCode, message: research.safeErrorMessage ?? "" }
+      : null,
+    createdAt: research.createdAt.toISOString(),
+    startedAt: research.startedAt ? research.startedAt.toISOString() : null,
+    completedAt: research.completedAt ? research.completedAt.toISOString() : null,
+    updatedAt: research.updatedAt.toISOString()
   };
 }
 
