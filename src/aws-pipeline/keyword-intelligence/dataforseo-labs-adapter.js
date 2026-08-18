@@ -46,11 +46,11 @@ function invariant(code = "PIPELINE_INPUT_CONFLICT") {
 function settlementFence(settled, { attempt, providerCostUsd }) {
   const kind = settled?.outcome;
   if ((kind === "terminal" || kind === "found") && settled?.fenceActive === true) {
-    return { outcome: "active", attempt: settled.attempt ?? attempt };
+    return { outcome: "active", attempt, providerCostUsd };
   }
   if (kind === "lost" || kind === "not_found" ||
       (kind === "found" && settled?.fenceActive === false)) {
-    return { outcome: "lost", attempt: settled?.attempt ?? attempt, providerCostUsd };
+    return { outcome: "lost", attempt, providerCostUsd };
   }
   invariant();
 }

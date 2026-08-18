@@ -18,6 +18,10 @@ import {
   KEYWORD_PROVIDER_AMBIGUOUS,
   KEYWORD_PROVIDER_BUDGET_EXHAUSTED,
   KEYWORD_PROVIDER_RETRY_EXHAUSTED,
+  KEYWORD_PROVIDER_RETRYABLE,
+  KEYWORD_PROVIDER_AUTH_FAILED,
+  KEYWORD_PROVIDER_CONTRACT_MISMATCH,
+  KEYWORD_PROVIDER_TASK_FAILED,
   KEYWORD_RUNTIME_CONFIG_INVALID,
   KEYWORD_RESEARCH_STAGE_FAILED,
   KEYWORD_ARTIFACT_EXPANSION_RESULT,
@@ -48,6 +52,7 @@ import {
   keywordTaskInputFingerprint,
   keywordStageInputFingerprint
 } from "./keys.js";
+import { fingerprintJson } from "../core/canonical.js";
 
 function invariant(code = "PIPELINE_INPUT_CONFLICT") {
   throw new PipelineInvariantError(code);
@@ -330,7 +335,7 @@ async function processTask(message, runtime, kind, dependencies) {
     let reconstructed;
     await withLeaseBoundary(monitor, async () => {
       recovered = await recoverClaimedTask({
-        taskId, token, current, message, kind, runtime, research, stage, config
+        taskId, token, current, message, kind, runtime, research, stage, config, monitor
       });
       if (recovered.outcome === "proceed") {
         reconstructed = kind === "expansion"
@@ -339,7 +344,6 @@ async function processTask(message, runtime, kind, dependencies) {
       }
     });
     if (recovered.outcome === "recovered") {
-      await stopReleasedLease(monitor);
       return { terminal: true, outcome: "recovered" };
     }
     if (reconstructed.inputFingerprint !== task.inputFingerprint) invariant();
@@ -348,7 +352,7 @@ async function processTask(message, runtime, kind, dependencies) {
     let attempt;
     await withLeaseBoundary(monitor, async () => {
       attempt = await runProviderAttempt({
-        task, research, config, runtime, request: reconstructed.request
+        task, research, config, runtime, request: reconstructed.request, monitor
       });
     });
 
@@ -370,7 +374,12 @@ async function processTask(message, runtime, kind, dependencies) {
       const terminalized = await runtime.repository.terminalize({
         taskId, token, state, safeErrorCode: attempt.code
       }, nowOf(runtime));
-      await sendCheckForStage(runtime, current);
+      if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+        await sendCheckForStage(runtime, current);
+      } else if (terminalized.outcome !== "lost" && terminalized.outcome !== "conflict" &&
+          terminalized.outcome !== "not_found") {
+        invariant();
+      }
       await stopReleasedLease(monitor);
       return { terminal: true, outcome: terminalized.outcome === "terminal" ? "terminal" : terminalized.outcome };
     }
@@ -398,7 +407,12 @@ async function processTask(message, runtime, kind, dependencies) {
       taskId, token, state: "succeeded",
       artifactS3Key: stored.key, artifactFingerprint: stored.contentFingerprint
     }, nowOf(runtime));
-    await sendCheckForStage(runtime, current);
+    if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+      await sendCheckForStage(runtime, current);
+    } else if (terminalized.outcome !== "lost" && terminalized.outcome !== "conflict" &&
+        terminalized.outcome !== "not_found") {
+      invariant();
+    }
     await stopReleasedLease(monitor);
     return { terminal: true, outcome: terminalized.outcome === "terminal" ? "succeeded" : terminalized.outcome };
   } catch (error) {
@@ -407,34 +421,48 @@ async function processTask(message, runtime, kind, dependencies) {
   }
 }
 
-async function recoverClaimedTask({ taskId, token, current, message, kind, runtime, research, stage, config }) {
+async function recoverClaimedTask({ taskId, token, current, message, kind, runtime, research, stage, config, monitor }) {
   const latestAttempt = current.latestAttempt;
   if (!latestAttempt) return { outcome: "proceed" };
-  if (latestAttempt.state === "ambiguous") return { outcome: "recovered" };
+  const now = () => nowOf(runtime);
+
   if (latestAttempt.state === "planned" || latestAttempt.state === "in_flight") {
-    await runtime.repository.markAttemptAmbiguous({
+    const marked = await runtime.repository.markAttemptAmbiguous({
       taskId, attemptNumber: latestAttempt.attemptNumber,
       requestFingerprint: latestAttempt.requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
-    }, nowOf(runtime));
-    return { outcome: "recovered" };
+    }, now());
+    await stopReleasedLease(monitor);
+    if (marked.outcome === "terminal" || marked.outcome === "found") {
+      await sendCheckForStage(runtime, current);
+      return { outcome: "recovered", result: "ambiguous" };
+    }
+    if (marked.outcome === "lost" || marked.outcome === "conflict" || marked.outcome === "not_found") {
+      return { outcome: "recovered", result: marked.outcome };
+    }
+    invariant();
   }
+
   if (latestAttempt.state === "succeeded") {
+    if (current.task.requestFingerprint !== latestAttempt.requestFingerprint) invariant();
     const cached = await runtime.repository.cacheRead({
       requestFingerprint: current.task.requestFingerprint
-    }, nowOf(runtime));
-    const ambiguousFromCache = async () => {
-      await runtime.repository.markAttemptAmbiguous({
-        taskId, attemptNumber: latestAttempt.attemptNumber,
-        requestFingerprint: latestAttempt.requestFingerprint, safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
-      }, nowOf(runtime));
-    };
-    if (cached.outcome !== "found") {
-      await ambiguousFromCache();
-      return { outcome: "recovered" };
-    }
-    if (cached.cache.resultFingerprint !== latestAttempt.resultFingerprint) {
-      await ambiguousFromCache();
-      return { outcome: "recovered" };
+    }, now());
+    const cacheOk = cached.outcome === "found" &&
+      cached.cache.resultFingerprint === latestAttempt.resultFingerprint &&
+      fingerprintJson(cached.cache.normalizedResponse) === latestAttempt.resultFingerprint;
+    if (!cacheOk) {
+      await prepareTerminalLease(monitor);
+      const terminalized = await runtime.repository.terminalize({
+        taskId, token, state: "failed", safeErrorCode: KEYWORD_PROVIDER_AMBIGUOUS
+      }, now());
+      if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+        await sendCheckForStage(runtime, current);
+        return { outcome: "recovered", result: terminalized.outcome === "terminal" ? "terminal" : "found" };
+      }
+      if (terminalized.outcome === "lost" || terminalized.outcome === "conflict" || terminalized.outcome === "not_found") {
+        return { outcome: "recovered", result: terminalized.outcome };
+      }
+      invariant();
     }
     const reconstructed = kind === "expansion"
       ? expansionRequestForTask(current.task, research, config)
@@ -445,49 +473,103 @@ async function recoverClaimedTask({ taskId, token, current, message, kind, runti
       { outcome: "succeeded", normalized: cached.cache.normalizedResponse,
         providerCostUsd: latestAttempt.providerCostUsd });
     const key = keywordTaskArtifactKey(research.id, research.generation, stage.stage, current.task.itemKey);
-    const stored = await runtime.artifactStore.putImmutable({
-      key, contractVersion: artifact.contractVersion, runId: research.id,
-      stage: stage.stage, generation: research.generation, itemId: current.task.itemKey,
-      inputFingerprint: current.task.inputFingerprint, producedAt: current.task.createdAt,
-      value: artifact, schema
+    let stored;
+    await withLeaseBoundary(monitor, async () => {
+      stored = await runtime.artifactStore.putImmutable({
+        key, contractVersion: artifact.contractVersion, runId: research.id,
+        stage: stage.stage, generation: research.generation, itemId: current.task.itemKey,
+        inputFingerprint: current.task.inputFingerprint, producedAt: current.task.createdAt,
+        value: artifact, schema
+      });
     });
-    await runtime.repository.terminalize({
-      taskId, token, state: "succeeded", artifactS3Key: stored.key, artifactFingerprint: stored.contentFingerprint
-    }, nowOf(runtime));
-    await sendCheckForStage(runtime, current);
-    return { outcome: "recovered" };
+    await prepareTerminalLease(monitor);
+    const terminalized = await runtime.repository.terminalize({
+      taskId, token, state: "succeeded",
+      artifactS3Key: stored.key, artifactFingerprint: stored.contentFingerprint
+    }, now());
+    if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+      await sendCheckForStage(runtime, current);
+      return { outcome: "recovered", result: terminalized.outcome === "terminal" ? "terminal" : "found" };
+    }
+    if (terminalized.outcome === "lost" || terminalized.outcome === "conflict" || terminalized.outcome === "not_found") {
+      return { outcome: "recovered", result: terminalized.outcome };
+    }
+    invariant();
   }
+
   if (latestAttempt.state === "failed") {
-    if (current.task.nextAttemptAt !== null) return { outcome: "proceed" };
-    if (latestAttempt.attemptNumber >= 5) {
-      await runtime.repository.terminalize({
+    const code = latestAttempt.safeErrorCode;
+    if (code === KEYWORD_PROVIDER_RETRYABLE && current.task.nextAttemptAt !== null) {
+      return { outcome: "proceed" };
+    }
+    if (code === KEYWORD_PROVIDER_RETRYABLE && latestAttempt.attemptNumber < 5) {
+      const scheduled = await runtime.repository.scheduleRetry({
+        taskId, token, attemptNumber: latestAttempt.attemptNumber
+      }, now());
+      if (scheduled.outcome === "delayed") {
+        await stopReleasedLease(monitor);
+        const delaySeconds = Math.max(0, Math.ceil((scheduled.retryAt.getTime() - now().getTime()) / 1000));
+        if (delaySeconds > 900) invariant();
+        await sendSameTaskMessage(runtime, message, { delaySeconds });
+        return { outcome: "recovered", result: "delayed" };
+      }
+      await stopReleasedLease(monitor);
+      if (scheduled.outcome === "conflict" && scheduled.code === KEYWORD_PROVIDER_RETRY_EXHAUSTED) {
+        await prepareTerminalLease(monitor);
+        const terminalized = await runtime.repository.terminalize({
+          taskId, token, state: "failed", safeErrorCode: KEYWORD_PROVIDER_RETRY_EXHAUSTED
+        }, now());
+        if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+          await sendCheckForStage(runtime, current);
+          return { outcome: "recovered", result: terminalized.outcome === "terminal" ? "terminal" : "found" };
+        }
+        if (terminalized.outcome === "lost" || terminalized.outcome === "conflict" || terminalized.outcome === "not_found") {
+          return { outcome: "recovered", result: terminalized.outcome };
+        }
+        invariant();
+      }
+      if (scheduled.outcome === "lost" || scheduled.outcome === "conflict" || scheduled.outcome === "not_found") {
+        return { outcome: "recovered", result: scheduled.outcome };
+      }
+      invariant();
+    }
+    if (code === KEYWORD_PROVIDER_RETRYABLE) {
+      await prepareTerminalLease(monitor);
+      const terminalized = await runtime.repository.terminalize({
         taskId, token, state: "failed", safeErrorCode: KEYWORD_PROVIDER_RETRY_EXHAUSTED
-      }, nowOf(runtime));
-      await sendCheckForStage(runtime, current);
-      return { outcome: "recovered" };
+      }, now());
+      if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+        await sendCheckForStage(runtime, current);
+        return { outcome: "recovered", result: terminalized.outcome === "terminal" ? "terminal" : "found" };
+      }
+      if (terminalized.outcome === "lost" || terminalized.outcome === "conflict" || terminalized.outcome === "not_found") {
+        return { outcome: "recovered", result: terminalized.outcome };
+      }
+      invariant();
     }
-    const scheduled = await runtime.repository.scheduleRetry({
-      taskId, token, attemptNumber: latestAttempt.attemptNumber
-    }, nowOf(runtime));
-    if (scheduled.outcome === "delayed") {
-      const delaySeconds = Math.max(0, Math.ceil((scheduled.retryAt.getTime() - nowOf(runtime).getTime()) / 1000));
-      if (delaySeconds > 900) invariant();
-      await sendSameTaskMessage(runtime, message, { delaySeconds });
-      return { outcome: "recovered" };
+    if (code === KEYWORD_PROVIDER_AUTH_FAILED || code === KEYWORD_PROVIDER_CONTRACT_MISMATCH ||
+        code === KEYWORD_PROVIDER_TASK_FAILED) {
+      const state = stage.stage === "expansion" ? "skipped" : "failed";
+      await prepareTerminalLease(monitor);
+      const terminalized = await runtime.repository.terminalize({
+        taskId, token, state, safeErrorCode: code
+      }, now());
+      if (terminalized.outcome === "terminal" || terminalized.outcome === "found") {
+        await sendCheckForStage(runtime, current);
+        return { outcome: "recovered", result: terminalized.outcome === "terminal" ? "terminal" : "found" };
+      }
+      if (terminalized.outcome === "lost" || terminalized.outcome === "conflict" || terminalized.outcome === "not_found") {
+        return { outcome: "recovered", result: terminalized.outcome };
+      }
+      invariant();
     }
-    if (scheduled.outcome === "conflict" && scheduled.code === KEYWORD_PROVIDER_RETRY_EXHAUSTED) {
-      await runtime.repository.terminalize({
-        taskId, token, state: "failed", safeErrorCode: KEYWORD_PROVIDER_RETRY_EXHAUSTED
-      }, nowOf(runtime));
-      await sendCheckForStage(runtime, current);
-      return { outcome: "recovered" };
-    }
-    return { outcome: "recovered" };
+    invariant();
   }
-  return { outcome: "proceed" };
+
+  invariant();
 }
 
-async function runProviderAttempt({ task, research, config, runtime, request }) {
+async function runProviderAttempt({ task, research, config, runtime, request, monitor }) {
   const secrets = runtime.secrets ?? {};
   const adapterConfig = {
     ...config,
@@ -499,11 +581,29 @@ async function runProviderAttempt({ task, research, config, runtime, request }) 
       }
     }
   };
+  const monitoredHttp = async (url, init) => {
+    monitor.assertActive();
+    let response;
+    try {
+      response = await httpOf(runtime)(url, init);
+    } finally {
+      monitor.assertActive();
+    }
+    const json = async () => {
+      monitor.assertActive();
+      try {
+        return await response.json();
+      } finally {
+        monitor.assertActive();
+      }
+    };
+    return { status: response.status, json };
+  };
   return executeProviderAttempt({
     task: { ...task, request },
     config: adapterConfig,
     clock: () => nowOf(runtime),
-    http: httpOf(runtime),
+    http: monitoredHttp,
     repository: runtime.repository
   });
 }

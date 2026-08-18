@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { z } from "zod";
 import { NoSuchKey } from "@aws-sdk/client-s3";
@@ -318,6 +320,143 @@ test("SCN-KI-025: sendOne rejects invalid delaySeconds options and extra option 
     );
   }
   assert.equal(sent.length, 0);
+});
+
+const ENFORCEMENT_MANIFEST = JSON.parse(readFileSync(new URL("./fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json", import.meta.url), "utf8"));
+const DISPATCHER_MANIFEST_IDS = ENFORCEMENT_MANIFEST.groups.dispatcher;
+
+function dispatcherCommandHarness() {
+  const commands = [];
+  const client = { async send(command) { commands.push({ input: command.input, name: command.constructor.name }); return {}; } };
+  return { commands, dispatcher: new SqsDispatcher({ client }) };
+}
+
+async function runDispatcherCase(caseId) {
+  const { commands, dispatcher } = dispatcherCommandHarness();
+  const url = "https://sqs.example/q";
+  const message = work(1);
+  switch (caseId) {
+    case "R3-Q01-omitted-no-delay-member":
+      await dispatcher.sendOne(url, message, workMessageSchema);
+      assert.equal(commands.length, 1);
+      assert.equal("DelaySeconds" in commands[0].input, false);
+      assert.deepEqual(Object.keys(commands[0].input), ["QueueUrl", "MessageBody"]);
+      break;
+    case "R3-Q02-empty-no-delay-member":
+      await dispatcher.sendOne(url, message, workMessageSchema, {});
+      assert.equal(commands.length, 1);
+      assert.equal("DelaySeconds" in commands[0].input, false);
+      break;
+    case "R3-Q03-zero-delay":
+      await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 0 });
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0].input.DelaySeconds, 0);
+      break;
+    case "R3-Q04-nine-hundred-delay":
+      await dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 900 });
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0].input.DelaySeconds, 900);
+      break;
+    case "R3-Q05-null-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, null),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q06-array-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, []),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q07-primitive-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, 5),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q08-fraction-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 1.5 }),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q09-negative-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: -1 }),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q10-over-nine-hundred-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 901 }),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q11-extra-key-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, { delaySeconds: 1, extra: 2 }),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    case "R3-Q12-nonplain-rejected":
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, Object.create(null)),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      await assert.rejects(
+        dispatcher.sendOne(url, message, workMessageSchema, new Date()),
+        (error) => error.code === "PIPELINE_MESSAGE_INVALID"
+      );
+      assert.equal(commands.length, 0);
+      break;
+    default:
+      assert.fail(`unhandled dispatcher case ${caseId}`);
+  }
+}
+
+test("SCN-KI-028: dispatcher enforcement manifest executes every case with exact command/delay oracles", async (t) => {
+  const executed = [];
+  for (const caseId of DISPATCHER_MANIFEST_IDS) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      await runDispatcherCase(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...DISPATCHER_MANIFEST_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every dispatcher manifest ID executed exactly once");
+  assert.equal(executed.length, DISPATCHER_MANIFEST_IDS.length);
+  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+});
+
+test("SCN-KI-028: negative control accepting null options must falsify the Q05 rejection oracle", async () => {
+  const { dispatcher } = dispatcherCommandHarness();
+  const url = "https://sqs.example/q";
+  const message = work(1);
+  await assert.rejects(
+    dispatcher.sendOne(url, message, workMessageSchema, null),
+    (error) => error.code === "PIPELINE_MESSAGE_INVALID",
+    "production rejects null options"
+  );
+  const permissive = {
+    async sendOne(_url, _message, _schema, options) {
+      if (options === null) return { sentItemIds: ["query_1"], failedItemIds: [] };
+      throw new Error("unexpected");
+    }
+  };
+  const permissiveResult = await permissive.sendOne(url, message, workMessageSchema, null);
+  assert.deepEqual(permissiveResult, { sentItemIds: ["query_1"], failedItemIds: [] },
+    "a permissive collaborator that accepts null would reach SQS, falsifying the rejection oracle");
+  assert.notDeepEqual(permissiveResult, null);
 });
 
 test("mixed SQS batches isolate malformed and nonterminal records while accepting terminal replay", async () => {

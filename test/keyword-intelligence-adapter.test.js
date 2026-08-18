@@ -461,3 +461,285 @@ test("negative control: retry-after-ambiguity would require a second call (call-
   assert.equal(repo.calls.ambiguous, 2);
   assert.equal(repo.calls.recordAttempt, 2);
 });
+
+const ENFORCEMENT_MANIFEST = JSON.parse(readFileSync(`${fixtureDir}/ki-r3-enforcement-manifest-v1.json`, "utf8"));
+const ADAPTER_MANIFEST_IDS = ENFORCEMENT_MANIFEST.groups.adapter;
+
+function tracedRepo(overrides = {}) {
+  const trace = [];
+  const calls = { settle: 0, ambiguous: 0, scheduleRetry: 0, recordAttempt: 0, throttle: 0, cacheRead: 0, deferTask: 0 };
+  const count = (key) => { calls[key] += 1; };
+  const traced = (key, value) => async (...args) => {
+    count(key);
+    if (key === "cacheRead") trace.push("cache");
+    if (key === "markAttemptAmbiguous") trace.push("markAmbiguous");
+    if (key === "scheduleRetry") trace.push("scheduleRetry");
+    return value(...args);
+  };
+  const repo = {
+    trace,
+    calls,
+    cacheRead: overrides.cacheRead ? traced("cacheRead", overrides.cacheRead)
+      : async () => { count("cacheRead"); trace.push("cache"); return { outcome: "not_found" }; },
+    claimThrottle: overrides.claimThrottle ? traced("throttle", overrides.claimThrottle)
+      : async () => { count("throttle"); return { outcome: "claimed" }; },
+    recordAttempt: overrides.recordAttempt ? traced("recordAttempt", overrides.recordAttempt)
+      : async () => { count("recordAttempt"); return { outcome: "created", attempt: { attemptNumber: 1 }, mayCall: true }; },
+    settleAttempt: overrides.settleAttempt ? traced("settle", overrides.settleAttempt)
+      : async () => { count("settle"); return { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+    markAttemptAmbiguous: overrides.markAttemptAmbiguous ? traced("ambiguous", overrides.markAttemptAmbiguous)
+      : async () => { count("ambiguous"); trace.push("markAmbiguous"); return { outcome: "terminal" }; },
+    scheduleRetry: overrides.scheduleRetry ? traced("scheduleRetry", overrides.scheduleRetry)
+      : async () => { count("scheduleRetry"); trace.push("scheduleRetry"); return { outcome: "delayed", retryAt: new Date(NOW.getTime() + 4000) }; },
+    deferTask: overrides.deferTask ? traced("deferTask", overrides.deferTask)
+      : async () => { count("deferTask"); return { outcome: "delayed", retryAt: new Date(NOW.getTime() + 2000) }; }
+  };
+  return repo;
+}
+
+function tracedHttp({ status = 200, body, jsonThrows = false, throws = false, trace }) {
+  return async () => {
+    trace.push("http");
+    if (throws) throw new Error("transport down");
+    return {
+      status,
+      json: async () => {
+        trace.push("json");
+        if (jsonThrows) throw new SyntaxError("bad json");
+        return body;
+      }
+    };
+  };
+}
+
+async function runAdapterCase(caseId) {
+  const successCase = SUGGESTIONS_FIXTURE.cases.find((entry) => entry.id === "SG001");
+  switch (caseId) {
+    case "R3-A01-active-terminal-success-cost": {
+      let supplied;
+      const repo = tracedRepo({
+        settleAttempt: async (input) => { supplied = input.providerCostUsd; return { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run for a terminal success"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "succeeded");
+      assert.equal(result.providerCostUsd, supplied, "active result exposes the exact settled cost");
+      assert.equal(supplied, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      assert.equal(repo.calls.settle, 1);
+      assert.deepEqual(repo.trace, ["cache", "http", "json"]);
+      break;
+    }
+    case "R3-A02-active-found-success-cost": {
+      let supplied;
+      const repo = tracedRepo({
+        settleAttempt: async (input) => { supplied = input.providerCostUsd; return { outcome: "found", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run for an active found success"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "succeeded");
+      assert.equal(result.providerCostUsd, supplied);
+      assert.equal(supplied, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A03-active-terminal-retry-cost": {
+      let supplied;
+      const repo = tracedRepo({
+        settleAttempt: async (input) => { supplied = input.providerCostUsd; return { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async (input) => { assert.equal(input.attemptNumber, 1); return { outcome: "delayed", retryAt: new Date(NOW.getTime() + 4000) }; }
+      });
+      const http = tracedHttp({ status: 429, body: { status_code: 20000, status_message: "Ok.", cost: 0.0156, tasks: [] }, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "retryAt");
+      assert.equal(result.reason, "retry");
+      assert.equal(result.providerCostUsd, supplied);
+      assert.equal(supplied, "0.01560000");
+      assert.deepEqual(repo.trace.slice(-1), ["scheduleRetry"], "A03 trace ends scheduleRetry");
+      break;
+    }
+    case "R3-A04-active-found-terminal-cost": {
+      let supplied;
+      const repo = tracedRepo({
+        settleAttempt: async (input) => { supplied = input.providerCostUsd; return { outcome: "found", attempt: { attemptNumber: 1 }, fenceActive: true }; },
+        scheduleRetry: async () => ({ outcome: "conflict", code: KEYWORD_PROVIDER_RETRY_EXHAUSTED })
+      });
+      const http = tracedHttp({ status: 500, body: { status_code: 20000, status_message: "Ok.", cost: 0.0156, tasks: [] }, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "failed");
+      assert.equal(result.code, KEYWORD_PROVIDER_RETRY_EXHAUSTED);
+      assert.equal(result.providerCostUsd, supplied);
+      assert.equal(supplied, "0.01560000");
+      assert.deepEqual(repo.trace.slice(-1), ["scheduleRetry"], "A04 trace ends scheduleRetry");
+      break;
+    }
+    case "R3-A05-lost-zero-schedule": {
+      const repo = tracedRepo({
+        settleAttempt: async () => ({ outcome: "lost", attempt: { attemptNumber: 1 }, fenceActive: false }),
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run after a lost fence"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "lost");
+      assert.equal(result.providerCostUsd, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A06-not-found-zero-schedule": {
+      const repo = tracedRepo({
+        settleAttempt: async () => ({ outcome: "not_found" }),
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run after not_found"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "lost");
+      assert.equal(result.providerCostUsd, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A07-stale-found-zero-schedule": {
+      const repo = tracedRepo({
+        settleAttempt: async () => ({ outcome: "found", attempt: { attemptNumber: 1 }, fenceActive: false }),
+        scheduleRetry: async () => { assert.fail("scheduleRetry must not run after a stale fence"); }
+      });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "lost");
+      assert.equal(result.providerCostUsd, "0.01560000");
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A08-conflict-fails-closed": {
+      const repo = tracedRepo({ settleAttempt: async () => ({ outcome: "conflict" }) });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      await assert.rejects(
+        attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo }),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      break;
+    }
+    case "R3-A09-terminal-missing-fence-fails-closed": {
+      const repo = tracedRepo({ settleAttempt: async () => ({ outcome: "terminal", attempt: { attemptNumber: 1 } }) });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      await assert.rejects(
+        attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo }),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      break;
+    }
+    case "R3-A10-found-missing-fence-fails-closed": {
+      const repo = tracedRepo({ settleAttempt: async () => ({ outcome: "found", attempt: { attemptNumber: 1 } }) });
+      const http = tracedHttp({ status: 200, body: successCase.payload, trace: repo.trace });
+      await assert.rejects(
+        attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo }),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      break;
+    }
+    case "R3-A11-decode-200-ambiguous-once": {
+      const repo = tracedRepo({ scheduleRetry: async () => { assert.fail("scheduleRetry must not run"); } });
+      const http = tracedHttp({ status: 200, jsonThrows: true, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "ambiguous");
+      assert.equal(repo.trace.filter((op) => op === "http").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "json").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "markAmbiguous").length, 1);
+      assert.equal(repo.calls.settle, 0);
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A12-decode-429-ambiguous-once": {
+      const repo = tracedRepo({ scheduleRetry: async () => { assert.fail("scheduleRetry must not run"); } });
+      const http = tracedHttp({ status: 429, jsonThrows: true, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "ambiguous");
+      assert.equal(repo.trace.filter((op) => op === "http").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "json").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "markAmbiguous").length, 1);
+      assert.equal(repo.calls.settle, 0);
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A13-decode-500-ambiguous-once": {
+      const repo = tracedRepo({ scheduleRetry: async () => { assert.fail("scheduleRetry must not run"); } });
+      const http = tracedHttp({ status: 500, jsonThrows: true, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "ambiguous");
+      assert.equal(repo.trace.filter((op) => op === "http").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "json").length, 1);
+      assert.equal(repo.trace.filter((op) => op === "markAmbiguous").length, 1);
+      assert.equal(repo.calls.settle, 0);
+      assert.equal(repo.calls.scheduleRetry, 0);
+      break;
+    }
+    case "R3-A14-ambiguity-terminal-accepted": {
+      const repo = tracedRepo({ markAttemptAmbiguous: async () => ({ outcome: "terminal" }) });
+      const http = tracedHttp({ throws: true, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "ambiguous");
+      assert.equal(result.code, KEYWORD_PROVIDER_AMBIGUOUS);
+      assert.equal(repo.calls.ambiguous, 1);
+      break;
+    }
+    case "R3-A15-ambiguity-found-accepted": {
+      const repo = tracedRepo({ markAttemptAmbiguous: async () => ({ outcome: "found" }) });
+      const http = tracedHttp({ throws: true, trace: repo.trace });
+      const result = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo });
+      assert.equal(result.outcome, "ambiguous");
+      assert.equal(result.code, KEYWORD_PROVIDER_AMBIGUOUS);
+      assert.equal(repo.calls.ambiguous, 1);
+      break;
+    }
+    case "R3-A16-ambiguity-other-fails-closed": {
+      const repo = tracedRepo({ markAttemptAmbiguous: async () => ({ outcome: "lost" }) });
+      const http = tracedHttp({ throws: true, trace: repo.trace });
+      await assert.rejects(
+        attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http, repo }),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      break;
+    }
+    default:
+      assert.fail(`unhandled adapter case ${caseId}`);
+  }
+}
+
+test("SCN-KI-028: adapter enforcement manifest executes every case with exact trace/result oracles", async (t) => {
+  const executed = [];
+  for (const caseId of ADAPTER_MANIFEST_IDS) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      await runAdapterCase(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...ADAPTER_MANIFEST_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every adapter manifest ID executed exactly once");
+  assert.equal(executed.length, ADAPTER_MANIFEST_IDS.length);
+  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+});
+
+test("SCN-KI-028: negative control strips active cost and falsifies the A01 cost-projection oracle", async () => {
+  const successCase = SUGGESTIONS_FIXTURE.cases.find((entry) => entry.id === "SG001");
+  const production = tracedRepo({
+    settleAttempt: async () => ({ outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true })
+  });
+  const productionHttp = tracedHttp({ status: 200, body: successCase.payload, trace: production.trace });
+  const productionResult = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http: productionHttp, repo: production });
+  assert.equal(productionResult.providerCostUsd, "0.01560000", "A01 oracle passes with the reported cost");
+
+  const stripped = tracedRepo({
+    settleAttempt: async () => ({ outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true })
+  });
+  const strippedBody = JSON.parse(JSON.stringify(successCase.payload));
+  delete strippedBody.tasks[0].cost;
+  const strippedHttp = tracedHttp({ status: 200, body: strippedBody, trace: stripped.trace });
+  const strippedResult = await attempt({ endpointKey: "keyword_suggestions", request: SUGGESTION_REQUEST, payload: {}, http: strippedHttp, repo: stripped });
+  assert.equal(strippedResult.outcome, "succeeded");
+  assert.notEqual(strippedResult.providerCostUsd, "0.01560000",
+    "stripped active cost must falsify the A01 exact-cost oracle");
+  assert.equal(strippedResult.providerCostUsd, "0.00000000");
+});

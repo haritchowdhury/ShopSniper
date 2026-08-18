@@ -2,11 +2,34 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { keywordResearchConfigV1 } from "../src/keyword-intelligence/config.js";
 import { S3ArtifactStore } from "../src/aws-pipeline/adapters/artifact-store.js";
 import { processInitialize, processKeywordMessage } from "../src/aws-pipeline/keyword-intelligence/service.js";
-import { keywordMessageSchema, keywordExpansionManifestSchema } from "../src/aws-pipeline/keyword-intelligence/contracts.js";
-import { keywordResultKey, keywordManifestKey, keywordRequestFingerprint, keywordTaskInputFingerprint } from "../src/aws-pipeline/keyword-intelligence/keys.js";
+import {
+  keywordMessageSchema,
+  keywordExpansionResultSchema,
+  keywordExpansionManifestSchema,
+  keywordAnchorScreenResultSchema,
+  keywordShortlistManifestSchema,
+  keywordMarketOverviewResultSchema,
+  keywordMarketOverviewManifestSchema,
+  KEYWORD_ARTIFACT_EXPANSION_RESULT,
+  KEYWORD_ARTIFACT_EXPANSION_MANIFEST,
+  KEYWORD_ARTIFACT_ANCHOR_RESULT,
+  KEYWORD_ARTIFACT_SHORTLIST_MANIFEST,
+  KEYWORD_ARTIFACT_MARKET_RESULT,
+  KEYWORD_ARTIFACT_MARKET_MANIFEST
+} from "../src/aws-pipeline/keyword-intelligence/contracts.js";
+import {
+  keywordResultKey,
+  keywordManifestKey,
+  keywordRequestFingerprint,
+  keywordTaskInputFingerprint,
+  keywordTaskArtifactKey,
+  keywordStageInputFingerprint
+} from "../src/aws-pipeline/keyword-intelligence/keys.js";
 
 const fp = (value) => createHash("sha256").update(String(value)).digest("hex");
 const CONFIG = keywordResearchConfigV1();
@@ -478,4 +501,495 @@ test("SCN-KI-026: failStage returns its fence outcome and callers propagate lost
   const result = await processKeywordMessage(check, runtime);
   assert.equal(result.outcome, "lost", "lost failStage propagates, not stage_failed");
   assert.equal(factory.finalPublished, false, "no publication follows a lost failStage");
+});
+
+const AGG_MANIFEST = JSON.parse(readFileSync(fileURLToPath(new URL("./fixtures/keyword-intelligence/ki-r3-enforcement-manifest-v1.json", import.meta.url)), "utf8"));
+const AGG_MANIFEST_IDS = AGG_MANIFEST.groups.aggregation;
+const AGG_CANDIDATES = ["seed one alpha", "seed one beta", "seed one gamma"];
+
+function aggMetrics(keywords) {
+  const items = overviewResponse(keywords).tasks[0].result[0].items;
+  return items.map((item) => ({
+    keyword: item.keyword,
+    keyword_info: { ...item.keyword_info, monthly_searches: item.monthly_searches },
+    keyword_properties: item.keyword_properties,
+    search_intent_info: item.search_intent_info
+  }));
+}
+
+function aggCount(trace, op) {
+  return trace.filter((entry) => entry === op).length;
+}
+
+function aggNoOp(trace, op) {
+  assert.equal(aggCount(trace, op), 0, `trace must not contain ${op}: ${JSON.stringify(trace)}`);
+}
+
+async function aggregationScaffold({ stage = "expansion", publishOutcome = "terminal", failOutcome = "terminal", failOnAssert, tickSeconds = [], trace: traceArg, publishTasksFor = stage } = {}) {
+  const trace = traceArg ?? [];
+  const researchId = newId("kr_");
+  const generation = 1;
+  const seeds = ["seed one"];
+  const nowBox = { current: NOW.getTime() };
+  const clock = () => new Date(nowBox.current);
+  const s3Client = memoryS3();
+  const store = new S3ArtifactStore({ client: s3Client, bucket: "keyword-bucket", maxBytes: 33554432 });
+  const tracedStore = {
+    async putImmutable(input) { trace.push("s3.put"); return store.putImmutable(input); },
+    async getValidated(input) { trace.push("s3.get"); return store.getValidated(input); },
+    async getOptionalValidated(input) { trace.push("s3.get"); return store.getOptionalValidated(input); }
+  };
+
+  const expansionStage = { id: newId("krs"), researchId, stage: "expansion", generation, state: "ready", expectedCount: 2, terminalCount: 2, succeededCount: 2, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
+  const anchorStage = { id: newId("krs"), researchId, stage: "anchor_screen", generation, state: "ready", expectedCount: 1, terminalCount: 1, succeededCount: 1, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
+  const marketStage = { id: newId("krs"), researchId, stage: "market_overview", generation, state: "ready", expectedCount: 8, terminalCount: 8, succeededCount: 8, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
+
+  function baseTask(stageRow, itemKey, endpointKey, request, inputPayload) {
+    return {
+      id: newId("krt"), stageId: stageRow.id, itemKey, endpointKey,
+      inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-expansion-input-v1", researchId, generation, payload: inputPayload }),
+      requestFingerprint: keywordRequestFingerprint(endpointKey, request),
+      nextAttemptAt: null, state: "succeeded", attemptCount: 1, leaseToken: null, leaseExpiresAt: null,
+      createdAt: NOW, artifactS3Key: null, artifactFingerprint: null, safeErrorCode: null
+    };
+  }
+
+  const expansionTasks = [];
+  for (const [index, suffix, endpointKey] of [[0, "suggestions", "keyword_suggestions"], [0, "related", "related_keywords"]]) {
+    const request = { keyword: seeds[0], location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode, limit: 30 };
+    expansionTasks.push(baseTask(expansionStage, `${index}:${suffix}`, endpointKey, request, { seed: seeds[0], endpointKey }));
+  }
+  const anchorRequest = { keywords: AGG_CANDIDATES, location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode };
+  const anchorTask = {
+    ...baseTask(anchorStage, "US:0", "keyword_overview", anchorRequest,
+      { candidates: AGG_CANDIDATES }),
+    inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-anchor-input-v1", researchId, generation, payload: { candidates: AGG_CANDIDATES } })
+  };
+  const marketTasks = [];
+  for (const code of ["GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"]) {
+    const market = CONFIG.markets.find((entry) => entry.code === code);
+    const request = { keywords: AGG_CANDIDATES, location_code: market.locationCode, language_code: market.languageCode };
+    marketTasks.push({
+      ...baseTask(marketStage, `${code}:0`, "keyword_overview", request, { code, keywords: AGG_CANDIDATES }),
+      inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-market-input-v1", researchId, generation, payload: { code, keywords: AGG_CANDIDATES } })
+    });
+  }
+  const stages = { expansion: expansionStage, anchor_screen: anchorStage, market_overview: marketStage };
+  const tasksByStage = { expansion: expansionTasks, anchor_screen: [anchorTask], market_overview: marketTasks };
+
+  const common = { researchId, generation, producedAt: NOW.toISOString() };
+  for (const task of expansionTasks) {
+    const artifact = {
+      contractVersion: KEYWORD_ARTIFACT_EXPANSION_RESULT, stage: "expansion", status: "succeeded",
+      costUsd: "0.01560000", normalized: { keywords: [`${seeds[0]} ${task.itemKey.split(":")[1]} one`, `${seeds[0]} ${task.itemKey.split(":")[1]} two`] },
+      itemId: task.itemKey, inputFingerprint: task.inputFingerprint, ...common
+    };
+    const stored = await tracedStore.putImmutable({
+      key: keywordTaskArtifactKey(researchId, generation, "expansion", task.itemKey),
+      contractVersion: artifact.contractVersion, runId: researchId, stage: "expansion", generation,
+      itemId: task.itemKey, inputFingerprint: task.inputFingerprint, producedAt: NOW, value: artifact,
+      schema: keywordExpansionResultSchema
+    });
+    task.artifactS3Key = stored.key;
+    task.artifactFingerprint = stored.contentFingerprint;
+  }
+
+  const expansionFp = keywordStageInputFingerprint({ researchId, generation, stage: "expansion", tasks: expansionTasks });
+  const expansionManifest = {
+    contractVersion: KEYWORD_ARTIFACT_EXPANSION_MANIFEST, stage: "expansion", itemId: "manifest",
+    seeds, bySeed: [{ seed: seeds[0], keywords: AGG_CANDIDATES }],
+    candidates: AGG_CANDIDATES.map((keyword) => ({ keyword, seeds: [seeds[0]] })),
+    inputFingerprint: expansionFp, ...common
+  };
+  const expManifestStored = await tracedStore.putImmutable({
+    key: keywordManifestKey(researchId, generation, "expansion"),
+    contractVersion: expansionManifest.contractVersion, runId: researchId, stage: "expansion", generation,
+    itemId: "manifest", inputFingerprint: expansionFp, producedAt: NOW, value: expansionManifest,
+    schema: keywordExpansionManifestSchema
+  });
+  expansionStage.manifestS3Key = expManifestStored.key;
+  expansionStage.manifestFingerprint = expManifestStored.contentFingerprint;
+  expansionStage.manifestProducedAt = NOW;
+
+  const anchorMetrics = aggMetrics(AGG_CANDIDATES);
+  const anchorArtifact = {
+    contractVersion: KEYWORD_ARTIFACT_ANCHOR_RESULT, stage: "anchor_screen", status: "succeeded",
+    costUsd: "0.01236000", normalized: { metrics: anchorMetrics },
+    itemId: anchorTask.itemKey, inputFingerprint: anchorTask.inputFingerprint, ...common
+  };
+  const anchorStored = await tracedStore.putImmutable({
+    key: keywordTaskArtifactKey(researchId, generation, "anchor_screen", anchorTask.itemKey),
+    contractVersion: anchorArtifact.contractVersion, runId: researchId, stage: "anchor_screen", generation,
+    itemId: anchorTask.itemKey, inputFingerprint: anchorTask.inputFingerprint, producedAt: NOW,
+    value: anchorArtifact, schema: keywordAnchorScreenResultSchema
+  });
+  anchorTask.artifactS3Key = anchorStored.key;
+  anchorTask.artifactFingerprint = anchorStored.contentFingerprint;
+
+  const marketMetrics = aggMetrics(AGG_CANDIDATES);
+  for (const task of marketTasks) {
+    const artifact = {
+      contractVersion: KEYWORD_ARTIFACT_MARKET_RESULT, stage: "market_overview", status: "succeeded",
+      costUsd: "0.01236000", normalized: { metrics: marketMetrics },
+      itemId: task.itemKey, inputFingerprint: task.inputFingerprint, ...common
+    };
+    const stored = await tracedStore.putImmutable({
+      key: keywordTaskArtifactKey(researchId, generation, "market_overview", task.itemKey),
+      contractVersion: artifact.contractVersion, runId: researchId, stage: "market_overview", generation,
+      itemId: task.itemKey, inputFingerprint: task.inputFingerprint, producedAt: NOW, value: artifact,
+      schema: keywordMarketOverviewResultSchema
+    });
+    task.artifactS3Key = stored.key;
+    task.artifactFingerprint = stored.contentFingerprint;
+  }
+
+  const holder = { monitors: [], renewTimes: [] };
+  const repo = {
+    getStageContext: async ({ researchId: id, stage: name, generation: g }) => {
+      trace.push("ctx");
+      if (id !== researchId || g !== generation) return { outcome: "not_found" };
+      return { outcome: "found", research: { id, generation, state: "running", contractVersion: 1, configSnapshot: CONFIG, configFingerprint: fp("c"), seeds, markets: CONFIG.markets }, stage: stages[name], tasks: tasksByStage[name] ?? [] };
+    },
+    claimAggregator: async ({ researchId: id, stage: name, generation: g, owner, token }) => {
+      trace.push("claim");
+      return { outcome: "claimed", stage: stages[name] };
+    },
+    heartbeatAggregator: async () => ({ outcome: "claimed" }),
+    publishCandidateManifest: async (input) => {
+      trace.push("publishCandidate");
+      const base = { ...input };
+      if (publishOutcome === "terminal" || publishOutcome === "found") {
+        return { outcome: publishOutcome, stage: expansionStage, nextStage: anchorStage, tasks: [anchorTask], ...base };
+      }
+      return { outcome: publishOutcome };
+    },
+    publishShortlist: async (input) => {
+      trace.push("publishShortlist");
+      const base = { ...input };
+      if (publishOutcome === "terminal" || publishOutcome === "found") {
+        return { outcome: publishOutcome, stage: anchorStage, nextStage: marketStage, tasks: marketTasks, ...base };
+      }
+      return { outcome: publishOutcome };
+    },
+    publishResearchResult: async (input) => {
+      trace.push("publishResult");
+      if (publishOutcome === "terminal" || publishOutcome === "found") {
+        return { outcome: publishOutcome };
+      }
+      return { outcome: publishOutcome };
+    },
+    failStage: async () => { trace.push("failStage"); return { outcome: failOutcome }; }
+  };
+  repo.stages = stages;
+  repo.tasksByStage = tasksByStage;
+
+  const controller = { failOnAssert };
+  const monitorFactory = ({ intervalMs, now, renew }) => {
+    const state = { failure: null, stopped: false, assertCount: 0 };
+    const monitor = {
+      state,
+      async renewNow() {
+        trace.push("renew");
+        holder.renewTimes.push(new Date(now().getTime()).getTime());
+        state.renewals += 1;
+        if (state.stopped) return;
+        try { await renew(now()); } catch (error) { state.failure ??= error; throw error; }
+      },
+      assertActive() {
+        state.assertCount += 1;
+        trace.push("assert");
+        if (controller.failOnAssert !== undefined && state.assertCount === controller.failOnAssert) {
+          const error = new Error("PIPELINE_LEASE_LOST");
+          error.code = "PIPELINE_LEASE_LOST";
+          state.failure ??= error;
+          throw error;
+        }
+        if (state.failure) throw state.failure;
+      },
+      async stop() { trace.push("stop"); state.stopped = true; if (state.failure) throw state.failure; },
+      async tick() { await monitor.renewNow(); }
+    };
+    holder.monitors.push(monitor);
+    return monitor;
+  };
+
+  const dispatch = {
+    sent: [],
+    async sendOne(_q, message, _schema, _options) {
+      trace.push(message.type.endsWith(".task.v1") ? "sendTask" : "sendCheck");
+      this.sent.push(message);
+      return { sentItemIds: [message.taskNaturalId ?? message.researchId], failedItemIds: [] };
+    }
+  };
+
+  const runtime = {
+    repository: repo, artifactStore: tracedStore, dispatcher: dispatch,
+    config: { awsPipelineBucket: "keyword-bucket", awsPipelineKeywordResearchQueueUrl: QUEUE_URL },
+    clock, http: async () => { throw new Error("aggregation never calls http"); },
+    secrets: { dataForSeoLogin: "login", dataForSeoPassword: "password" }
+  };
+  const stageTasks = tasksByStage[stage];
+  const message = {
+    contractVersion: 1, type: "keyword.aggregate.check.v1", researchId, generation: 1, stage,
+    stageInputFingerprint: keywordStageInputFingerprint({ researchId, generation, stage, tasks: stageTasks })
+  };
+  trace.length = 0;
+  return { trace, repo, runtime, message, monitorFactory, holder, dispatch, researchId, stages, tasksByStage };
+}
+
+async function runAggregationCase(caseId) {
+  switch (caseId) {
+    case "R3-G01-expansion-terminal-dispatch": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      assert.equal(aggCount(h.trace, "sendTask"), 1, "expansion publishes one anchor task");
+      assert.equal(aggCount(h.trace, "sendCheck"), 1, "expansion sends one anchor check");
+      assert.ok(h.trace.includes("publishCandidate"));
+      break;
+    }
+    case "R3-G02-expansion-found-dispatch": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      assert.equal(aggCount(h.trace, "sendTask"), 1);
+      assert.equal(aggCount(h.trace, "sendCheck"), 1);
+      break;
+    }
+    case "R3-G03-expansion-lost-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "lost" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G04-expansion-conflict-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "conflict" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G05-expansion-not-found-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "not_found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G06-anchor-terminal-dispatch": {
+      const h = await aggregationScaffold({ stage: "anchor_screen", publishOutcome: "terminal" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      assert.equal(aggCount(h.trace, "sendTask"), 8, "anchor publishes eight ordered market tasks");
+      assert.equal(aggCount(h.trace, "sendCheck"), 1);
+      assert.ok(h.trace.includes("publishShortlist"));
+      break;
+    }
+    case "R3-G07-anchor-found-dispatch": {
+      const h = await aggregationScaffold({ stage: "anchor_screen", publishOutcome: "found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      assert.equal(aggCount(h.trace, "sendTask"), 8);
+      assert.equal(aggCount(h.trace, "sendCheck"), 1);
+      break;
+    }
+    case "R3-G08-anchor-lost-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "anchor_screen", publishOutcome: "lost" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G09-anchor-conflict-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "anchor_screen", publishOutcome: "conflict" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G10-anchor-not-found-no-dispatch": {
+      const h = await aggregationScaffold({ stage: "anchor_screen", publishOutcome: "not_found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G11-market-terminal-publish": {
+      const h = await aggregationScaffold({ stage: "market_overview", publishOutcome: "terminal" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      assert.ok(h.trace.includes("publishResult"));
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G12-market-found-publish": {
+      const h = await aggregationScaffold({ stage: "market_overview", publishOutcome: "found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G13-market-lost-no-publish": {
+      const h = await aggregationScaffold({ stage: "market_overview", publishOutcome: "lost" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G14-market-conflict-no-publish": {
+      const h = await aggregationScaffold({ stage: "market_overview", publishOutcome: "conflict" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G15-market-not-found-no-publish": {
+      const h = await aggregationScaffold({ stage: "market_overview", publishOutcome: "not_found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G16-fail-terminal-stage-failed": {
+      const h = await aggregationScaffold({ stage: "expansion", failOutcome: "terminal" });
+      h.repo.tasksByStage.expansion[0].state = "failed";
+      h.repo.tasksByStage.expansion[0].safeErrorCode = "KEYWORD_PROVIDER_TASK_FAILED";
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "stage_failed");
+      assert.ok(h.trace.includes("failStage"));
+      aggNoOp(h.trace, "sendTask");
+      break;
+    }
+    case "R3-G17-fail-found-stage-failed": {
+      const h = await aggregationScaffold({ stage: "expansion", failOutcome: "found" });
+      h.repo.tasksByStage.expansion[0].state = "failed";
+      h.repo.tasksByStage.expansion[0].safeErrorCode = "KEYWORD_PROVIDER_TASK_FAILED";
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "stage_failed");
+      break;
+    }
+    case "R3-G18-fail-lost-propagated": {
+      const h = await aggregationScaffold({ stage: "expansion", failOutcome: "lost" });
+      h.repo.tasksByStage.expansion[0].state = "failed";
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      break;
+    }
+    case "R3-G19-fail-conflict-propagated": {
+      const h = await aggregationScaffold({ stage: "expansion", failOutcome: "conflict" });
+      h.repo.tasksByStage.expansion[0].state = "failed";
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      break;
+    }
+    case "R3-G20-fail-not-found-propagated": {
+      const h = await aggregationScaffold({ stage: "expansion", failOutcome: "not_found" });
+      h.repo.tasksByStage.expansion[0].state = "failed";
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      break;
+    }
+    case "R3-G21-loss-during-get-no-later-call": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal", failOnAssert: 4 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(aggCount(h.trace, "s3.get") >= 1, "loss during the first S3 read");
+      aggNoOp(h.trace, "publishCandidate");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G22-loss-during-put-orphan-only": {
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal", failOnAssert: 8 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error?.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(aggCount(h.trace, "s3.put") <= 1, "at most one orphan manifest put");
+      aggNoOp(h.trace, "publishCandidate");
+      aggNoOp(h.trace, "sendTask");
+      aggNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-G23-six-renewals-over-240s": {
+      const nowBox = { current: NOW.getTime() };
+      const h = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal" });
+      h.runtime.clock = () => new Date(nowBox.current);
+      const realStore = h.runtime.artifactStore;
+      const origGet = realStore.getValidated;
+      let ticked = false;
+      const wrappedGet = async (input) => {
+        const value = await origGet.call(realStore, input);
+        if (h.holder.monitors[0] && !ticked) {
+          ticked = true;
+          for (const seconds of [40, 80, 120, 160, 200, 240]) {
+            nowBox.current = NOW.getTime() + seconds * 1000;
+            await h.holder.monitors[0].tick();
+          }
+        }
+        return value;
+      };
+      h.runtime.artifactStore = { ...realStore, getValidated: wrappedGet };
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "published");
+      const renews = h.holder.renewTimes;
+      const scheduled = [40, 80, 120, 160, 200, 240].map((seconds) => NOW.getTime() + seconds * 1000);
+      assert.ok(renews.length >= 6, `at least six aggregation renewals, got ${renews.length}`);
+      for (let index = 0; index < 6; index += 1) {
+        assert.equal(renews[index], scheduled[index], `aggregation renewal ${index + 1} at the exact 40s cadence`);
+        if (index + 1 < 6) assert.ok(renews[index] < renews[index + 1], "aggregation renewals are nonoverlapping");
+      }
+      assert.equal(aggCount(h.trace, "publishCandidate"), 1, "one publication after the renewals");
+      break;
+    }
+    case "R3-G24-monitor-negative-control": {
+      const production = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal", failOnAssert: 4 });
+      await assert.rejects(
+        processKeywordMessage(production.message, production.runtime, { createLeaseMonitor: production.monitorFactory }),
+        (error) => error?.code === "PIPELINE_LEASE_LOST"
+      );
+      aggNoOp(production.trace, "sendTask");
+      aggNoOp(production.trace, "sendCheck");
+      assert.equal(aggCount(production.trace, "s3.put"), 0, "production makes no later put after loss during get");
+      const mutated = await aggregationScaffold({ stage: "expansion", publishOutcome: "terminal" });
+      const mutatedResult = await processKeywordMessage(mutated.message, mutated.runtime, { createLeaseMonitor: mutated.monitorFactory });
+      assert.equal(mutatedResult.outcome, "published");
+      assert.equal(aggCount(mutated.trace, "s3.put"), 1);
+      assert.notEqual(aggCount(production.trace, "s3.put"), aggCount(mutated.trace, "s3.put"),
+        "ignoring a detected aggregation loss must falsify the zero-later-call oracle");
+      break;
+    }
+    default:
+      assert.fail(`unhandled aggregation case ${caseId}`);
+  }
+}
+
+test("SCN-KI-031: aggregation enforcement manifest executes every case with exact trace oracles", async (t) => {
+  const executed = [];
+  for (const caseId of AGG_MANIFEST_IDS) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      await runAggregationCase(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...AGG_MANIFEST_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every aggregation manifest ID executed exactly once");
+  assert.equal(executed.length, AGG_MANIFEST_IDS.length);
+  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
+  assert.match(hash, /^[a-f0-9]{64}$/);
 });

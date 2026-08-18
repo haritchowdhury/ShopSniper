@@ -11,8 +11,22 @@ import { S3ArtifactStore } from "../src/aws-pipeline/adapters/artifact-store.js"
 import { createIsolatedTestSchema, deployPrismaMigrations } from "./helpers/isolated-postgres.js";
 import { handler, KEYWORD_ARTIFACT_MAX_BYTES } from "../src/aws-pipeline/keyword-intelligence/handler.js";
 import { processKeywordMessage, processInitialize } from "../src/aws-pipeline/keyword-intelligence/service.js";
-import { keywordMessageSchema } from "../src/aws-pipeline/keyword-intelligence/contracts.js";
-import { keywordResultKey, keywordManifestKey } from "../src/aws-pipeline/keyword-intelligence/keys.js";
+import {
+  keywordMessageSchema,
+  KEYWORD_PROVIDER_AMBIGUOUS,
+  KEYWORD_PROVIDER_AUTH_FAILED,
+  KEYWORD_PROVIDER_CONTRACT_MISMATCH,
+  KEYWORD_PROVIDER_TASK_FAILED,
+  KEYWORD_PROVIDER_RETRYABLE,
+  KEYWORD_PROVIDER_RETRY_EXHAUSTED
+} from "../src/aws-pipeline/keyword-intelligence/contracts.js";
+import {
+  keywordResultKey,
+  keywordManifestKey,
+  keywordRequestFingerprint,
+  keywordTaskInputFingerprint
+} from "../src/aws-pipeline/keyword-intelligence/keys.js";
+import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 
 const enabled = process.env.ALLOW_DATABASE_TESTS === "true" && Boolean(process.env.TEST_DATABASE_URL);
 const fp = (value) => createHash("sha256").update(String(value)).digest("hex");
@@ -676,3 +690,905 @@ test("negative control: bypassing the anchor worker leaves completion false", { 
     assert.notEqual(research.state, "completed", "bypassing anchor worker must not complete research");
   });
 });
+
+const ENFORCEMENT_MANIFEST = readFixture("ki-r3-enforcement-manifest-v1.json");
+const TASK_COMPONENT_IDS = ENFORCEMENT_MANIFEST.groups.task_component;
+const RECOVERY_COMPONENT_IDS = ENFORCEMENT_MANIFEST.groups.recovery_component;
+const DATABASE_IDS = ENFORCEMENT_MANIFEST.groups.task_database;
+
+const COMPONENT_RESEARCH_ID = "kr_r3comp000000000000000000";
+const COMPONENT_TASK_ID = "krt_r3comp00000000000000000";
+const COMPONENT_STAGE_ID = "krs_r3comp00000000000000000";
+const COMPONENT_T0 = new Date("2026-08-17T00:00:00.000Z");
+
+function countOp(trace, op) {
+  return trace.filter((entry) => entry === op).length;
+}
+
+function assertNoOp(trace, op) {
+  assert.equal(countOp(trace, op), 0, `trace must not contain ${op}: ${JSON.stringify(trace)}`);
+}
+
+function assertDecisiveTail(trace, decisive) {
+  let pos = 0;
+  for (const op of decisive) {
+    const idx = trace.indexOf(op, pos);
+    assert.notEqual(idx, -1, `trace ${JSON.stringify(trace)} is missing ${op}`);
+    pos = idx + 1;
+  }
+  for (const op of trace.slice(pos)) {
+    assert.ok(op === "assert" || op === "stop",
+      `unexpected op ${op} after decisive tail in ${JSON.stringify(trace)}`);
+  }
+}
+
+function expansionComponentPayload() {
+  const entries = ["seed one suggestions one", "seed one suggestions two", "seed one suggestions three"];
+  const items = entries.map((keyword) => ({ keyword }));
+  return {
+    status_code: 20000, status_message: "Ok.", cost: 0.0156, tasks_count: 1, results_count: 1,
+    tasks: [{ id: "t", status_code: 20000, status_message: "Ok.", cost: 0.0156,
+      result: [{ items_count: items.length, items }] }]
+  };
+}
+
+function componentHarness(spec = {}) {
+  const trace = spec.trace ?? [];
+  const nowBox = spec.nowBox ?? { current: COMPONENT_T0.getTime() };
+  const clock = () => new Date(nowBox.current);
+  const suggestionRequest = { keyword: "seed one", location_code: 2840, language_code: "en", limit: 30 };
+  const inputFp = keywordTaskInputFingerprint({
+    contractVersion: "keyword-expansion-input-v1", researchId: COMPONENT_RESEARCH_ID, generation: 1,
+    payload: { seed: "seed one", endpointKey: "keyword_suggestions" }
+  });
+  const reqFp = keywordRequestFingerprint("keyword_suggestions", suggestionRequest);
+  const task = {
+    id: COMPONENT_TASK_ID, stageId: COMPONENT_STAGE_ID, itemKey: "0:suggestions",
+    inputFingerprint: inputFp, endpointKey: "keyword_suggestions", requestFingerprint: reqFp,
+    nextAttemptAt: spec.nextAttemptAt ?? null, state: "pending", attemptCount: spec.attemptCount ?? 0,
+    leaseToken: null, leaseExpiresAt: null, createdAt: COMPONENT_T0,
+    artifactS3Key: null, artifactFingerprint: null, safeErrorCode: null
+  };
+  const stage = {
+    id: COMPONENT_STAGE_ID, researchId: COMPONENT_RESEARCH_ID, stage: "expansion", generation: 1,
+    state: "collecting", expectedCount: 2, terminalCount: 0, succeededCount: 0, skippedCount: 0,
+    failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: COMPONENT_T0
+  };
+  const research = {
+    id: COMPONENT_RESEARCH_ID, generation: 1, state: "running", contractVersion: 1,
+    configSnapshot: CONFIG, configFingerprint: fp("c"), seeds: ["seed one"], markets: CONFIG.markets
+  };
+  const repo = {
+    trace,
+    getTaskContext: async () => { trace.push("ctx"); return { outcome: "found", research, stage, task, latestAttempt: spec.latestAttempt ?? null }; },
+    getStageContext: async () => { trace.push("ctx"); return { outcome: "found", research, stage, tasks: [task] }; },
+    claim: async ({ taskId, owner, token }) => { trace.push("claim"); task.state = "processing"; task.leaseToken = token; task.leaseExpiresAt = new Date(nowBox.current + 60000); return { outcome: "claimed", task }; },
+    heartbeat: async () => ({ outcome: "claimed" }),
+    heartbeatAggregator: async () => ({ outcome: "claimed" }),
+    recordAttempt: async () => spec.recordOutcome ?? { outcome: "created", attempt: { attemptNumber: 1 }, mayCall: true },
+    settleAttempt: async () => spec.settleOutcome ?? { outcome: "terminal", attempt: { attemptNumber: 1 }, fenceActive: true },
+    cacheRead: async () => { trace.push("cache"); return spec.cacheReadOutcome ?? { outcome: "not_found" }; },
+    claimThrottle: async () => ({ outcome: "claimed" }),
+    deferTask: async () => ({ outcome: "delayed", retryAt: new Date(nowBox.current + 2000) }),
+    markAttemptAmbiguous: async () => { trace.push("markAmbiguous"); return spec.markAmbiguousOutcome ?? { outcome: "terminal" }; },
+    scheduleRetry: async () => {
+      trace.push("scheduleRetry");
+      const outcome = spec.scheduleRetryOutcome ?? { outcome: "delayed", retryAt: new Date(nowBox.current + 4000) };
+      if (outcome.outcome === "delayed") task.nextAttemptAt = outcome.retryAt;
+      return outcome;
+    },
+    terminalize: async () => { trace.push("terminalize"); return { outcome: spec.terminalizeOutcome ?? "terminal" }; }
+  };
+  const controller = { failOnAssert: spec.failOnAssert };
+  const monitors = [];
+  const renewTimes = [];
+  const monitorFactory = ({ intervalMs, now, renew }) => {
+    const state = { failure: null, stopped: false, renewals: 0, assertCount: 0 };
+    const monitor = {
+      state,
+      async renewNow() {
+        trace.push("renew");
+        renewTimes.push(new Date(now().getTime()).getTime());
+        state.renewals += 1;
+        if (state.stopped) return;
+        try { await renew(now()); } catch (error) { state.failure ??= error; throw error; }
+      },
+      assertActive() {
+        state.assertCount += 1;
+        trace.push("assert");
+        if (controller.failOnAssert !== undefined && state.assertCount === controller.failOnAssert) {
+          const error = new Error("PIPELINE_LEASE_LOST");
+          error.code = "PIPELINE_LEASE_LOST";
+          state.failure ??= error;
+          throw error;
+        }
+        if (state.failure) throw state.failure;
+      },
+      async stop() { trace.push("stop"); state.stopped = true; if (state.failure) throw state.failure; },
+      async tick() { await monitor.renewNow(); }
+    };
+    monitors.push(monitor);
+    return monitor;
+  };
+  const holder = { monitors, renewTimes };
+  const s3 = {
+    async putImmutable() { trace.push("s3.put"); return { key: "runs/put.json", contentFingerprint: fp("put") }; },
+    async getValidated() { trace.push("s3.get"); return { value: {} }; }
+  };
+  const dispatch = {
+    async sendOne(_q, message, _schema, _options) {
+      trace.push(message.type.endsWith(".task.v1") ? "sendTask" : "sendCheck");
+      const logicalId = message.taskNaturalId ?? message.researchId;
+      return spec.dispatchFailure
+        ? { sentItemIds: [], failedItemIds: [logicalId] }
+        : { sentItemIds: [logicalId], failedItemIds: [] };
+    }
+  };
+  const httpDefault = async () => {
+    trace.push("http");
+    if (spec.tickHttp) await spec.tickHttp({ holder, nowBox });
+    return { status: 200, json: async () => { trace.push("json"); return expansionComponentPayload(); } };
+  };
+  const authFailureHttp = async () => {
+    trace.push("http");
+    return { status: 401, json: async () => { trace.push("json"); return { status_code: 40100, status_message: "Unauthorized.", cost: 0.0156 }; } };
+  };
+  const runtime = {
+    repository: repo, artifactStore: s3, dispatcher: dispatch,
+    config: { awsPipelineBucket: "keyword-bucket", awsPipelineKeywordResearchQueueUrl: QUEUE_URL },
+    clock, http: spec.authFailure ? authFailureHttp : httpDefault,
+    secrets: { dataForSeoLogin: "login", dataForSeoPassword: "password" }
+  };
+  const message = {
+    contractVersion: 1, type: "keyword.expansion.task.v1", researchId: COMPONENT_RESEARCH_ID,
+    generation: 1, stage: "expansion", taskNaturalId: task.id, inputFingerprint: inputFp
+  };
+  return { trace, repo, runtime, message, monitorFactory, holder, task };
+}
+
+async function runTaskComponentCase(caseId) {
+  switch (caseId) {
+    case "R3-T01-success-terminal-check": {
+      const h = componentHarness({ terminalizeOutcome: "terminal" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.terminal, true);
+      assert.equal(result.outcome, "succeeded");
+      assertDecisiveTail(h.trace, ["s3.put", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      assert.equal(countOp(h.trace, "sendCheck"), 1);
+      assert.equal(countOp(h.trace, "http"), 1);
+      break;
+    }
+    case "R3-T02-success-found-check": {
+      const h = componentHarness({ terminalizeOutcome: "found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "found");
+      assertDecisiveTail(h.trace, ["s3.put", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      assert.equal(countOp(h.trace, "sendCheck"), 1);
+      break;
+    }
+    case "R3-T03-success-lost-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "lost" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      assertDecisiveTail(h.trace, ["s3.put", "renew", "stop", "assert", "terminalize"]);
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T04-success-conflict-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "conflict" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T05-success-not-found-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "not_found" });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T06-failure-terminal-check": {
+      const h = componentHarness({ terminalizeOutcome: "terminal", authFailure: true });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "terminal");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      assert.equal(countOp(h.trace, "sendCheck"), 1);
+      break;
+    }
+    case "R3-T07-failure-found-check": {
+      const h = componentHarness({ terminalizeOutcome: "found", authFailure: true });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "found");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-T08-failure-lost-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "lost", authFailure: true });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "lost");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T09-failure-conflict-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "conflict", authFailure: true });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "conflict");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T10-failure-not-found-no-check": {
+      const h = componentHarness({ terminalizeOutcome: "not_found", authFailure: true });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "not_found");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T11-loss-before-http-zero-call": {
+      const h = componentHarness({ failOnAssert: 4 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.equal(countOp(h.trace, "http"), 0, "loss before http makes zero HTTP calls");
+      assert.equal(countOp(h.trace, "markAmbiguous"), 1);
+      assertNoOp(h.trace, "s3.put");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T12-loss-during-fetch-ambiguity": {
+      const h = componentHarness({ failOnAssert: 5 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.equal(countOp(h.trace, "http"), 1);
+      assert.equal(countOp(h.trace, "json"), 0);
+      assert.equal(countOp(h.trace, "markAmbiguous"), 1);
+      assertNoOp(h.trace, "s3.put");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T13-loss-during-json-ambiguity": {
+      const h = componentHarness({ failOnAssert: 7 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.equal(countOp(h.trace, "http"), 1);
+      assert.equal(countOp(h.trace, "json"), 1);
+      assert.equal(countOp(h.trace, "markAmbiguous"), 1);
+      assertNoOp(h.trace, "s3.put");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T14-loss-before-s3": {
+      const h = componentHarness({ failOnAssert: 9 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(countOp(h.trace, "s3.put") <= 1, "at most one orphan s3.put allowed");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T15-loss-during-s3": {
+      const h = componentHarness({ failOnAssert: 10 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(countOp(h.trace, "s3.put") <= 1, "at most one orphan s3.put allowed");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T16-loss-after-s3-before-terminal": {
+      const h = componentHarness({ failOnAssert: 11 });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_LEASE_LOST"
+      );
+      assert.ok(countOp(h.trace, "s3.put") <= 1, "at most one orphan s3.put allowed");
+      assertNoOp(h.trace, "terminalize");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-T17-six-renewals-over-120s": {
+      const nowBox = { current: COMPONENT_T0.getTime() };
+      let holderRef;
+      const h = componentHarness({
+        nowBox,
+        tickHttp: async ({ holder }) => {
+          holderRef = holder;
+          for (const seconds of [20, 40, 60, 80, 100, 120]) {
+            nowBox.current = COMPONENT_T0.getTime() + seconds * 1000;
+            await holder.monitors[0].tick();
+          }
+        }
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "succeeded");
+      const renews = holderRef.renewTimes;
+      assert.ok(renews.length >= 6, `at least six renewals, got ${renews.length}`);
+      const scheduled = [20, 40, 60, 80, 100, 120].map((seconds) => COMPONENT_T0.getTime() + seconds * 1000);
+      for (let index = 0; index < 6; index += 1) {
+        assert.equal(renews[index], scheduled[index], `renewal ${index + 1} at the exact 20s cadence`);
+        if (index + 1 < 6) {
+          assert.ok(renews[index] < renews[index + 1], "timer renewals are strictly nonoverlapping in time");
+        }
+      }
+      break;
+    }
+    case "R3-T18-terminal-gate-negative-control": {
+      const production = componentHarness({ terminalizeOutcome: "lost" });
+      const productionResult = await processKeywordMessage(production.message, production.runtime, { createLeaseMonitor: production.monitorFactory });
+      assert.equal(productionResult.outcome, "lost");
+      assertNoOp(production.trace, "sendCheck", "production never sends a check after a lost terminal gate");
+      const mutated = componentHarness({ terminalizeOutcome: "terminal" });
+      const mutatedResult = await processKeywordMessage(mutated.message, mutated.runtime, { createLeaseMonitor: mutated.monitorFactory });
+      assert.equal(mutatedResult.outcome, "succeeded");
+      assert.equal(countOp(mutated.trace, "sendCheck"), 1);
+      assert.notEqual(countOp(production.trace, "sendCheck"), countOp(mutated.trace, "sendCheck"),
+        "treating a lost terminal gate as terminal must falsify the zero-check oracle");
+      break;
+    }
+    default:
+      assert.fail(`unhandled task_component case ${caseId}`);
+  }
+}
+
+const COMPONENT_NORMALIZED = { keywords: ["recovered one"] };
+const COMPONENT_MATCH_FP = fingerprintJson(COMPONENT_NORMALIZED);
+const COMPONENT_REQ_FP = keywordRequestFingerprint("keyword_suggestions",
+  { keyword: "seed one", location_code: 2840, language_code: "en", limit: 30 });
+
+function succeededAttempt(overrides = {}) {
+  return {
+    attemptNumber: 1, state: "succeeded", requestFingerprint: COMPONENT_REQ_FP,
+    resultFingerprint: COMPONENT_MATCH_FP, providerCostUsd: "0.01560000",
+    safeErrorCode: null, ...overrides
+  };
+}
+
+async function runRecoveryComponentCase(caseId) {
+  switch (caseId) {
+    case "R3-R01-success-terminal-check": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertDecisiveTail(h.trace, ["cache", "s3.put", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R02-success-found-check": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "found"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertDecisiveTail(h.trace, ["cache", "s3.put", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R03-success-lost-no-check": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "lost"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertNoOp(h.trace, "sendCheck");
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R04-success-conflict-no-check": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "conflict"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-R05-success-not-found-no-check": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: COMPONENT_MATCH_FP } },
+        terminalizeOutcome: "not_found"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertNoOp(h.trace, "sendCheck");
+      break;
+    }
+    case "R3-R06-cache-missing-terminal-ambiguity": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "not_found" },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertNoOp(h.trace, "s3.put");
+      assertDecisiveTail(h.trace, ["cache", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R07-cache-expired-terminal-ambiguity": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "not_found" },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["cache", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R08-cache-fingerprint-mismatch-ambiguity": {
+      const h = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "found", cache: { normalizedResponse: COMPONENT_NORMALIZED, resultFingerprint: fp("other") } },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["cache", "renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R09-planned-attempt-ambiguity-check": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "planned", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: null },
+        markAmbiguousOutcome: { outcome: "terminal" }
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertDecisiveTail(h.trace, ["markAmbiguous", "stop", "sendCheck"]);
+      assert.equal(countOp(h.trace, "sendCheck"), 1);
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R10-auth-failure-no-retry": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_AUTH_FAILED },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R11-contract-failure-no-retry": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_CONTRACT_MISMATCH },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R12-task-failure-no-retry": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_TASK_FAILED },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R13-retryable-delayed-send": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 2, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) }
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assertDecisiveTail(h.trace, ["scheduleRetry", "stop", "sendTask"]);
+      assert.equal(countOp(h.trace, "sendTask"), 1);
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R14-attempt-five-exhausted-terminal": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 5, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        terminalizeOutcome: "terminal"
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "http"), 0);
+      assertNoOp(h.trace, "scheduleRetry");
+      assertDecisiveTail(h.trace, ["renew", "stop", "assert", "terminalize", "sendCheck"]);
+      break;
+    }
+    case "R3-R15-delayed-send-failure-durable": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) },
+        dispatchFailure: true
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      assert.equal(countOp(h.trace, "sendTask"), 1, "failed delayed send is recorded");
+      assert.ok(h.task.nextAttemptAt instanceof Date, "durable delayed state remains after send failure");
+      assert.equal(countOp(h.trace, "http"), 0);
+      break;
+    }
+    case "R3-R16-monitor-stopped-before-dispatch": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: KEYWORD_PROVIDER_RETRYABLE },
+        scheduleRetryOutcome: { outcome: "delayed", retryAt: new Date(COMPONENT_T0.getTime() + 4000) }
+      });
+      const result = await processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory });
+      assert.equal(result.outcome, "recovered");
+      const stopIndex = h.trace.indexOf("stop");
+      const sendIndex = h.trace.indexOf("sendTask");
+      assert.ok(stopIndex !== -1 && sendIndex !== -1 && stopIndex < sendIndex,
+        `monitor stop must precede delayed dispatch in ${JSON.stringify(h.trace)}`);
+      break;
+    }
+    case "R3-R17-unknown-failed-code-conflict": {
+      const h = componentHarness({
+        latestAttempt: { attemptNumber: 1, state: "failed", requestFingerprint: null, resultFingerprint: null, providerCostUsd: "0.01560000", safeErrorCode: "KEYWORD_PROVIDER_UNKNOWN" }
+      });
+      await assert.rejects(
+        processKeywordMessage(h.message, h.runtime, { createLeaseMonitor: h.monitorFactory }),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT"
+      );
+      break;
+    }
+    case "R3-R18-recovery-fence-negative-control": {
+      const production = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "not_found" },
+        terminalizeOutcome: "lost"
+      });
+      const productionResult = await processKeywordMessage(production.message, production.runtime, { createLeaseMonitor: production.monitorFactory });
+      assert.equal(productionResult.outcome, "recovered");
+      assertNoOp(production.trace, "sendCheck", "production never sends a check when the recovery fence is lost");
+      assertNoOp(production.trace, "s3.put");
+      const mutated = componentHarness({
+        latestAttempt: succeededAttempt(),
+        cacheReadOutcome: { outcome: "not_found" },
+        terminalizeOutcome: "terminal"
+      });
+      const mutatedResult = await processKeywordMessage(mutated.message, mutated.runtime, { createLeaseMonitor: mutated.monitorFactory });
+      assert.equal(mutatedResult.outcome, "recovered");
+      assert.equal(countOp(mutated.trace, "sendCheck"), 1);
+      assert.notEqual(countOp(production.trace, "sendCheck"), countOp(mutated.trace, "sendCheck"),
+        "unfenced recovery must falsify the no-terminal/check oracle");
+      break;
+    }
+    default:
+      assert.fail(`unhandled recovery_component case ${caseId}`);
+  }
+}
+
+test("SCN-KI-029: task_component and recovery_component enforcement manifests execute every case with exact traces", async (t) => {
+  const executed = [];
+  for (const caseId of TASK_COMPONENT_IDS) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      await runTaskComponentCase(caseId);
+    });
+  }
+  for (const caseId of RECOVERY_COMPONENT_IDS) {
+    await t.test(caseId, async () => {
+      executed.push(caseId);
+      await runRecoveryComponentCase(caseId);
+    });
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...TASK_COMPONENT_IDS, ...RECOVERY_COMPONENT_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every task/recovery manifest ID executed exactly once");
+  assert.equal(executed.length, TASK_COMPONENT_IDS.length + RECOVERY_COMPONENT_IDS.length);
+  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+});
+
+function r3AuthFailureHttp(calls) {
+  return {
+    calls,
+    async http(url) {
+      calls.push(url);
+      return { status: 401, json: async () => ({ status_code: 40100, status_message: "Unauthorized.", cost: 0.0156 }) };
+    }
+  };
+}
+
+function r3RetryableHttp(calls) {
+  return {
+    calls,
+    async http(url) {
+      calls.push(url);
+      return { status: 429, json: async () => ({ status_code: 20000, status_message: "Ok.", cost: 0.0156, tasks: [] }) };
+    }
+  };
+}
+
+function r3FailOnAssertMonitorFactory(failOnAssert) {
+  return function factory({ intervalMs, now, renew }) {
+    const state = { failure: null, stopped: false, assertCount: 0 };
+    return {
+      async renewNow() {
+        if (state.stopped) return;
+        try { await renew(now()); } catch (error) { state.failure ??= error; throw error; }
+      },
+      assertActive() {
+        state.assertCount += 1;
+        if (failOnAssert !== undefined && state.assertCount === failOnAssert) {
+          const error = new Error("PIPELINE_LEASE_LOST");
+          error.code = "PIPELINE_LEASE_LOST";
+          state.failure ??= error;
+          throw error;
+        }
+        if (state.failure) throw state.failure;
+      },
+      async stop() { state.stopped = true; if (state.failure) throw state.failure; }
+    };
+  };
+}
+
+test("SCN-KI-030: task_database enforcement manifest executes every durable case exactly once", { skip: !enabled }, async () => {
+  const executed = [];
+  for (const caseId of DATABASE_IDS) {
+    // Each case owns its own disposable schema via withIsolatedDb.
+    await t_scn030(caseId, executed);
+  }
+  const sortedExecuted = [...executed].sort();
+  const sortedExpected = [...DATABASE_IDS].sort();
+  assert.deepEqual(sortedExecuted, sortedExpected, "every task_database manifest ID executed exactly once");
+  assert.equal(executed.length, DATABASE_IDS.length);
+  const hash = createHash("sha256").update(sortedExecuted.join("\n")).digest("hex");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+});
+
+async function t_scn030(caseId, executed) {
+  await withIsolatedDb(`kir3_d_${caseId.split("-")[1].toLowerCase()}`, async ({ db, repo }) => {
+    executed.push(caseId);
+    switch (caseId) {
+      case "R3-D01-after-settle-before-s3-recover": {
+        const nowBox = { current: NOW.getTime() };
+        const s3 = memoryS3();
+        const dispatch = memoryDispatcher();
+        const http = countingHttp();
+        const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        runtimeA.artifactStore = {
+          async putImmutable() { const error = new Error("simulated S3 crash before put"); error.code = "PIPELINE_ARTIFACT_INVALID"; throw error; },
+          async getValidated() { throw new Error("must not read during A"); }
+        };
+        const monitors = fakeMonitors();
+        const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+        const message = { ...expansionTask };
+        await assert.rejects(
+          processKeywordMessage(message, runtimeA, { createLeaseMonitor: monitors.factory }),
+          (error) => error?.code === "PIPELINE_ARTIFACT_INVALID"
+        );
+        const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+        assert.equal(task.state, "processing");
+        const attempt = await db.keywordResearchProviderAttempt.findFirst({ where: { taskId: task.id } });
+        assert.equal(attempt.state, "succeeded");
+        assert.equal(attempt.providerCostUsd.toFixed(8), "0.01560000");
+        const cache = await db.keywordResearchCache.findUnique({ where: { requestFingerprint: task.requestFingerprint } });
+        assert.ok(cache, "normalized cache written in the settlement transaction");
+        assert.equal(s3.objects.size, 0, "no artifact before the crash");
+
+        nowBox.current = NOW.getTime() + 60000;
+        const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitorsB = fakeMonitors();
+        const beforeCalls = http.calls.length;
+        const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+        assert.equal(resultB.outcome, "recovered");
+        assert.equal(http.calls.length, beforeCalls, "zero recovery HTTP calls");
+        assert.equal(s3.objects.size, 1, "one immutable artifact");
+        const terminal = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+        assert.equal(terminal.state, "succeeded");
+        assert.equal(terminal.attemptCount, 1, "one retained attempt");
+        const artifact = JSON.parse(s3.objects.get(terminal.artifactS3Key).Body.toString("utf8"));
+        assert.equal(artifact.costUsd, "0.01560000");
+        const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+        assert.equal(checks.length, 2, "initialize check plus exactly one recovery check");
+        break;
+      }
+      case "R3-D02-after-s3-before-terminal-recover": {
+        const nowBox = { current: NOW.getTime() };
+        const s3 = memoryS3();
+        const dispatch = memoryDispatcher();
+        const http = countingHttp();
+        const realStore = new S3ArtifactStore({ client: s3, bucket: "keyword-bucket", maxBytes: KEYWORD_ARTIFACT_MAX_BYTES });
+        const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        runtimeA.artifactStore = {
+          async putImmutable(input) {
+            const result = await realStore.putImmutable(input);
+            const error = new Error("simulated S3 crash after put");
+            error.code = "PIPELINE_ARTIFACT_INVALID";
+            throw error;
+          },
+          async getValidated(input) { return realStore.getValidated(input); }
+        };
+        const monitors = fakeMonitors();
+        const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+        const message = { ...expansionTask };
+        await assert.rejects(
+          processKeywordMessage(message, runtimeA, { createLeaseMonitor: monitors.factory }),
+          (error) => error?.code === "PIPELINE_ARTIFACT_INVALID"
+        );
+        const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+        assert.equal(task.state, "processing");
+        const orphanKey = [...s3.objects.keys()][0];
+        assert.equal(s3.objects.size, 1, "one immutable orphan before terminalization");
+
+        nowBox.current = NOW.getTime() + 60000;
+        const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitorsB = fakeMonitors();
+        const beforeCalls = http.calls.length;
+        const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+        assert.equal(resultB.outcome, "recovered");
+        assert.equal(http.calls.length, beforeCalls, "zero recovery HTTP calls");
+        assert.equal(s3.objects.size, 1, "no second artifact object");
+        const terminal = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+        assert.equal(terminal.state, "succeeded");
+        assert.equal(terminal.artifactS3Key, orphanKey, "B reconciles the exact orphan key");
+        const artifact = JSON.parse(s3.objects.get(orphanKey).Body.toString("utf8"));
+        assert.equal(artifact.costUsd, "0.01560000");
+        const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+        assert.equal(checks.length, 2);
+        break;
+      }
+      case "R3-D03-terminal-failure-crash-no-retry": {
+        const nowBox = { current: NOW.getTime() };
+        const s3 = memoryS3();
+        const dispatch = memoryDispatcher();
+        const http = r3AuthFailureHttp([]);
+        const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitors = fakeMonitors();
+        const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+        const message = { ...expansionTask };
+        await assert.rejects(
+          processKeywordMessage(message, runtimeA, { createLeaseMonitor: r3FailOnAssertMonitorFactory(8) }),
+          (error) => error?.code === "PIPELINE_LEASE_LOST"
+        );
+        const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+        assert.equal(task.state, "processing", "crash before terminalize leaves the task processing");
+        const attempt = await db.keywordResearchProviderAttempt.findFirst({ where: { taskId: task.id } });
+        assert.equal(attempt.state, "failed");
+        assert.equal(attempt.safeErrorCode, "KEYWORD_PROVIDER_AUTH_FAILED", "terminal failure settled durably");
+        assert.equal((await db.keywordResearchProviderAttempt.count({ where: { taskId: task.id } })), 1);
+
+        nowBox.current = NOW.getTime() + 60000;
+        const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitorsB = fakeMonitors();
+        const beforeCalls = http.calls.length;
+        const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+        assert.equal(resultB.outcome, "recovered");
+        assert.equal(http.calls.length, beforeCalls, "B performs zero HTTP calls for a terminal failure");
+        const terminal = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+        assert.equal(terminal.state, "skipped", "expansion terminal failure maps to skipped");
+        assert.equal(terminal.safeErrorCode, "KEYWORD_PROVIDER_AUTH_FAILED", "exact safe code preserved");
+        assert.equal((await db.keywordResearchProviderAttempt.count({ where: { taskId: task.id } })), 1,
+          "terminal failure never creates a second attempt");
+        const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+        assert.equal(checks.length, 2, "initialize check plus one terminal failure check");
+        break;
+      }
+      case "R3-D04-retryable-crash-schedules-once": {
+        const nowBox = { current: NOW.getTime() };
+        const s3 = memoryS3();
+        const dispatch = memoryDispatcher();
+        const http = r3RetryableHttp([]);
+        const crashProxy = new Proxy(repo, {
+          get(target, prop) {
+            const value = target[prop];
+            if (prop === "scheduleRetry") {
+              return async () => { throw new Error("simulated crash before retry scheduling"); };
+            }
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+        });
+        const runtimeA = clockedRuntime(crashProxy, s3, dispatch, http.http, nowBox);
+        const monitors = fakeMonitors();
+        const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+        const message = { ...expansionTask };
+        await assert.rejects(
+          processKeywordMessage(message, runtimeA, { createLeaseMonitor: monitors.factory }),
+          (error) => error?.code === "PIPELINE_INPUT_CONFLICT" || /simulated crash/u.test(error?.message ?? "")
+        );
+        const task = await db.keywordResearchTask.findUnique({ where: { id: message.taskNaturalId } });
+        assert.equal(task.state, "processing");
+        const attempt = await db.keywordResearchProviderAttempt.findFirst({ where: { taskId: task.id } });
+        assert.equal(attempt.state, "failed");
+        assert.equal(attempt.safeErrorCode, "KEYWORD_PROVIDER_RETRYABLE");
+        assert.equal(attempt.attemptNumber, 1);
+        assert.equal(task.nextAttemptAt, null, "no durable retry before the crash");
+
+        nowBox.current = NOW.getTime() + 60000;
+        const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitorsB = fakeMonitors();
+        const beforeCalls = http.calls.length;
+        const sentBefore = dispatch.sent.length;
+        const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+        assert.equal(resultB.outcome, "recovered", "B schedules the durable retry and dispatches it once");
+        assert.equal(http.calls.length, beforeCalls, "B performs zero HTTP for a crash-before-schedule retry");
+        const after = await db.keywordResearchTask.findUnique({ where: { id: task.id } });
+        assert.ok(after.nextAttemptAt, "one durable retry schedule");
+        assert.equal((await db.keywordResearchProviderAttempt.count({ where: { taskId: task.id } })), 1,
+          "never two simultaneous attempts");
+        const redelivered = dispatch.sent.slice(sentBefore).filter((entry) =>
+          entry.type === "keyword.expansion.task.v1" && entry.taskNaturalId === task.id);
+        assert.equal(redelivered.length, 1, "one due retry dispatch");
+        break;
+      }
+      case "R3-D05-renewed-expiry-stale-owner-denied": {
+        const nowBox = { current: NOW.getTime() };
+        const s3 = memoryS3();
+        const dispatch = memoryDispatcher();
+        const http = countingHttp();
+        const runtimeA = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitors = fakeMonitors();
+        const { expansionTask } = await createAndInitialize(db, repo, runtimeA, ["seed one"]);
+        const message = { ...expansionTask };
+        const taskId = message.taskNaturalId;
+        const aToken = "a".repeat(32);
+        const claimedA = await repo.claim({ taskId, owner: "owner-A", token: aToken }, new Date(nowBox.current));
+        assert.equal(claimedA.outcome, "claimed");
+        for (const seconds of [20, 40, 60, 80, 100, 120]) {
+          nowBox.current = NOW.getTime() + seconds * 1000;
+          assert.equal((await repo.heartbeat({ taskId, token: aToken }, new Date(nowBox.current))).outcome, "claimed",
+            `A renews at T0+${seconds}s`);
+        }
+        nowBox.current = NOW.getTime() + 180000;
+        const runtimeB = clockedRuntime(repo, s3, dispatch, http.http, nowBox);
+        const monitorsB = fakeMonitors();
+        const resultB = await processKeywordMessage(message, runtimeB, { createLeaseMonitor: monitorsB.factory });
+        assert.equal(resultB.outcome, "succeeded", "B reclaims at exact renewed expiry and completes");
+        const terminal = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+        assert.equal(terminal.state, "succeeded");
+        const before = JSON.stringify(terminal);
+        const stageBefore = JSON.stringify(await db.keywordResearchStage.findUnique({ where: { id: terminal.stageId } }));
+
+        const staleHeartbeat = await repo.heartbeat({ taskId, token: aToken }, new Date(nowBox.current));
+        assert.equal(staleHeartbeat.outcome, "lost");
+        const staleTerminal = await repo.terminalize({
+          taskId, token: aToken, state: "succeeded", artifactS3Key: "runs/x.json", artifactFingerprint: fp("x")
+        }, new Date(nowBox.current));
+        assert.equal(staleTerminal.outcome, "conflict", "stale A cannot overwrite the immutable terminal row");
+        const after = await db.keywordResearchTask.findUnique({ where: { id: taskId } });
+        assert.equal(JSON.stringify(after), before, "task row deep-equal before/after stale A");
+        const stageAfter = await db.keywordResearchStage.findUnique({ where: { id: terminal.stageId } });
+        assert.equal(JSON.stringify(stageAfter), stageBefore, "stage row deep-equal before/after stale A");
+        assert.equal(s3.objects.size, 1, "no stale S3 write");
+        const checks = dispatch.sent.filter((entry) => entry.type === "keyword.aggregate.check.v1");
+        assert.equal(checks.length, 2, "initialize plus exactly one terminal check");
+        break;
+      }
+      default:
+        assert.fail(`unhandled task_database case ${caseId}`);
+    }
+  });
+}

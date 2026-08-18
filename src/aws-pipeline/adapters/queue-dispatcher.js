@@ -25,18 +25,17 @@ export class SqsDispatcher {
     this.client = client;
   }
 
-  async sendOne(queueUrl, message, schema, options) {
+  async sendOne(queueUrl, message, schema, options = {}) {
     const value = parsed(schema, message);
     const logicalId = itemId(value);
     let delaySeconds;
-    if (options !== undefined && options !== null) {
-      if (typeof options !== "object" || Array.isArray(options)) invalid();
-      const keys = Object.keys(options);
-      if (keys.length > 1 || (keys.length === 1 && keys[0] !== "delaySeconds")) invalid();
-      if (keys.length === 1) {
-        delaySeconds = options.delaySeconds;
-        if (!Number.isInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 900) invalid();
-      }
+    if (options === null || typeof options !== "object" || Array.isArray(options) ||
+        Object.getPrototypeOf(options) !== Object.prototype) invalid();
+    const keys = Object.keys(options);
+    if (keys.length > 1 || (keys.length === 1 && keys[0] !== "delaySeconds")) invalid();
+    if (keys.length === 1) {
+      delaySeconds = options.delaySeconds;
+      if (!Number.isInteger(delaySeconds) || delaySeconds < 0 || delaySeconds > 900) invalid();
     }
     try {
       const command = delaySeconds === undefined
