@@ -1883,3 +1883,63 @@ test("SCN-KI-022 V5: removing one heartbeat predicate falsifies the unchanged lo
   }
   await db.$disconnect();
 });
+
+test("SCN-KI-023: same-token task heartbeat at original expiry +60,000ms returns lost with unchanged task/stage rows; stale aggregation heartbeat at renewed expiry +160,000ms after B reclaim returns lost with unchanged stage/research rows", { skip: !enabled }, async (t) => {
+  const { db, repo } = await setupRepo(t, "kir2_rt2");
+
+  const resT = newResearchId();
+  await freshResearch(repo, resT);
+  const initT = await repo.initialize({ researchId: resT, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  const stageIdT = initT.stage.id;
+  const taskId = keywordTaskId(stageIdT, "0:suggestions");
+  const tokenA = newLeaseToken();
+  assert.equal((await repo.claim({ taskId, owner: "a", token: tokenA }, NOW)).outcome, "claimed");
+  assert.equal((await db.keywordResearchTask.findUnique({ where: { id: taskId } })).leaseExpiresAt.getTime(),
+    NOW.getTime() + 60_000, "task lease original expiry is exactly T0+60,000ms");
+
+  const beforeT = {
+    task: await db.keywordResearchTask.findUnique({ where: { id: taskId } }),
+    stage: await db.keywordResearchStage.findUnique({ where: { id: stageIdT } })
+  };
+  const hbT = await repo.heartbeat({ taskId, token: tokenA }, new Date(NOW.getTime() + 60_000));
+  assert.equal(hbT.outcome, "lost", "same-token task heartbeat at exact original expiry returns lost");
+  assert.deepEqual(await db.keywordResearchTask.findUnique({ where: { id: taskId } }), beforeT.task,
+    "task row unchanged after same-token heartbeat at original expiry");
+  assert.deepEqual(await db.keywordResearchStage.findUnique({ where: { id: stageIdT } }), beforeT.stage,
+    "stage row unchanged after same-token heartbeat at original expiry");
+
+  const resA = newResearchId();
+  await freshResearch(repo, resA);
+  const initA = await repo.initialize({ researchId: resA, generation: 1, stage: "expansion",
+    tasks: expansionTasksFor(1) }, NOW);
+  await completeStageTasks(db, repo, initA.stage.id, initA.tasks.map((task) => task.itemKey));
+  const stageIdA = initA.stage.id;
+  const tokenA2 = newLeaseToken();
+  await repo.claimAggregator({ researchId: resA, stage: "expansion", generation: 1, owner: "a",
+    token: tokenA2 }, NOW);
+  const renew = await repo.heartbeatAggregator({ researchId: resA, stage: "expansion", generation: 1,
+    token: tokenA2 }, new Date(NOW.getTime() + 40_000));
+  assert.equal(renew.outcome, "claimed");
+  assert.equal(renew.leaseExpiresAt.getTime(), NOW.getTime() + 160_000,
+    "aggregation heartbeat renews expiry to exactly T0+160,000ms");
+
+  const tokenB = newLeaseToken();
+  assert.equal((await repo.claimAggregator({ researchId: resA, stage: "expansion", generation: 1,
+    owner: "b", token: tokenB }, new Date(NOW.getTime() + 160_000))).outcome, "claimed",
+  "aggregator B reclaims at exact renewed expiry T0+160,000ms");
+
+  const beforeA = {
+    research: await db.keywordResearch.findUnique({ where: { id: resA } }),
+    stage: await db.keywordResearchStage.findUnique({ where: { id: stageIdA } })
+  };
+  const hbA = await repo.heartbeatAggregator({ researchId: resA, stage: "expansion", generation: 1,
+    token: tokenA2 }, new Date(NOW.getTime() + 160_000));
+  assert.equal(hbA.outcome, "lost", "stale A aggregation heartbeat returns lost after B reclaim");
+  assert.deepEqual(await db.keywordResearchStage.findUnique({ where: { id: stageIdA } }), beforeA.stage,
+    "stage row unchanged after stale A aggregation heartbeat");
+  assert.deepEqual(await db.keywordResearch.findUnique({ where: { id: resA } }), beforeA.research,
+    "research row unchanged after stale A aggregation heartbeat");
+
+  await db.$disconnect();
+});
