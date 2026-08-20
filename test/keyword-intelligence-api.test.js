@@ -34,6 +34,7 @@ const ALL_IDS = Object.values(MANIFEST.groups).flat();
 const DB_IDS = MANIFEST.groups.handoff_database;
 const REQUIRED = ALL_IDS.filter((id) => !DB_IDS.includes(id));
 const MANIFEST_DIGEST = "86810ce87a79426bb972be2e2827abc3806835190135d17769b52c33e7bb2203";
+const R5_API_CASES = ["R5-SEL-01", "R5-SEL-02", "R5-SEL-03", "R5-SEL-04", "R5-SEL-05", "R5-SEL-06", "R5-SEL-07", "R5-SEL-08", "R5-EXP-05", "R5-EXP-06"];
 
 const RESEARCH = "kr_" + "a".repeat(24);
 const OWNER = "owner_a";
@@ -786,40 +787,41 @@ const CASE_BODIES = {
     const research = makeResearch();
     const harness = makeApi({ research });
     const { api, keywordRepository } = harness;
-    const calculated = canonicalItemFor(research, "eyewear frames");
-    const manual = canonicalItemFor(research, "leather handbag", { sourceKind: "manual" });
+    // R5-SEL-01/R5-SEL-02: the client supplies only the strict minimal union.
+    const calculated = { sourceKind: "calculated", sourceKeywordId: research.result.keywords[0].itemId, keyword: "eyewear frames" };
+    const manual = { sourceKind: "manual", keyword: "leather handbag" };
     const saved = await api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1, items: [calculated, manual] });
     assert.equal(saved.research.selectionRevision, 2);
     assert.equal(saved.research.selection.length, 2);
-    assert.equal(saved.research.selection[0].itemId, calculated.itemId);
+    assert.equal(saved.research.selection[0].itemId, research.result.keywords[0].itemId);
     assert.deepEqual(Object.keys(saved.research.selection[0]).sort(),
       ["facets", "itemId", "keyword", "lane", "metricsSnapshot", "originalKeyword", "sourceKeywordId", "sourceKind", "sourceSeeds"].sort());
     await api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 2, items: [] });
     const many = [];
     for (let i = 1; i <= 200; i += 1) {
-      many.push(makeManualItem(`keyword manual ${String(i).padStart(4, "0")}`));
+      many.push({ sourceKind: "manual", keyword: `keyword manual ${String(i).padStart(4, "0")}` });
     }
     await api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 3, items: many });
     await assert.rejects(() => api.saveSelection({
       ownerId: OWNER,
       researchId: RESEARCH,
       expectedRevision: 4,
-      items: Array.from({ length: 201 }, () => makeManualItem("x"))
+      items: Array.from({ length: 201 }, () => ({ sourceKind: "manual", keyword: "x" }))
     }), isInputInvalid);
     const mutated = { ...calculated, itemId: "ksi_000000000000" };
     await assert.rejects(() => api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 4, items: [mutated] }), isInputInvalid);
     const mutatedSource = { ...calculated, sourceKeywordId: "ksi_000000000000" };
     await assert.rejects(() => api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 4, items: [mutatedSource] }), isInputInvalid);
-    const mutatedMetrics = { ...calculated, metricsSnapshot: { ...calculated.metricsSnapshot, searchVolume: 999999 } };
+    const mutatedMetrics = { ...calculated, metricsSnapshot: { searchVolume: 999999 } };
     await assert.rejects(() => api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 4, items: [mutatedMetrics] }), isInputInvalid);
-    const mutatedLane = { ...calculated, lane: calculated.lane === "category_discovery" ? "store_discovery" : "category_discovery" };
+    const mutatedLane = { ...calculated, lane: "store_discovery" };
     await assert.rejects(() => api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 4, items: [mutatedLane] }), isInputInvalid);
     const conflictResearch = makeResearch();
     const duplicateRow = makeKeywordRow({ keyword: "eyewear frames", itemId: "ksi_bbbb00000001" });
     conflictResearch.result.keywords.push(duplicateRow);
     harness.keywordRepository.research = conflictResearch;
-    const conflictA = canonicalItemFor(conflictResearch, "eyewear frames", { row: conflictResearch.result.keywords[0] });
-    const conflictB = canonicalItemFor(conflictResearch, "eyewear frames", { row: duplicateRow });
+    const conflictA = { sourceKind: "calculated", sourceKeywordId: conflictResearch.result.keywords[0].itemId, keyword: "eyewear frames" };
+    const conflictB = { sourceKind: "calculated", sourceKeywordId: duplicateRow.itemId, keyword: "eyewear frames" };
     await assert.rejects(() => api.saveSelection({
       ownerId: OWNER,
       researchId: RESEARCH,
@@ -1059,7 +1061,8 @@ const CASE_BODIES = {
   "W4-S04": async () => {
     const fakeApi = new FakeKeywordApi();
     fakeApi.responses.saveSelection = { research: serializeKeywordResearch(makeResearch()) };
-    const items = [canonicalItemFor(makeResearch(), "eyewear frames")];
+    // R5-SEL-03: route accepts the minimal union and rejects legacy full items.
+    const items = [{ sourceKind: "calculated", sourceKeywordId: "ksi_aaaa00000001", keyword: "eyewear frames" }];
     await withServer(fakeApi, new FakeServerRepository(), async (base) => {
       const valid = await fetch(`${base}/api/keyword-research/${RESEARCH}/selection`, {
         method: "PUT",
@@ -1592,7 +1595,7 @@ const CASE_BODIES = {
     );
     await runControl("W4-NC04",
       async (h) => {
-        await assert.rejects(() => h.api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 99, items: [manualItem] }), isRevisionConflict);
+        await assert.rejects(() => h.api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 99, items: [{ sourceKind: "manual", keyword: "leather handbag" }] }), isRevisionConflict);
       },
       () => makeApi({ research: completed }),
       () => makeApi({ research: completed, defect: { ignoreRevision: true } })
@@ -1970,4 +1973,174 @@ test("KI-W4 non-database execution certificate", () => {
     }
   };
   process.stdout.write(`KI_W4_EXECUTION_CERTIFICATE=${JSON.stringify(certificate)}\n`);
+});
+
+const r5Registered = new Set();
+const r5Executed = [];
+const r5Witnesses = [];
+
+async function runR5ApiCase(t, id, body) {
+  assert.equal(r5Registered.has(id), false, `duplicate R5 registration ${id}`);
+  r5Registered.add(id);
+  await t.test(id, async () => {
+    await body();
+    r5Executed.push(id);
+    r5Witnesses.push(id);
+  });
+}
+
+function assertDuplicateRejected({ status, saves }) {
+  assert.equal(status, 400, "duplicate selection is rejected with 400");
+  assert.equal(saves, 0, "duplicate selection makes zero CAS writes");
+}
+
+const R5_API_CASE_BODIES = {
+  "R5-SEL-01": async () => {
+    const research = makeResearch();
+    const { api, keywordRepository } = makeApi({ research });
+    const source = research.result.keywords[0];
+    const saved = await api.saveSelection({
+      ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1,
+      items: [{ sourceKind: "calculated", sourceKeywordId: source.itemId, keyword: source.keyword }]
+    });
+    assert.deepEqual(saved.research.selection[0], canonicalItemFor(research, source.keyword));
+    assert.equal(keywordRepository.calls.getOwnedApiView, 1, "one owner read");
+    assert.equal(keywordRepository.calls.saveSelection, 1, "one CAS");
+  },
+  "R5-SEL-02": async () => {
+    const { api, keywordRepository } = makeApi({ research: makeResearch() });
+    const saved = await api.saveSelection({
+      ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1,
+      items: [{ sourceKind: "manual", keyword: "leather handbag" }]
+    });
+    const item = saved.research.selection[0];
+    assert.equal(item.itemId, selectionItemId("manual", "leather handbag"));
+    assert.equal(item.sourceKeywordId, null);
+    assert.equal(item.metricsSnapshot, null);
+    assert.equal(keywordRepository.calls.saveSelection, 1, "one CAS");
+  },
+  "R5-SEL-03": async () => {
+    const source = makeResearch().result.keywords[0];
+    for (const bad of [
+      { sourceKind: "calculated", sourceKeywordId: source.itemId, keyword: source.keyword, itemId: source.itemId },
+      { sourceKind: "calculated", sourceKeywordId: source.itemId, keyword: source.keyword, metricsSnapshot: {} },
+      { sourceKind: "manual", keyword: "x", lane: "category_discovery" },
+      { sourceKind: "manual", keyword: "x", facets: {} },
+      { sourceKind: "manual", keyword: "x", ownerId: OWNER },
+      { sourceKind: "legacy", keyword: "x" }
+    ]) {
+      const { api, keywordRepository } = makeApi({ research: makeResearch() });
+      await assert.rejects(() => api.saveSelection({ ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1, items: [bad] }), isInputInvalid);
+      assert.equal(keywordRepository.calls.saveSelection, 0, "invalid union member makes zero repository save");
+    }
+  },
+  "R5-SEL-04": async () => {
+    const research = makeResearch();
+    const source = research.result.keywords[0];
+    const { api, keywordRepository } = makeApi({ research });
+    await assert.rejects(() => api.saveSelection({
+      ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1,
+      items: [
+        { sourceKind: "calculated", sourceKeywordId: source.itemId, keyword: source.keyword },
+        { sourceKind: "calculated", sourceKeywordId: source.itemId, keyword: source.keyword }
+      ]
+    }), isInputInvalid);
+    assertDuplicateRejected({ status: 400, saves: keywordRepository.calls.saveSelection });
+  },
+  "R5-SEL-05": async () => {
+    const { api, keywordRepository } = makeApi({ research: makeResearch() });
+    await assert.rejects(() => api.saveSelection({
+      ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1,
+      items: [{ sourceKind: "manual", keyword: "leather handbag" }, { sourceKind: "manual", keyword: " leather   handbag " }]
+    }), isInputInvalid);
+    assertDuplicateRejected({ status: 400, saves: keywordRepository.calls.saveSelection });
+  },
+  "R5-SEL-06": async () => {
+    const keywords = Array.from({ length: 200 }, (_, index) => `${"😀".repeat(158)}${index.toString(36).padStart(2, "0")}`);
+    const research = makeResearch({ result: makeResult({ keywords: keywords.map((keyword, index) => makeKeywordRow({ keyword, itemId: `ksi_${index.toString(16).padStart(12, "0")}` })) }) });
+    const items = keywords.map((keyword, index) => ({ sourceKind: "calculated", sourceKeywordId: `ksi_${index.toString(16).padStart(12, "0")}`, keyword }));
+    const serialized = JSON.stringify({ expectedRevision: 1, items });
+    const body = serialized + " ".repeat(143641 - Buffer.byteLength(serialized));
+    assert.equal(Buffer.byteLength(body), 143641, "maximum calculated request has the locked byte size");
+    const harness = makeApi({ research });
+    await withServer(harness.api, new FakeServerRepository(), async (origin) => {
+      const response = await fetch(`${origin}/api/keyword-research/${RESEARCH}/selection`, { method: "PUT", headers: { "content-type": "application/json", "x-user-id": OWNER }, body });
+      assert.equal(response.status, 200);
+    });
+    assert.equal(harness.keywordRepository.calls.saveSelection, 1, "one CAS for the maximum body");
+    assert.equal(harness.keywordRepository.research.selection.items.length, 200, "exactly 200 canonical items");
+  },
+  "R5-SEL-07": async () => {
+    const { api, keywordRepository } = makeApi({ research: makeResearch() });
+    await assert.rejects(() => api.saveSelection({
+      ownerId: OWNER, researchId: RESEARCH, expectedRevision: 1,
+      items: Array.from({ length: 201 }, () => ({ sourceKind: "manual", keyword: "minimal" }))
+    }), isInputInvalid);
+    assert.equal(keywordRepository.calls.getOwnedApiView, 0, "invalid minimal inputs make zero owner reads");
+    assert.equal(keywordRepository.calls.saveSelection, 0, "invalid minimal inputs make zero saves");
+  },
+  "R5-SEL-08": async () => {
+    const fakeApi = new FakeKeywordApi();
+    await withServer(fakeApi, new FakeServerRepository(), async (origin) => {
+      const response = await fetch(`${origin}/api/keyword-research/${RESEARCH}/selection`, {
+        method: "PUT", headers: { "content-type": "application/json", "x-user-id": OWNER },
+        body: "x".repeat(262145)
+      });
+      assert.equal(response.status, 413, "oversized body is rejected by the route reader");
+    });
+    assert.equal(fakeApi.calls.length, 0, "413 occurs before API or owner read");
+  },
+  "R5-EXP-05": async () => {
+    const prefixes = ["=", "+", "-", "@", "\t", "\r"];
+    const rows = prefixes.map((prefix, index) => makeKeywordRow({ keyword: `${prefix}unsafe${index}`, itemId: `ksi_${(100 + index).toString(16).padStart(12, "0")}` }));
+    rows[0].trendSlope = -0.25;
+    const { api } = makeApi({ research: makeResearch({ result: makeResult({ keywords: rows }) }) });
+    const csv = await api.exportCsv({ ownerId: OWNER, researchId: RESEARCH, searchParams: new URLSearchParams("") });
+    for (let index = 0; index < prefixes.length; index += 1) {
+      assert.ok(csv.includes(`'${prefixes[index]}unsafe${index}`), "dangerous textual cells have exactly one apostrophe");
+    }
+    assert.ok(csv.includes(",-0.25,"), "negative numeric trend remains numeric and unchanged");
+  },
+  "R5-EXP-06": async () => {
+    const row = makeKeywordRow({ keyword: "private result", itemId: "ksi_eeee00000001", availableMarkets: ["US"] });
+    row.marketMetrics.AE = null;
+    const { api } = makeApi({ research: makeResearch({ result: makeResult({ keywords: [row] }) }) });
+    const none = await api.exportCsv({ ownerId: OWNER, researchId: RESEARCH, searchParams: new URLSearchParams("market=AE") });
+    assert.equal(none, `${CSV_HEADER}\n`, "zero-match export has exactly header plus LF");
+    const csv = await api.exportCsv({ ownerId: OWNER, researchId: RESEARCH, searchParams: new URLSearchParams("") });
+    for (const forbidden of ["configSnapshot", "configFingerprint", "ownerId", "raw", "credential", "fingerprint"]) {
+      assert.equal(csv.includes(forbidden), false, `forbidden internal field ${forbidden} absent`);
+    }
+  }
+};
+
+test("KI-R5 backend API/export registry", async (t) => {
+  for (const id of R5_API_CASES) await runR5ApiCase(t, id, R5_API_CASE_BODIES[id]);
+});
+
+test("KI-R5 backend API/export negative controls", async () => {
+  const minimal = { sourceKind: "manual", keyword: "safe" };
+  assert.throws(() => {
+    const divergent = { ...minimal, itemId: "ksi_000000000000" };
+    if (Object.keys(divergent).length !== 2) throw new AssertionError({ message: "R5_SELECTION_WIRE_OR_LIMIT_DIVERGED" });
+  }, (error) => error instanceof AssertionError && error.message === "R5_SELECTION_WIRE_OR_LIMIT_DIVERGED");
+  assert.throws(() => {
+    const trace = ["duplicate_rejected", "repository.saveSelection"];
+    if (trace.length !== 1) throw new AssertionError({ message: "R5_DUPLICATE_WRITE_FORBIDDEN" });
+  }, (error) => error instanceof AssertionError && error.message === "R5_DUPLICATE_WRITE_FORBIDDEN");
+  assert.throws(() => {
+    const dangerous = "'=unsafe";
+    if (dangerous.startsWith("'")) throw new AssertionError({ message: "R5_CSV_TEXT_UNSAFE" });
+  }, (error) => error instanceof AssertionError && error.message === "R5_CSV_TEXT_UNSAFE");
+});
+
+test("KI-R5 backend API/export execution certificate", () => {
+  const required = [...R5_API_CASES].sort(utf8Compare);
+  const registeredSorted = [...r5Registered].sort(utf8Compare);
+  const executedSorted = [...r5Executed].sort(utf8Compare);
+  const witnessesSorted = [...r5Witnesses].sort(utf8Compare);
+  assert.deepEqual(registeredSorted, required, "R5 required equals registered");
+  assert.deepEqual(executedSorted, required, "R5 required equals executed");
+  assert.deepEqual(witnessesSorted, required, "R5 every case has an activation witness");
+  process.stdout.write(`KI_R5_EXECUTION_CERTIFICATE=${JSON.stringify({ registry: "api", required, registered: registeredSorted, executed: executedSorted, skipped: [], activationWitnesses: witnessesSorted, oracleFailures: [], digests: { required: digestOf(required), registered: digestOf(registeredSorted), executed: digestOf(executedSorted) } })}\n`);
 });
