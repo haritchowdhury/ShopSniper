@@ -412,7 +412,15 @@ export function lintA7InvalidationRecord() {
 // CONF-04 helper: final-worktree scope lint
 // ---------------------------------------------------------------------------
 
-export function lintFinalWorktreeScope() {
+const ALLOWED_REVIEW_EVIDENCE_CHANGES = [
+  {path:"frontend/review-evidence/keyword-intelligence/KI-W5/W5-R05-responsive.png",untracked:false},
+  {path:"frontend/review-evidence/keyword-intelligence/KI-W5/artifact-index.json",untracked:false},
+  {path:"frontend/review-evidence/keyword-intelligence/KI-W5/browser-checks.json",untracked:false},
+  {path:"frontend/review-evidence/keyword-intelligence/KI-W5/browser-server.log",untracked:false},
+  {path:"frontend/review-evidence/keyword-intelligence/KI-W5/R5-FIN-03-unsaved.png",untracked:true},
+];
+
+export function validateFinalWorktreeChanges(changes) {
   const expectedSet = new Set(DELEGABLE_FILE_SET);
   const createPaths = [
     "email_scraper/test/fixtures/keyword-intelligence/ki-r5-enforcement-manifest-v1.json",
@@ -423,7 +431,31 @@ export function lintFinalWorktreeScope() {
     "src/aws-pipeline/", "infrastructure/", "src/worker", "src/aggregator", "src/providers",
     "/app/", "middleware", "/auth/", "proxy", "ki-w6", "KI-W6",
   ];
+  const allowlist = new Map(ALLOWED_REVIEW_EVIDENCE_CHANGES.map((entry) => [entry.path, entry.untracked]));
 
+  for (const change of changes) {
+    if (allowlist.has(change.path)) {
+      if (allowlist.get(change.path) !== change.untracked) {
+        throw new AssertionError({ message: "R5_REVIEW_EVIDENCE_STATUS_MISMATCH" });
+      }
+      continue;
+    }
+    if (change.path.startsWith("frontend/review-evidence/keyword-intelligence/KI-W5/")) {
+      throw new AssertionError({ message: "R5_UNEXPECTED_REVIEW_EVIDENCE_PATH" });
+    }
+    assert.ok(expectedSet.has(change.path), `changed path ${change.path} is within the 18-path delegable file set`);
+    for (const token of forbiddenTokens) {
+      assert.equal(change.path.includes(token), false, `no forbidden path token ${token} in ${change.path}`);
+    }
+    if (createPaths.includes(change.path)) {
+      continue;
+    }
+    assert.equal(change.untracked, false, `${change.path} present as a modification, not an untracked create`);
+  }
+  return true;
+}
+
+export function lintFinalWorktreeScope(additionalChanges = []) {
   function changedPaths(repoPath, prefix) {
     const result = spawnSync("git", ["status", "--porcelain"], { cwd: repoPath, encoding: "utf8" });
     assert.equal(result.status, 0, `git status succeeds in ${repoPath}`);
@@ -443,17 +475,11 @@ export function lintFinalWorktreeScope() {
     ...changedPaths(FRONTEND_REPO, "frontend"),
   ];
 
-  for (const change of all) {
-    assert.ok(expectedSet.has(change.path), `changed path ${change.path} is within the 18-path delegable file set`);
-    for (const token of forbiddenTokens) {
-      assert.equal(change.path.includes(token), false, `no forbidden path token ${token} in ${change.path}`);
-    }
-    if (createPaths.includes(change.path)) {
-      assert.equal(change.untracked, true, `${change.path} present as an untracked create`);
-    } else {
-      assert.equal(change.untracked, false, `${change.path} present as a modification, not an untracked create`);
-    }
-  }
+  assert.equal(
+    validateFinalWorktreeChanges([...all, ...additionalChanges]),
+    true,
+    "final worktree changed sets are exact subsets of the 18 delegable paths plus the five literal review-evidence paths/statuses"
+  );
 
   for (const rel of DELEGABLE_FILE_SET) {
     assert.ok(existsSync(`${WORKSPACE_ROOT}${rel}`), `expected file present: ${rel}`);
