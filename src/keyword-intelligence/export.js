@@ -10,6 +10,12 @@ function csvRow(fields) {
   return fields.map(csvEscape).join(",");
 }
 
+function neutralizeTextCell(value) {
+  if (typeof value !== "string") return value;
+  if (/^[\t\r]/u.test(value) || /^\s*[=+\-@]/u.test(value)) return value.startsWith("'") ? value : "'" + value;
+  return value;
+}
+
 function pyFloatStr(v) {
   if (Number.isInteger(v)) return `${v}.0`;
   return String(v);
@@ -190,19 +196,22 @@ export function serializeKeywordsCsv(records) {
   for (const r of records) {
     const d = keywordRowToDict(r);
     lines.push(csvRow([
-      d.keyword, d.seed, d.source_seeds.join("|"),
+      neutralizeTextCell(d.keyword), neutralizeTextCell(d.seed),
+      neutralizeTextCell(d.source_seeds.join("|")),
       intStr(d.search_volume), pyFloatStr(d.cpc), pyFloatStr(d.competition),
-      d.competition_level || "", intStr(d.keyword_difficulty), d.main_intent || "",
+      neutralizeTextCell(d.competition_level || ""), intStr(d.keyword_difficulty),
+      neutralizeTextCell(d.main_intent || ""),
       pyFloatStr(d.commercial_intent),
       d.trend_slope !== null && d.trend_slope !== undefined ? pyFloatStr(d.trend_slope) : "",
-      d.cluster || "", d.cluster_id || "", d.lane,
-      pyDumps(d.facets, true),
-      d.variant_group_id || "", d.variant_canonical || "",
-      (d.flags || []).join(";"),
+      neutralizeTextCell(d.cluster || ""), neutralizeTextCell(d.cluster_id || ""),
+      neutralizeTextCell(d.lane),
+      neutralizeTextCell(pyDumps(d.facets, true)),
+      neutralizeTextCell(d.variant_group_id || ""), neutralizeTextCell(d.variant_canonical || ""),
+      neutralizeTextCell((d.flags || []).join(";")),
       intStr(d.opportunity_score), pyBoolStr(d.recommended),
-      d.merged_into || "",
-      pyDumps(d.monthly_history, true),
-      d.available_markets.join("|"),
+      neutralizeTextCell(d.merged_into || ""),
+      neutralizeTextCell(pyDumps(d.monthly_history, true)),
+      neutralizeTextCell(d.available_markets.join("|")),
     ]));
   }
   return lines.join("\n") + "\n";
