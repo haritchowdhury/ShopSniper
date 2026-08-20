@@ -1272,6 +1272,21 @@ export class PrismaKeywordResearchRepository {
       if (error instanceof RunHandoffAbort) {
         return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_INVALID" };
       }
+      if (error?.code === "P2002") {
+        const originalError = error;
+        return await this._transaction(async (tx) => {
+          const handoff = await tx.keywordResearchHandoff.findUnique({
+            where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } }
+          });
+          if (!handoff) throw originalError;
+          if (handoff.selectionFingerprint !== input.selectionFingerprint ||
+              handoff.selectionRevision !== input.expectedSelectionRevision) {
+            return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_CONFLICT" };
+          }
+          const run = await tx.run.findUnique({ where: { id: handoff.runId } });
+          return run ? { outcome: "found", run } : { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_CONFLICT" };
+        });
+      }
       throw error;
     }
   }
