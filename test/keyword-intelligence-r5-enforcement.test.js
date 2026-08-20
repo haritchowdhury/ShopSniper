@@ -448,6 +448,7 @@ export function validateFinalWorktreeChanges(changes) {
       assert.equal(change.path.includes(token), false, `no forbidden path token ${token} in ${change.path}`);
     }
     if (createPaths.includes(change.path)) {
+      assert.equal(change.untracked, false, `${change.path} present as a modification, not an untracked create`);
       continue;
     }
     assert.equal(change.untracked, false, `${change.path} present as a modification, not an untracked create`);
