@@ -1782,7 +1782,7 @@ export function createLeadServer(
     const selectionIdentifier = requestedKeywordResearchId(requestUrl.pathname, "selection");
     if (request.method === "PUT" && selectionIdentifier) {
       const ownerId = trustedUserId(request);
-      const payload = await readJsonBody(request);
+      const payload = await readJsonBody(request, 262144);
       const saved = await researchApi.saveSelection({
         ownerId,
         researchId: selectionIdentifier,
