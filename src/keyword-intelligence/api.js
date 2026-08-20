@@ -6,7 +6,7 @@ import { serializeKeywordResearch, serializeRun } from "../api-serializer.js";
 import { newResearchId } from "./repository.js";
 import { keywordResearchConfigV1, keywordResearchConfigV1Schema } from "./config.js";
 import { serializeKeywordsCsv } from "./export.js";
-import { analyzeSelectionConflicts, normalizeSeeds, selectionItemId } from "./selection.js";
+import { analyzeSelectionConflicts, normalizeSeeds, selectionItemId, validateSelectionDraft } from "./selection.js";
 import { classifyKeywordForSelection } from "./cluster.js";
 import { mapSelectionToQueries } from "./query-mapper.js";
 import { keywordResearchResultV1Schema } from "./schemas.js";
@@ -59,8 +59,20 @@ const getResearchInputSchema = z.strictObject({
 const saveSelectionInputSchema = z.strictObject({
   ownerId: ownerIdSchema,
   researchId: researchIdSchema,
-  expectedRevision: z.number().int().nonnegative(),
-  items: z.array(z.unknown()),
+  expectedRevision: z.number().int().min(1),
+  items: z.array(
+    z.discriminatedUnion("sourceKind", [
+      z.strictObject({
+        sourceKind: z.literal("calculated"),
+        sourceKeywordId: z.string().regex(/^ksi_[a-f0-9]{12}$/u),
+        keyword: z.string(),
+      }),
+      z.strictObject({
+        sourceKind: z.literal("manual"),
+        keyword: z.string(),
+      }),
+    ])
+  ),
 });
 
 const createRunInputSchema = z.strictObject({
@@ -210,51 +222,30 @@ function canonicalizeSelectionItem(research, item) {
     if (!row) throw inputInvalid();
     const keyword = normalizeKeyword(item.keyword);
     const classified = classifyKeywordForSelection(keyword, { mainIntent: row.mainIntent, stripTokens });
-    const itemId = row.itemId;
-    const originalKeyword = row.originalKeyword ?? row.keyword;
-    const sourceSeeds = Array.isArray(row.sourceSeeds) ? [...row.sourceSeeds] : (row.seed ? [row.seed] : []);
-    const metrics = metricsSnapshotOf(row);
-    if (item.itemId !== itemId) throw inputInvalid();
-    if (item.sourceKeywordId !== row.itemId) throw inputInvalid();
-    if (item.originalKeyword !== originalKeyword) throw inputInvalid();
-    if (!sameStringArray(item.sourceSeeds, sourceSeeds)) throw inputInvalid();
-    if (!deepEqual(item.metricsSnapshot ?? null, metrics)) throw inputInvalid();
-    if (item.lane !== classified.lane) throw inputInvalid();
-    if (!deepEqual(item.facets ?? null, classified.facets)) throw inputInvalid();
     return {
-      itemId,
+      itemId: row.itemId,
       sourceKind: "calculated",
       sourceKeywordId: row.itemId,
-      originalKeyword,
+      originalKeyword: row.originalKeyword ?? row.keyword,
       keyword,
-      sourceSeeds,
+      sourceSeeds: Array.isArray(row.sourceSeeds) ? [...row.sourceSeeds] : (row.seed ? [row.seed] : []),
       lane: classified.lane,
       facets: classified.facets,
-      metricsSnapshot: metrics,
+      metricsSnapshot: metricsSnapshotOf(row),
     };
   }
   if (item.sourceKind === "manual") {
     const keyword = normalizeKeyword(item.keyword);
-    const itemId = selectionItemId("manual", keyword);
-    const originalKeyword = keyword;
     const firstSeed = research.seeds?.[0];
     if (typeof firstSeed !== "string" || firstSeed.length === 0) throw inputInvalid();
-    const sourceSeeds = [firstSeed];
     const classified = classifyKeywordForSelection(keyword, { mainIntent: null, stripTokens });
-    if (item.sourceKeywordId !== null) throw inputInvalid();
-    if (item.metricsSnapshot !== null) throw inputInvalid();
-    if (item.itemId !== itemId) throw inputInvalid();
-    if (item.originalKeyword !== originalKeyword) throw inputInvalid();
-    if (!sameStringArray(item.sourceSeeds, sourceSeeds)) throw inputInvalid();
-    if (item.lane !== classified.lane) throw inputInvalid();
-    if (!deepEqual(item.facets ?? null, classified.facets)) throw inputInvalid();
     return {
-      itemId,
+      itemId: selectionItemId("manual", keyword),
       sourceKind: "manual",
       sourceKeywordId: null,
-      originalKeyword,
+      originalKeyword: keyword,
       keyword,
-      sourceSeeds,
+      sourceSeeds: [firstSeed],
       lane: classified.lane,
       facets: classified.facets,
       metricsSnapshot: null,
@@ -455,6 +446,8 @@ export function createKeywordResearchApi({
     assertResearchContract(research);
     if (research.state !== "completed") throw notCompleted();
     const draft = parsed.items.map((item) => canonicalizeSelectionItem(research, item));
+    const validity = validateSelectionDraft(draft);
+    if (!validity.ok) throw inputInvalid({ issues: validity.issues });
     const analysis = analyzeSelectionConflicts(draft, research.configSnapshot);
     if (analysis.conflicts.length > 0) throw hasConflicts(analysis.conflicts);
     const saved = await keywordRepository.saveSelection({
