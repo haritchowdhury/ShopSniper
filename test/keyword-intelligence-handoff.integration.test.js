@@ -22,6 +22,7 @@ const CLIENT_REQUEST_ID_PREFIX = "client-request-id-";
 
 const DB_IDS = ["W4-D01", "W4-D02", "W4-D03", "W4-D04", "W4-D05", "W4-D06"];
 const REQUIRED = [...DB_IDS];
+const R5_DB_CASES = ["R5-FIN-07", "R5-FIN-08"];
 const FIVE_OPS = [
   "keywordResearch.findUnique",
   "keywordResearchHandoff.findUnique",
@@ -35,6 +36,11 @@ const executed = [];
 const activationWitnesses = [];
 const oracleFailures = [];
 const skipped = [];
+const r5Registered = new Set();
+const r5Executed = [];
+const r5ActivationWitnesses = [];
+const r5OracleFailures = [];
+const r5Skipped = enabled ? [] : [...R5_DB_CASES];
 
 if (!enabled) skipped.push(...DB_IDS);
 
@@ -111,6 +117,37 @@ function clientWithInjectedFailure(client, shouldFail) {
   });
   client.$transaction = (work, ...rest) => realTransaction((tx) => work(make(tx, "")), ...rest);
   return client;
+}
+
+function clientWithMissingReconciliation(client) {
+  const realTransaction = client.$transaction.bind(client);
+  let handoffReads = 0;
+  const make = (obj, path) => new Proxy(obj, {
+    get(target, prop) {
+      if (prop === "then") return undefined;
+      const value = target[prop];
+      const nextPath = path ? `${path}.${String(prop)}` : String(prop);
+      if (typeof value === "function") {
+        return (...args) => {
+          if (nextPath === "keywordResearchHandoff.findUnique") {
+            handoffReads += 1;
+            if (handoffReads >= 2) return null;
+          }
+          return value.apply(target, args);
+        };
+      }
+      if (value && typeof value === "object") return make(value, nextPath);
+      return value;
+    }
+  });
+  return new Proxy(client, {
+    get(target, prop) {
+      if (prop === "$transaction") {
+        return (work, ...rest) => realTransaction((tx) => work(make(tx, "")), ...rest);
+      }
+      return Reflect.get(target, prop);
+    }
+  });
 }
 
 function makeSelectionItem(keyword, { seed = SEEDS[0], lane = "category_discovery" } = {}) {
@@ -441,7 +478,7 @@ const CASE_BODIES = {
       runHandoff(repo, runRepo, r.research, { clientRequestId, ...h, runId: newRunId() }),
     ]);
     const fulfilled = concurrent.filter((result) => result.status === "fulfilled");
-    assert.ok(fulfilled.length >= 1, "at least one concurrent equal-key call succeeds");
+    assert.equal(fulfilled.length, 2, "both concurrent equal-key calls fulfill after race reconciliation (R5-FIN-07)");
     for (const result of fulfilled) {
       assert.ok(["created", "found"].includes(result.value.outcome), "winning concurrent call is created or replay found");
     }
@@ -598,6 +635,68 @@ const CASE_BODIES = {
   },
 };
 
+async function runR5EqualRace(scopedUrl, { losingClient } = {}) {
+  const client = createPrismaClient(scopedUrl);
+  const repo = new PrismaKeywordResearchRepository(client);
+  const runRepo = new PrismaRunRepository(client);
+  const items = [makeSelectionItem("r5 equal replay phrase")];
+  const r = await createCompletedResearch(client, repo, { items });
+  const h = buildSnapshot(r.research, items);
+  const clientRequestId = `${CLIENT_REQUEST_ID_PREFIX}r5-${newResearchId()}`;
+  const loserRepo = losingClient
+    ? new PrismaKeywordResearchRepository(losingClient)
+    : repo;
+  const calls = [
+    runHandoff(repo, runRepo, r.research, { clientRequestId, ...h, runId: newRunId() }),
+    runHandoff(loserRepo, runRepo, r.research, { clientRequestId, ...h, runId: newRunId() }),
+  ];
+  const results = await Promise.allSettled(calls);
+  return { client, r, h, clientRequestId, results };
+}
+
+const R5_CASE_BODIES = {
+  "R5-FIN-07": async ({ scopedUrl }) => {
+    const { client, r, results } = await runR5EqualRace(scopedUrl);
+    const fulfilled = results.filter((result) => result.status === "fulfilled");
+    assert.equal(fulfilled.length, 2, "two concurrent equal requests fulfill");
+    assert.deepEqual(fulfilled.map((result) => result.value.outcome).sort(), ["created", "found"]);
+    const runs = await client.run.findMany({ where: { keywordResearchId: r.researchId } });
+    assert.equal(runs.length, 1, "exactly one Run under the equal-key race");
+    assert.equal(await client.runQuery.count({ where: { runId: runs[0].id } }), 1, "one RunQuery set");
+    assert.equal(await client.keywordResearchHandoff.count({ where: { researchId: r.researchId } }), 1, "one handoff row");
+    await disconnect(client);
+
+    const brokenClient = clientWithMissingReconciliation(createPrismaClient(scopedUrl));
+    try {
+      const broken = await runR5EqualRace(scopedUrl, { losingClient: brokenClient });
+      const brokenFulfilled = broken.results.filter((result) => result.status === "fulfilled");
+      if (brokenFulfilled.length === 2) throw new Error("R5_EQUAL_RACE_NOT_RECONCILED");
+      assert.ok(broken.results.some((result) => result.status === "rejected"), "proxy must falsify reconciliation");
+    } finally {
+      await disconnect(brokenClient);
+    }
+  },
+
+  "R5-FIN-08": async ({ scopedUrl }) => {
+    const { client, r, h, clientRequestId } = await runR5EqualRace(scopedUrl);
+    const repo = new PrismaKeywordResearchRepository(client);
+    const runRepo = new PrismaRunRepository(client);
+    const unequalFingerprint = fingerprintJson({ ...h.snapshot, items: [makeSelectionItem("different replay phrase")] });
+    const conflict = await runHandoff(repo, runRepo, r.research, {
+      clientRequestId, ...h, selectionFingerprint: unequalFingerprint, runId: newRunId(),
+    });
+    assert.equal(conflict.outcome, "conflict", "same key with unequal fingerprint conflicts");
+    const revisionConflict = await runHandoff(repo, runRepo, r.research, {
+      clientRequestId, ...h, expectedSelectionRevision: 2, runId: newRunId(),
+    });
+    assert.equal(revisionConflict.outcome, "conflict", "same key with unequal revision conflicts");
+    const replay = await runHandoff(repo, runRepo, r.research, { clientRequestId, ...h, runId: newRunId() });
+    assert.equal(replay.outcome, "found", "equal replay remains found");
+    assert.equal((await client.run.findMany({ where: { keywordResearchId: r.researchId } })).length, 1, "one Run");
+    await disconnect(client);
+  },
+};
+
 test("KI-W4 database handoff registry (D01-D06 in one disposable schema)", { skip: !enabled }, async (t) => {
   const schema = `kiw4_handoff_${Date.now().toString(36)}_${process.pid}`;
   let admin;
@@ -611,6 +710,20 @@ test("KI-W4 database handoff registry (D01-D06 in one disposable schema)", { ski
     const ctx = { db, scopedUrl: harness.scopedUrl, schema };
     for (const id of DB_IDS) {
       await runDBCase(t, id, () => CASE_BODIES[id](ctx));
+    }
+    for (const id of R5_DB_CASES) {
+      assert.equal(r5Registered.has(id), false, `duplicate registration ${id}`);
+      r5Registered.add(id);
+      await t.test(id, async () => {
+        try {
+          await R5_CASE_BODIES[id](ctx);
+          r5Executed.push(id);
+          r5ActivationWitnesses.push(id);
+        } catch (error) {
+          r5OracleFailures.push(id);
+          throw error;
+        }
+      });
     }
   } finally {
     if (db) await db.$disconnect().catch(() => {});
@@ -659,4 +772,40 @@ test("KI-W4 database execution certificate", () => {
     },
   };
   process.stdout.write(`KI_W4_EXECUTION_CERTIFICATE=${JSON.stringify(certificate)}\n`);
+});
+
+test("KI-R5 database execution certificate", () => {
+  const required = [...R5_DB_CASES].sort(utf8Compare);
+  const registeredSorted = [...r5Registered].sort(utf8Compare);
+  const executedSorted = [...r5Executed].sort(utf8Compare);
+  const skippedSorted = [...r5Skipped].sort(utf8Compare);
+  const witnessesSorted = [...r5ActivationWitnesses].sort(utf8Compare);
+  const failuresSorted = [...r5OracleFailures].sort(utf8Compare);
+  if (enabled) {
+    assert.deepEqual(registeredSorted, required, "required equals registered");
+    assert.deepEqual(executedSorted, required, "required equals executed");
+    assert.deepEqual(skippedSorted, [], "zero skipped");
+    assert.deepEqual(failuresSorted, [], "zero oracle failures");
+    assert.equal(witnessesSorted.length, required.length, "every ID carries an activation witness");
+  } else {
+    assert.deepEqual(registeredSorted, [], "no registrations while the database opt-in is absent");
+    assert.deepEqual(executedSorted, [], "no executions while the database opt-in is absent");
+    assert.deepEqual(skippedSorted, required, "both IDs are listed as skipped without the database opt-in");
+    assert.deepEqual(witnessesSorted, [], "no activation witnesses while skipped");
+  }
+  const certificate = {
+    registry: "database",
+    required,
+    registered: registeredSorted,
+    executed: executedSorted,
+    skipped: skippedSorted,
+    activationWitnesses: witnessesSorted,
+    oracleFailures: failuresSorted,
+    digests: {
+      required: digestOf(required),
+      registered: digestOf(registeredSorted),
+      executed: digestOf(executedSorted),
+    },
+  };
+  process.stdout.write(`KI_R5_EXECUTION_CERTIFICATE=${JSON.stringify(certificate)}\n`);
 });
