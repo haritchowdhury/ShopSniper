@@ -1,0 +1,49 @@
+{
+  "contractVersion": "ki-r5-enforcement-manifest-v1",
+  "groups": {
+    "wire": [
+      "R5-WIRE-01",
+      "R5-WIRE-02",
+      "R5-WIRE-03",
+      "R5-WIRE-04",
+      "R5-WIRE-05",
+      "R5-WIRE-06"
+    ],
+    "selection": [
+      "R5-SEL-01",
+      "R5-SEL-02",
+      "R5-SEL-03",
+      "R5-SEL-04",
+      "R5-SEL-05",
+      "R5-SEL-06",
+      "R5-SEL-07",
+      "R5-SEL-08"
+    ],
+    "finalization": [
+      "R5-FIN-01",
+      "R5-FIN-02",
+      "R5-FIN-03",
+      "R5-FIN-04",
+      "R5-FIN-05",
+      "R5-FIN-06",
+      "R5-FIN-07",
+      "R5-FIN-08"
+    ],
+    "export": [
+      "R5-EXP-01",
+      "R5-EXP-02",
+      "R5-EXP-03",
+      "R5-EXP-04",
+      "R5-EXP-05",
+      "R5-EXP-06"
+    ],
+    "conformance": [
+      "R5-CONF-01",
+      "R5-CONF-02",
+      "R5-CONF-03",
+      "R5-CONF-04",
+      "R5-CONF-05",
+      "R5-CONF-06"
+    ]
+  }
+}
