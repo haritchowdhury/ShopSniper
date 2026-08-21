@@ -995,12 +995,35 @@ async function aggregateMarket({ research, stage, config, tasks, token, runtime,
 
   const expansionManifest = await readManifest(runtime, research, stage, "expansion",
     KEYWORD_ARTIFACT_EXPANSION_MANIFEST, keywordExpansionManifestSchema, monitor);
-  const expansion = Object.fromEntries(expansionManifest.bySeed.map((entry) => [entry.seed, entry.keywords]));
+  const shortlistManifest = await readManifest(runtime, research, stage, "anchor_screen",
+    KEYWORD_ARTIFACT_SHORTLIST_MANIFEST, keywordShortlistManifestSchema, monitor);
+  const keywordKey = (keyword) => keyword.trim().toLowerCase();
+  const shortlist = shortlistManifest.keywords;
+  const shortlistKeys = new Set(shortlist.map(keywordKey));
+  const projectedExpansion = Object.fromEntries(expansionManifest.bySeed.map((entry) => [
+    entry.seed,
+    entry.keywords.filter((keyword) => shortlistKeys.has(keywordKey(keyword)))
+  ]));
+  const projectedExpansionKeys = new Set(Object.values(projectedExpansion).flat().map(keywordKey));
+  if (projectedExpansionKeys.size !== shortlistKeys.size ||
+      [...projectedExpansionKeys].some((key) => !shortlistKeys.has(key))) {
+    invariant();
+  }
+  const projectedUsMetrics = anchorArtifact.normalized.metrics.filter((item) =>
+    shortlistKeys.has(keywordKey(item.keyword))
+  );
+  const projectedUsMetricKeys = new Set(projectedUsMetrics.map((item) => keywordKey(item.keyword)));
+  if (projectedUsMetrics.length === 0 || projectedUsMetricKeys.size !== shortlistKeys.size ||
+      [...projectedUsMetricKeys].some((key) => !shortlistKeys.has(key))) {
+    invariant();
+  }
+  const projectedOverview = { ...overview, US: projectedUsMetrics };
 
   let result;
   try {
     result = computeResearchResult({
-      config, seeds: research.seeds, markets: config.markets, expansion, overview, anchorMarket: "US",
+      config, seeds: research.seeds, markets: config.markets, expansion: projectedExpansion,
+      overview: projectedOverview, anchorMarket: "US",
       researchId: research.id, generation: stage.generation, configFingerprint: research.configFingerprint
     });
   } catch {
