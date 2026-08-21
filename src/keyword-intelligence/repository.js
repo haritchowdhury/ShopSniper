@@ -16,6 +16,8 @@ const ATTEMPT_NONTERMINAL = new Set(["planned", "in_flight"]);
 const ENDPOINT_KEYS = new Set(["keyword_suggestions", "related_keywords", "keyword_overview"]);
 const TASK_LEASE_MS = 60_000;
 const AGGREGATION_LEASE_MS = 120_000;
+const FINAL_PUBLICATION_TRANSACTION_MAX_WAIT_MS = 5_000;
+const FINAL_PUBLICATION_TRANSACTION_TIMEOUT_MS = 30_000;
 const THROTTLE_MIN_GAP_MS = 2_000;
 const CACHE_TTL_SECONDS = 604_800;
 const MAX_RESULT_BYTES = 33_554_432;
@@ -314,13 +316,17 @@ export class PrismaKeywordResearchRepository {
     this.schema = prismaSchemaForClient(client);
   }
 
-  async _transaction(work) {
-    return this.client.$transaction(async (tx) => {
+  async _transaction(work, options) {
+    const callback = async (tx) => {
       if (this.schema && this.schema !== "public") {
         await tx.$queryRaw`SELECT set_config('search_path', ${this.schema}, true)`;
       }
       return work(tx);
-    });
+    };
+    if (options === undefined) {
+      return this.client.$transaction(callback);
+    }
+    return this.client.$transaction(callback, options);
   }
 
   async create(input, now) {
@@ -1158,6 +1164,9 @@ export class PrismaKeywordResearchRepository {
         });
         if (researchUpdated.count !== 1) throw new FinalPublicationAbort("conflict");
         return { outcome: "terminal" };
+      }, {
+        maxWait: FINAL_PUBLICATION_TRANSACTION_MAX_WAIT_MS,
+        timeout: FINAL_PUBLICATION_TRANSACTION_TIMEOUT_MS
       });
     } catch (error) {
       if (error instanceof FinalPublicationAbort) return { outcome: error.mapping };
