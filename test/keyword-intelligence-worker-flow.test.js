@@ -526,7 +526,7 @@ function aggNoOp(trace, op) {
   assert.equal(aggCount(trace, op), 0, `trace must not contain ${op}: ${JSON.stringify(trace)}`);
 }
 
-async function aggregationScaffold({ stage = "expansion", publishOutcome = "terminal", failOutcome = "terminal", failOnAssert, tickSeconds = [], trace: traceArg, publishTasksFor = stage } = {}) {
+async function aggregationScaffold({ stage = "expansion", publishOutcome = "terminal", failOutcome = "terminal", failOnAssert, tickSeconds = [], trace: traceArg, publishTasksFor = stage, candidates = AGG_CANDIDATES, shortlist = AGG_CANDIDATES } = {}) {
   const trace = traceArg ?? [];
   const researchId = newId("kr_");
   const generation = 1;
@@ -560,19 +560,19 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
     const request = { keyword: seeds[0], location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode, limit: 30 };
     expansionTasks.push(baseTask(expansionStage, `${index}:${suffix}`, endpointKey, request, { seed: seeds[0], endpointKey }));
   }
-  const anchorRequest = { keywords: AGG_CANDIDATES, location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode };
+  const anchorRequest = { keywords: candidates, location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode };
   const anchorTask = {
     ...baseTask(anchorStage, "US:0", "keyword_overview", anchorRequest,
-      { candidates: AGG_CANDIDATES }),
-    inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-anchor-input-v1", researchId, generation, payload: { candidates: AGG_CANDIDATES } })
+      { candidates }),
+    inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-anchor-input-v1", researchId, generation, payload: { candidates } })
   };
   const marketTasks = [];
   for (const code of ["GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"]) {
     const market = CONFIG.markets.find((entry) => entry.code === code);
-    const request = { keywords: AGG_CANDIDATES, location_code: market.locationCode, language_code: market.languageCode };
+    const request = { keywords: shortlist, location_code: market.locationCode, language_code: market.languageCode };
     marketTasks.push({
-      ...baseTask(marketStage, `${code}:0`, "keyword_overview", request, { code, keywords: AGG_CANDIDATES }),
-      inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-market-input-v1", researchId, generation, payload: { code, keywords: AGG_CANDIDATES } })
+      ...baseTask(marketStage, `${code}:0`, "keyword_overview", request, { code, keywords: shortlist }),
+      inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-market-input-v1", researchId, generation, payload: { code, keywords: shortlist } })
     });
   }
   const stages = { expansion: expansionStage, anchor_screen: anchorStage, market_overview: marketStage };
@@ -598,8 +598,8 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
   const expansionFp = keywordStageInputFingerprint({ researchId, generation, stage: "expansion", tasks: expansionTasks });
   const expansionManifest = {
     contractVersion: KEYWORD_ARTIFACT_EXPANSION_MANIFEST, stage: "expansion", itemId: "manifest",
-    seeds, bySeed: [{ seed: seeds[0], keywords: AGG_CANDIDATES }],
-    candidates: AGG_CANDIDATES.map((keyword) => ({ keyword, seeds: [seeds[0]] })),
+    seeds, bySeed: [{ seed: seeds[0], keywords: candidates }],
+    candidates: candidates.map((keyword) => ({ keyword, seeds: [seeds[0]] })),
     inputFingerprint: expansionFp, ...common
   };
   const expManifestStored = await tracedStore.putImmutable({
@@ -612,7 +612,7 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
   expansionStage.manifestFingerprint = expManifestStored.contentFingerprint;
   expansionStage.manifestProducedAt = NOW;
 
-  const anchorMetrics = aggMetrics(AGG_CANDIDATES);
+  const anchorMetrics = aggMetrics(candidates);
   const anchorArtifact = {
     contractVersion: KEYWORD_ARTIFACT_ANCHOR_RESULT, stage: "anchor_screen", status: "succeeded",
     costUsd: "0.01236000", normalized: { metrics: anchorMetrics },
@@ -627,7 +627,23 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
   anchorTask.artifactS3Key = anchorStored.key;
   anchorTask.artifactFingerprint = anchorStored.contentFingerprint;
 
-  const marketMetrics = aggMetrics(AGG_CANDIDATES);
+  const shortlistManifest = {
+    contractVersion: KEYWORD_ARTIFACT_SHORTLIST_MANIFEST, stage: "anchor_screen", itemId: "manifest",
+    keywords: shortlist, researchId, generation, inputFingerprint: anchorTask.inputFingerprint,
+    producedAt: common.producedAt
+  };
+  keywordShortlistManifestSchema.parse(shortlistManifest);
+  const shortlistStored = await tracedStore.putImmutable({
+    key: keywordManifestKey(researchId, generation, "anchor_screen"),
+    contractVersion: shortlistManifest.contractVersion, runId: researchId, stage: "anchor_screen", generation,
+    itemId: "manifest", inputFingerprint: anchorTask.inputFingerprint, producedAt: common.producedAt,
+    value: shortlistManifest, schema: keywordShortlistManifestSchema
+  });
+  anchorStage.manifestS3Key = shortlistStored.key;
+  anchorStage.manifestFingerprint = shortlistStored.contentFingerprint;
+  anchorStage.manifestProducedAt = NOW;
+
+  const marketMetrics = aggMetrics(shortlist);
   for (const task of marketTasks) {
     const artifact = {
       contractVersion: KEYWORD_ARTIFACT_MARKET_RESULT, stage: "market_overview", status: "succeeded",
@@ -673,6 +689,7 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
       return { outcome: publishOutcome };
     },
     publishResearchResult: async (input) => {
+      holder.publishedInput = input;
       trace.push("publishResult");
       if (publishOutcome === "terminal" || publishOutcome === "found") {
         return { outcome: publishOutcome };
@@ -1030,4 +1047,18 @@ test("SCN-KI-034: aggregation post-loss operation injection falsifies the zero-l
   const sortedExpected = [...R4_MANIFEST.groups.aggregation_control].sort();
   assert.deepEqual(sortedExecuted, sortedExpected, "every R4 aggregation-control manifest ID executed exactly once");
   assert.equal(executed.length, R4_MANIFEST.groups.aggregation_control.length);
+});
+
+test("SCN-KI-041: aggregation projects the shortlist from a larger candidate set", async () => {
+  const candidates = Array.from({length:300},(_,index)=>`seed one candidate ${String(index + 1).padStart(3, "0")}`);
+  const shortlist = candidates.slice(0, 200);
+  const holder = await aggregationScaffold({ stage: "market_overview", candidates, shortlist });
+  const outcome = await processKeywordMessage(holder.message, holder.runtime, { createLeaseMonitor: holder.monitorFactory });
+  assert.equal(outcome.outcome, "published");
+  assert.equal(holder.publishedInput.result.keywords.length, 200);
+  assert.equal(holder.publishedInput.selectionItems.length, 100);
+  const resultKeys = new Set(holder.publishedInput.result.keywords.map((entry) => entry.keyword.trim().toLowerCase()));
+  const shortlistKeys = new Set(shortlist.map((keyword) => keyword.trim().toLowerCase()));
+  assert.deepEqual([...resultKeys].sort(), [...shortlistKeys].sort());
+  assert.equal([...resultKeys].filter((key) => !shortlistKeys.has(key)).length, 0);
 });
