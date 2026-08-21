@@ -260,6 +260,50 @@ function clientWithQuerySpy(client) {
   return { client, spy };
 }
 
+async function withPublicationTransactionProbe(client, { timeoutOverride } = {}, run) {
+  const originalTransaction = client.$transaction.bind(client);
+  const observation = { options: null, delayActivated: false };
+  client.$transaction = (work, ...args) => {
+    const suppliedOptions = args[0];
+    observation.options = suppliedOptions === undefined ? undefined : structuredClone(suppliedOptions);
+    const effectiveOptions = timeoutOverride === undefined || suppliedOptions === undefined
+      ? suppliedOptions : { ...suppliedOptions, timeout: timeoutOverride };
+    return originalTransaction(async (tx) => {
+      const researchDelegate = tx.keywordResearch;
+      let delayed = false;
+      const delayedResearchDelegate = new Proxy(researchDelegate, {
+        get(target, prop) {
+          const value = target[prop];
+          if (prop === "updateMany") {
+            return (query) => {
+              const isFinalPublication = !delayed && query?.data?.state === "completed" &&
+                query.data.resultFingerprint !== undefined;
+              if (!isFinalPublication) return value.apply(target, [query]);
+              delayed = true;
+              observation.delayActivated = true;
+              return tx.$queryRawUnsafe("SELECT pg_sleep(21.000)").then(() => value.apply(target, [query]));
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      const probedTx = new Proxy(tx, {
+        get(target, prop) {
+          if (prop === "keywordResearch") return delayedResearchDelegate;
+          const value = target[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      return work(probedTx);
+    }, effectiveOptions);
+  };
+  try {
+    return await run(observation);
+  } finally {
+    client.$transaction = originalTransaction;
+  }
+}
+
 async function snapshotResearchRows(db, { researchId, stageIds, nextStageId }) {
   const research = await db.keywordResearch.findUnique({ where: { id: researchId } });
   const stages = {};
@@ -1168,6 +1212,82 @@ test("publishResearchResult rollback: injected research-completion failure leave
   const marketAfter = await db.keywordResearchStage.findUnique({ where: { id: shortlist.nextStage.id } });
   assert.equal(marketAfter.state, "aggregating");
   assert.equal(marketAfter.manifestS3Key, null);
+  await db.$disconnect();
+});
+
+test("SCN-KI-042: publication timeout options prove deterministic rollback and 30-second success", { skip: !enabled }, async (t) => {
+  const requiredCases = ["W6-TXN-01", "W6-TXN-02"];
+  const controlCases = ["W6-NC-14"];
+  const executed = new Set();
+  const digest = (members) => createHash("sha256").update(
+    [...members].sort((a, b) => Buffer.from(a).compare(Buffer.from(b))).join("\n") + "\n"
+  ).digest("hex");
+  assert.equal(new Set(requiredCases).size, requiredCases.length);
+  assert.equal(new Set(controlCases).size, controlCases.length);
+  assert.equal(digest(requiredCases), "dd72e2292dac7c33d2250be7af0770401bde67695176d1b76c530b9c7bc10d39");
+
+  const { db, repo } = await setupRepo(t, "kiw6_txn042");
+  const negativeResearchId = newResearchId();
+  await freshResearch(repo, negativeResearchId);
+  const negative = await advanceToMarketStage(db, repo, negativeResearchId);
+  const negativeKeywords = Array.from({ length: 200 }, (_, index) => makeKeywordRow(`negative keyword ${index}`));
+  const negativeResult = makeResult(negativeKeywords, negativeResearchId);
+  const negativeSelection = defaultSelectionFor(negativeKeywords);
+  const negativeResearchBefore = await db.keywordResearch.findUnique({ where: { id: negativeResearchId } });
+  const negativeStageBefore = await db.keywordResearchStage.findUnique({ where: { id: negative.marketStageId } });
+  let negativeObservation;
+  await assert.rejects(() => withPublicationTransactionProbe(db, { timeoutOverride: 20_000 }, async (observation) => {
+    negativeObservation = observation;
+    await repo.publishResearchResult({ researchId: negativeResearchId, generation: 1, token: negative.mktToken,
+      manifestS3Key: "runs/txn-042-negative.json", manifestFingerprint: fp("txn-042-negative"),
+      result: negativeResult, resultFingerprint: fp("txn-042-negative-result"), selectionItems: negativeSelection }, NOW);
+  }), (error) => error?.code === "P2028" && /transaction/i.test(error.message));
+  assert.deepEqual(negativeObservation.options, { maxWait: 5_000, timeout: 30_000 });
+  assert.equal(negativeObservation.delayActivated, true);
+  const negativeResearchAfter = await db.keywordResearch.findUnique({ where: { id: negativeResearchId } });
+  const negativeStageAfter = await db.keywordResearchStage.findUnique({ where: { id: negative.marketStageId } });
+  assert.deepEqual(negativeResearchAfter, negativeResearchBefore);
+  assert.deepEqual(negativeStageAfter, negativeStageBefore);
+  executed.add("W6-TXN-01");
+  executed.add("W6-NC-14");
+
+  const positiveResearchId = newResearchId();
+  await freshResearch(repo, positiveResearchId);
+  const positive = await advanceToMarketStage(db, repo, positiveResearchId);
+  const positiveKeywords = Array.from({ length: 200 }, (_, index) => makeKeywordRow(`positive keyword ${index}`));
+  const positiveResult = makeResult(positiveKeywords, positiveResearchId);
+  const positiveSelection = defaultSelectionFor(positiveKeywords);
+  let positiveObservation;
+  const published = await withPublicationTransactionProbe(db, {}, async (observation) => {
+    positiveObservation = observation;
+    return repo.publishResearchResult({ researchId: positiveResearchId, generation: 1, token: positive.mktToken,
+      manifestS3Key: "runs/txn-042-positive.json", manifestFingerprint: fp("txn-042-positive"),
+      result: positiveResult, resultFingerprint: fp("txn-042-positive-result"), selectionItems: positiveSelection }, NOW);
+  });
+  assert.deepEqual(positiveObservation.options, { maxWait: 5_000, timeout: 30_000 });
+  assert.equal(positiveObservation.delayActivated, true);
+  assert.equal(published.outcome, "terminal");
+  const positiveResearch = await db.keywordResearch.findUnique({ where: { id: positiveResearchId } });
+  const positiveStage = await db.keywordResearchStage.findUnique({ where: { id: positive.marketStageId } });
+  assert.equal(positiveResearch.state, "completed");
+  assert.equal(positiveResearch.result.keywords.length, 200);
+  assert.equal(positiveResearch.selection.items.length, 100);
+  assert.equal(positiveResearch.selectionRevision, 1);
+  assert.equal(positiveStage.state, "completed");
+  assert.equal(positiveStage.manifestS3Key, "runs/txn-042-positive.json");
+  assert.equal(positiveStage.manifestFingerprint, fp("txn-042-positive"));
+  const positiveAfterPublication = structuredClone({ positiveResearch, positiveStage });
+  const replay = await repo.publishResearchResult({ researchId: positiveResearchId, generation: 1, token: positive.mktToken,
+    manifestS3Key: "runs/txn-042-positive.json", manifestFingerprint: fp("txn-042-positive"),
+    result: positiveResult, resultFingerprint: fp("txn-042-positive-result"), selectionItems: positiveSelection }, NOW);
+  assert.equal(replay.outcome, "found");
+  const positiveAfterReplay = {
+    positiveResearch: await db.keywordResearch.findUnique({ where: { id: positiveResearchId } }),
+    positiveStage: await db.keywordResearchStage.findUnique({ where: { id: positive.marketStageId } })
+  };
+  assert.deepEqual(positiveAfterReplay, positiveAfterPublication);
+  executed.add("W6-TXN-02");
+  assert.deepEqual([...executed].sort(), [...requiredCases, ...controlCases].sort());
   await db.$disconnect();
 });
 
