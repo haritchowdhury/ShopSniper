@@ -1,0 +1,61 @@
+{
+  "contractVersion": "ki-w6-enforcement-manifest-v1",
+  "groups": {
+    "navigation": [
+      "W6-NAV-01",
+      "W6-NAV-02",
+      "W6-NAV-03"
+    ],
+    "flow": [
+      "W6-FLOW-01",
+      "W6-FLOW-02",
+      "W6-FLOW-03",
+      "W6-FLOW-04",
+      "W6-FLOW-05",
+      "W6-FLOW-06",
+      "W6-FLOW-07",
+      "W6-FLOW-08",
+      "W6-FLOW-09",
+      "W6-FLOW-10",
+      "W6-FLOW-11",
+      "W6-FLOW-12",
+      "W6-FLOW-13"
+    ],
+    "resilience": [
+      "W6-RES-01",
+      "W6-RES-02",
+      "W6-RES-03",
+      "W6-RES-04"
+    ],
+    "conformance": [
+      "W6-CONF-01",
+      "W6-CONF-02",
+      "W6-CONF-03",
+      "W6-CONF-04",
+      "W6-CONF-05",
+      "W6-CONF-06"
+    ]
+  },
+  "groupDigests": {
+    "navigation": "103df26205674ddd7f4e7548b3432ea7f5342096bd369991e067debf7f3bf6f2",
+    "flow": "14aa36ae942fc9eedef7d9fae9ae0a42775f6ab22c04e3dabb2cf1cbe9379461",
+    "resilience": "fc83e2c68fcd67e1849b955b3a9e48fe7a998aed1f1ac0ad6c0f943efeea354d",
+    "conformance": "b8180b2f2561d41298252db30b075d4184da3535af065a29f0273e12392c5646"
+  },
+  "globalDigest": "d81bab26bc5aadd19c162156c13890611b2fc5a6d0dcb917234453d568ffb4d4",
+  "negativeControls": [
+    "W6-NC-01",
+    "W6-NC-02",
+    "W6-NC-03",
+    "W6-NC-04",
+    "W6-NC-05",
+    "W6-NC-06",
+    "W6-NC-07",
+    "W6-NC-08",
+    "W6-NC-09",
+    "W6-NC-10",
+    "W6-NC-11",
+    "W6-NC-12",
+    "W6-NC-13"
+  ]
+}
