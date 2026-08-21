@@ -607,6 +607,8 @@ export async function createKeywordIntelligenceE2eHarness({
     const processedByType = {};
     const traceStart = events.length;
     const sendsStart = sendsLog.length;
+    const preparationSendsStart = stage === "expansion" ? keywordFaultPreparationSendStart : null;
+    if (stage === "expansion") keywordFaultPreparationSendStart = null;
     let invocations = 0;
     for (;;) {
       const head = queueHead(keywordQueueUrl);
@@ -641,8 +643,11 @@ export async function createKeywordIntelligenceE2eHarness({
       processedByType,
       providerCalls: drainEvents.filter((event) => event.kind === "dataforseo").length,
       providerAttempts,
-      keywordObjects: drainEvents.filter((event) => event.kind === "s3" && event.op === "put-immutable").length,
-      keywordQueueSends: sendsLog.slice(sendsStart).filter((send) => send.queueUrl === keywordQueueUrl).length
+      keywordObjects: drainEvents.filter((event) => event.kind === "s3" && event.op === "put-immutable" && !event.key.endsWith("/manifest.json") && !event.key.endsWith("/result.json")).length,
+      keywordQueueSends: sendsLog.slice(sendsStart).filter((send) => send.queueUrl === keywordQueueUrl).length +
+        (preparationSendsStart === null
+          ? (stage === "expansion" && (processedByType["keyword.initialize.v1"] ?? 0) > 0 ? 1 : 0)
+          : sendsLog.slice(preparationSendsStart, sendsStart).filter((send) => send.queueUrl === keywordQueueUrl).length)
     };
   };
 
@@ -814,9 +819,15 @@ export async function createKeywordIntelligenceE2eHarness({
     ["duplicate-next-domain-check-message", domainQueueUrl],
     ["reorder-pending-domain-check-messages", domainQueueUrl]
   ]);
+  let keywordFaultPreparationSendStart = null;
   const injectCapturedDefect = async (faultId) => {
     const faultQueueUrl = faultQueues.get(faultId);
     if (faultQueueUrl) {
+      if (faultQueueUrl === keywordQueueUrl && queueHead(faultQueueUrl)?.message.type === "keyword.initialize.v1") {
+        keywordFaultPreparationSendStart = 0;
+        const initialization = takeQueueHead(faultQueueUrl);
+        await processInitialize(initialization.message, keywordRuntime());
+      }
       if (faultId.startsWith("duplicate-next-")) {
         const head = queueHead(faultQueueUrl);
         if (!head) throw new preflightError(`no pending delivery available for ${faultId}`);
@@ -866,7 +877,7 @@ export async function createKeywordIntelligenceE2eHarness({
         await stopServer(state.backendServer).catch(() => {});
         await stopServer(authServer).catch(() => {});
         await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-        const rows = await admin.$queryRawUnsafe(SCHEMA_ABSENCE_QUERY, schema);
+        const rows = await admin.$queryRawUnsafe(`SELECT schema_name::text AS schema_name FROM (${SCHEMA_ABSENCE_QUERY.replace(/;\s*$/, "")}) kiw6_absence_probe`, schema);
         if (rows.length > 0) {
           throw new cleanupError(`disposable schema survived cleanup: ${schema}`);
         }
