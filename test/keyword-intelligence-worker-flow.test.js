@@ -526,11 +526,12 @@ function aggNoOp(trace, op) {
   assert.equal(aggCount(trace, op), 0, `trace must not contain ${op}: ${JSON.stringify(trace)}`);
 }
 
-async function aggregationScaffold({ stage = "expansion", publishOutcome = "terminal", failOutcome = "terminal", failOnAssert, tickSeconds = [], trace: traceArg, publishTasksFor = stage, candidates = AGG_CANDIDATES, shortlist = AGG_CANDIDATES } = {}) {
+async function aggregationScaffold({ stage = "expansion", publishOutcome = "terminal", failOutcome = "terminal", failOnAssert, tickSeconds = [], trace: traceArg, publishTasksFor = stage, candidates = AGG_CANDIDATES, shortlist = AGG_CANDIDATES, bySeed = null } = {}) {
   const trace = traceArg ?? [];
   const researchId = newId("kr_");
   const generation = 1;
-  const seeds = ["seed one"];
+  const expansionBySeed = bySeed ?? [{ seed: "seed one", keywords: candidates }];
+  const seeds = expansionBySeed.map((entry) => entry.seed);
   const nowBox = { current: NOW.getTime() };
   const clock = () => new Date(nowBox.current);
   const s3Client = memoryS3();
@@ -541,7 +542,7 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
     async getOptionalValidated(input) { trace.push("s3.get"); return store.getOptionalValidated(input); }
   };
 
-  const expansionStage = { id: newId("krs"), researchId, stage: "expansion", generation, state: "ready", expectedCount: 2, terminalCount: 2, succeededCount: 2, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
+  const expansionStage = { id: newId("krs"), researchId, stage: "expansion", generation, state: "ready", expectedCount: seeds.length * 2, terminalCount: seeds.length * 2, succeededCount: seeds.length * 2, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
   const anchorStage = { id: newId("krs"), researchId, stage: "anchor_screen", generation, state: "ready", expectedCount: 1, terminalCount: 1, succeededCount: 1, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
   const marketStage = { id: newId("krs"), researchId, stage: "market_overview", generation, state: "ready", expectedCount: 8, terminalCount: 8, succeededCount: 8, skippedCount: 0, failedCount: 0, manifestS3Key: null, manifestFingerprint: null, manifestProducedAt: null, createdAt: NOW };
 
@@ -556,16 +557,19 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
   }
 
   const expansionTasks = [];
-  for (const [index, suffix, endpointKey] of [[0, "suggestions", "keyword_suggestions"], [0, "related", "related_keywords"]]) {
-    const request = { keyword: seeds[0], location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode, limit: 30 };
-    expansionTasks.push(baseTask(expansionStage, `${index}:${suffix}`, endpointKey, request, { seed: seeds[0], endpointKey }));
-  }
+  seeds.forEach((seed, index) => {
+    for (const [suffix, endpointKey] of [["suggestions", "keyword_suggestions"], ["related", "related_keywords"]]) {
+      const request = { keyword: seed, location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode, limit: 30 };
+      expansionTasks.push(baseTask(expansionStage, `${index}:${suffix}`, endpointKey, request, { seed, endpointKey }));
+    }
+  });
   const anchorRequest = { keywords: candidates, location_code: CONFIG.expansionAnchor.locationCode, language_code: CONFIG.expansionAnchor.languageCode };
   const anchorTask = {
     ...baseTask(anchorStage, "US:0", "keyword_overview", anchorRequest,
       { candidates }),
     inputFingerprint: keywordTaskInputFingerprint({ contractVersion: "keyword-anchor-input-v1", researchId, generation, payload: { candidates } })
   };
+  const anchorStageInputFingerprint = keywordStageInputFingerprint({ researchId, generation, stage: "anchor_screen", tasks: [anchorTask] });
   const marketTasks = [];
   for (const code of ["GB", "CA", "AU", "NZ", "DE", "FR", "IN", "AE"]) {
     const market = CONFIG.markets.find((entry) => entry.code === code);
@@ -598,8 +602,8 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
   const expansionFp = keywordStageInputFingerprint({ researchId, generation, stage: "expansion", tasks: expansionTasks });
   const expansionManifest = {
     contractVersion: KEYWORD_ARTIFACT_EXPANSION_MANIFEST, stage: "expansion", itemId: "manifest",
-    seeds, bySeed: [{ seed: seeds[0], keywords: candidates }],
-    candidates: candidates.map((keyword) => ({ keyword, seeds: [seeds[0]] })),
+    seeds, bySeed: expansionBySeed,
+    candidates: candidates.map((keyword) => ({ keyword, seeds: expansionBySeed.filter((entry) => entry.keywords.includes(keyword)).map((entry) => entry.seed) })),
     inputFingerprint: expansionFp, ...common
   };
   const expManifestStored = await tracedStore.putImmutable({
@@ -629,14 +633,14 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
 
   const shortlistManifest = {
     contractVersion: KEYWORD_ARTIFACT_SHORTLIST_MANIFEST, stage: "anchor_screen", itemId: "manifest",
-    keywords: shortlist, researchId, generation, inputFingerprint: anchorTask.inputFingerprint,
+    keywords: shortlist, researchId, generation, inputFingerprint: anchorStageInputFingerprint,
     producedAt: common.producedAt
   };
   keywordShortlistManifestSchema.parse(shortlistManifest);
   const shortlistStored = await tracedStore.putImmutable({
     key: keywordManifestKey(researchId, generation, "anchor_screen"),
     contractVersion: shortlistManifest.contractVersion, runId: researchId, stage: "anchor_screen", generation,
-    itemId: "manifest", inputFingerprint: anchorTask.inputFingerprint, producedAt: common.producedAt,
+    itemId: "manifest", inputFingerprint: anchorStageInputFingerprint, producedAt: common.producedAt,
     value: shortlistManifest, schema: keywordShortlistManifestSchema
   });
   anchorStage.manifestS3Key = shortlistStored.key;
@@ -752,7 +756,10 @@ async function aggregationScaffold({ stage = "expansion", publishOutcome = "term
     stageInputFingerprint: keywordStageInputFingerprint({ researchId, generation, stage, tasks: stageTasks })
   };
   trace.length = 0;
-  return { trace, repo, runtime, message, monitorFactory, holder, dispatch, researchId, stages, tasksByStage };
+  return {
+    trace, repo, runtime, message, monitorFactory, holder, dispatch, researchId, stages, tasksByStage,
+    get publishedInput() { return holder.publishedInput; }
+  };
 }
 
 async function runAggregationCase(caseId) {
@@ -1050,9 +1057,17 @@ test("SCN-KI-034: aggregation post-loss operation injection falsifies the zero-l
 });
 
 test("SCN-KI-041: aggregation projects the shortlist from a larger candidate set", async () => {
-  const candidates = Array.from({length:300},(_,index)=>`seed one candidate ${String(index + 1).padStart(3, "0")}`);
+  const expansionBySeed = ["seed 1", "seed 2", "seed 3", "seed 4", "seed 5"].map((seed) => ({
+    seed,
+    keywords: [seed, ...Array.from({ length: 59 }, (_, n) => `${seed} candidate ${String(n + 1).padStart(2, "0")}`)]
+  }));
+  const candidates = expansionBySeed.flatMap((entry) => entry.keywords);
+  assert.equal(expansionBySeed.length, 5);
+  assert.ok(expansionBySeed.every((entry) => entry.keywords.length === 60));
+  assert.equal(candidates.length, 300);
+  assert.equal(new Set(candidates).size, 300);
   const shortlist = candidates.slice(0, 200);
-  const holder = await aggregationScaffold({ stage: "market_overview", candidates, shortlist });
+  const holder = await aggregationScaffold({ stage: "market_overview", candidates, shortlist, bySeed: expansionBySeed });
   const outcome = await processKeywordMessage(holder.message, holder.runtime, { createLeaseMonitor: holder.monitorFactory });
   assert.equal(outcome.outcome, "published");
   assert.equal(holder.publishedInput.result.keywords.length, 200);
