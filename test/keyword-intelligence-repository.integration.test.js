@@ -261,14 +261,14 @@ function clientWithQuerySpy(client) {
 }
 
 async function withPublicationTransactionProbe(client, { timeoutOverride } = {}, run) {
-  const originalTransaction = client.$transaction.bind(client);
+  const originalTransaction = client.$transaction;
   const observation = { options: null, delayActivated: false };
   client.$transaction = (work, ...args) => {
     const suppliedOptions = args[0];
     observation.options = suppliedOptions === undefined ? undefined : structuredClone(suppliedOptions);
     const effectiveOptions = timeoutOverride === undefined || suppliedOptions === undefined
       ? suppliedOptions : { ...suppliedOptions, timeout: timeoutOverride };
-    return originalTransaction(async (tx) => {
+    return originalTransaction.call(client, async (tx) => {
       const researchDelegate = tx.keywordResearch;
       let delayed = false;
       const delayedResearchDelegate = new Proxy(researchDelegate, {
