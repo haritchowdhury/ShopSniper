@@ -16,8 +16,8 @@ const ATTEMPT_NONTERMINAL = new Set(["planned", "in_flight"]);
 const ENDPOINT_KEYS = new Set(["keyword_suggestions", "related_keywords", "keyword_overview"]);
 const TASK_LEASE_MS = 60_000;
 const AGGREGATION_LEASE_MS = 120_000;
-const FINAL_PUBLICATION_TRANSACTION_MAX_WAIT_MS = 5_000;
-const FINAL_PUBLICATION_TRANSACTION_TIMEOUT_MS = 30_000;
+const SHORT_TRANSACTION_OPTIONS = Object.freeze({ maxWait: 5_000, timeout: 15_000 });
+const SCALE_TRANSACTION_OPTIONS = Object.freeze({ maxWait: 5_000, timeout: 30_000 });
 const THROTTLE_MIN_GAP_MS = 2_000;
 const CACHE_TTL_SECONDS = 604_800;
 const MAX_RESULT_BYTES = 33_554_432;
@@ -310,6 +310,14 @@ function retryDelaySeconds(taskId, attemptNumber) {
   return Math.ceil(baseDelay + jitter);
 }
 
+function compareUnsignedUtf8(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function compareTaskRowsByUnsignedItemKey(left, right) {
+  return compareUnsignedUtf8(left.itemKey, right.itemKey);
+}
+
 export class PrismaKeywordResearchRepository {
   constructor(client) {
     this.client = client;
@@ -323,9 +331,6 @@ export class PrismaKeywordResearchRepository {
       }
       return work(tx);
     };
-    if (options === undefined) {
-      return this.client.$transaction(callback);
-    }
     return this.client.$transaction(callback, options);
   }
 
@@ -384,12 +389,14 @@ export class PrismaKeywordResearchRepository {
   async getTaskContext(input) {
     const taskId = requireNonempty(input?.taskId);
     const task = await this.client.keywordResearchTask.findUnique({
-      where: { id: taskId }, include: { stage: { include: { research: true } } }
+      where: { id: taskId },
+      include: {
+        stage: { include: { research: true } },
+        attempts: { orderBy: { attemptNumber: "desc" }, take: 1 }
+      }
     });
     if (!task || !task.stage || !task.stage.research) return { outcome: "not_found" };
-    const latestAttempt = await this.client.keywordResearchProviderAttempt.findFirst({
-      where: { taskId }, orderBy: { attemptNumber: "desc" }
-    });
+    const latestAttempt = task.attempts[0] ?? null;
     return {
       outcome: "found",
       research: workerResearch(task.stage.research),
@@ -403,21 +410,20 @@ export class PrismaKeywordResearchRepository {
     const researchId = requireResearchId(input?.researchId);
     const stageName = requireStage(input?.stage);
     const generation = requireGeneration(input?.generation ?? 1);
-    const research = await this.client.keywordResearch.findUnique({ where: { id: researchId } });
-    if (!research) return { outcome: "not_found" };
-    if (research.generation !== generation) return { outcome: "conflict" };
     const stageId = keywordStageId(researchId, stageName, generation);
-    const stage = await this.client.keywordResearchStage.findUnique({ where: { id: stageId } });
+    const stage = await this.client.keywordResearchStage.findUnique({
+      where: { id: stageId },
+      include: { research: true, tasks: { orderBy: { itemKey: "asc" } } }
+    });
     if (!stage) return { outcome: "not_found" };
     if (stage.stage !== stageName) return { outcome: "conflict" };
-    const tasks = await this.client.keywordResearchTask.findMany({
-      where: { stageId }, orderBy: { itemKey: "asc" }
-    });
+    if (!stage.research) return { outcome: "not_found" };
+    if (stage.research.generation !== generation) return { outcome: "conflict" };
     return {
       outcome: "found",
-      research: workerResearch(research),
+      research: workerResearch(stage.research),
       stage: workerStage(stage),
-      tasks: tasks.map(workerTask)
+      tasks: stage.tasks.map(workerTask)
     };
   }
 
@@ -446,32 +452,33 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "conflict" };
       }
       const stageId = keywordStageId(researchId, "expansion", generation);
-      const existingStage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
+      const existingStage = await tx.keywordResearchStage.findUnique({
+        where: { id: stageId },
+        include: { tasks: { orderBy: { itemKey: "asc" } } }
+      });
       if (existingStage) {
         if (existingStage.expectedCount !== tasks.length) return { outcome: "conflict" };
-        const stored = await tx.keywordResearchTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
-        if (!sameTaskSet(stored, tasks)) return { outcome: "conflict" };
-        return { outcome: "found", stage: workerStage(existingStage), tasks: stored.map(workerTask) };
+        if (!sameTaskSet(existingStage.tasks, tasks)) return { outcome: "conflict" };
+        return { outcome: "found", stage: workerStage(existingStage), tasks: existingStage.tasks.map(workerTask) };
       }
       if (research.state === "queued") {
         await tx.keywordResearch.update({ where: { id: researchId }, data: { state: "running", startedAt: now } });
       }
-      await tx.keywordResearchStage.create({ data: {
+      const stage = await tx.keywordResearchStage.create({ data: {
         id: stageId, researchId, stage: "expansion", generation,
         expectedCount: tasks.length, state: tasks.length === 0 ? "ready" : "collecting",
         createdAt: now, updatedAt: now
       } });
-      await tx.keywordResearchTask.createMany({ data: tasks.map((task) => ({
+      const stored = await tx.keywordResearchTask.createManyAndReturn({ data: tasks.map((task) => ({
         id: keywordTaskId(stageId, task.itemKey), stageId, itemKey: task.itemKey,
         inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
         requestFingerprint: task.requestFingerprint,
         nextAttemptAt: task.nextAttemptAt instanceof Date ? task.nextAttemptAt : null,
         createdAt: now, updatedAt: now
       })) });
-      const stage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
-      const stored = await tx.keywordResearchTask.findMany({ where: { stageId }, orderBy: { itemKey: "asc" } });
+      stored.sort(compareTaskRowsByUnsignedItemKey);
       return { outcome: "created", stage: workerStage(stage), tasks: stored.map(workerTask) };
-    });
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async claim(input, now) {
@@ -491,7 +498,7 @@ export class PrismaKeywordResearchRepository {
           task.nextAttemptAt.getTime() > now.getTime()) {
         return { outcome: "delayed", retryAt: task.nextAttemptAt };
       }
-      const updated = await tx.keywordResearchTask.updateMany({
+      const updated = await tx.keywordResearchTask.updateManyAndReturn({
         where: { id: taskId, state: task.state, leaseToken: task.leaseToken },
         data: {
           state: "processing", leaseOwner: owner, leaseToken: token,
@@ -500,9 +507,9 @@ export class PrismaKeywordResearchRepository {
           updatedAt: now
         }
       });
-      if (updated.count !== 1) return { outcome: "lost" };
-      return { outcome: "claimed", task: workerTask(await tx.keywordResearchTask.findUnique({ where: { id: taskId } })) };
-    });
+      if (updated.length !== 1) return { outcome: "lost" };
+      return { outcome: "claimed", task: workerTask(updated[0]) };
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async heartbeat(input, now) {
@@ -532,7 +539,13 @@ export class PrismaKeywordResearchRepository {
     const reservationCostUsd = normalizeUsdInput(requireDecimalUsd(input?.reservationCostUsd));
     const maxCostPerResearchUsd = normalizeUsdInput(requireDecimalUsd(input?.maxCostPerResearchUsd));
     return this._transaction(async (tx) => {
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      const task = await tx.keywordResearchTask.findUnique({
+        where: { id: taskId },
+        include: {
+          stage: true,
+          attempts: { orderBy: { attemptNumber: "desc" }, take: 1 }
+        }
+      });
       if (!task) return { outcome: "not_found" };
       if (task.state === "processing" && task.leaseToken !== token) return { outcome: "lost" };
       if (task.state !== "processing") return { outcome: "lost" };
@@ -540,9 +553,7 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "lost" };
       }
       if (task.requestFingerprint !== requestFingerprint) return { outcome: "conflict" };
-      const latest = await tx.keywordResearchProviderAttempt.findFirst({
-        where: { taskId }, orderBy: { attemptNumber: "desc" }
-      });
+      const latest = task.attempts[0] ?? null;
       if (latest && !ATTEMPT_TERMINAL.has(latest.state)) {
         if (latest.requestFingerprint === requestFingerprint &&
             serializeMoney(latest.reservationCostUsd) === reservationCostUsd) {
@@ -567,7 +578,7 @@ export class PrismaKeywordResearchRepository {
           return { outcome: "conflict", code: CODE_RETRY_NOT_SCHEDULED };
         }
       }
-      const stage = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
+      const stage = task.stage;
       if (!stage) return { outcome: "not_found" };
       const [exposure] = await tx.$queryRaw`
         SELECT (COALESCE(SUM(a."providerCostUsd"), 0)
@@ -595,7 +606,7 @@ export class PrismaKeywordResearchRepository {
         data: { attemptCount: attemptNumber, nextAttemptAt: dueNextAttemptAt, updatedAt: now }
       });
       return { outcome: "created", attempt: workerAttempt(attempt), mayCall: true };
-    });
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async settleAttempt(input, now) {
@@ -624,10 +635,11 @@ export class PrismaKeywordResearchRepository {
     }
     return this._transaction(async (tx) => {
       const attempt = await tx.keywordResearchProviderAttempt.findUnique({
-        where: { taskId_attemptNumber: { taskId, attemptNumber } }
+        where: { taskId_attemptNumber: { taskId, attemptNumber } },
+        include: { task: true }
       });
       if (!attempt) return { outcome: "not_found" };
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      const task = attempt.task;
       if (!task) return { outcome: "not_found" };
       if (task.attemptCount !== attemptNumber) return { outcome: "conflict" };
       if (ATTEMPT_TERMINAL.has(attempt.state)) {
@@ -653,7 +665,7 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "found", attempt: workerAttempt(attempt), fenceActive };
       }
       if (!ATTEMPT_NONTERMINAL.has(attempt.state)) return { outcome: "conflict" };
-      const updated = await tx.keywordResearchProviderAttempt.updateMany({
+      const updated = await tx.keywordResearchProviderAttempt.updateManyAndReturn({
         where: { id: attempt.id, state: { in: ["planned", "in_flight"] } },
         data: {
           state: input.state,
@@ -665,7 +677,7 @@ export class PrismaKeywordResearchRepository {
           updatedAt: now
         }
       });
-      if (updated.count !== 1) return { outcome: "lost" };
+      if (updated.length !== 1) return { outcome: "lost" };
       if (input.state === "succeeded") {
         const existingCache = await tx.keywordResearchCache.findUnique({
           where: { requestFingerprint: attempt.requestFingerprint }
@@ -687,9 +699,7 @@ export class PrismaKeywordResearchRepository {
           } });
         }
       }
-      const settled = await tx.keywordResearchProviderAttempt.findUnique({
-        where: { taskId_attemptNumber: { taskId, attemptNumber } }
-      });
+      const settled = updated[0];
       const fenceActive = task.state === "processing" && task.leaseToken === token &&
         task.leaseExpiresAt instanceof Date && task.leaseExpiresAt.getTime() > now.getTime();
       return {
@@ -697,7 +707,7 @@ export class PrismaKeywordResearchRepository {
         attempt: workerAttempt(settled),
         fenceActive
       };
-    });
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async markAttemptAmbiguous(input, now) {
@@ -708,7 +718,8 @@ export class PrismaKeywordResearchRepository {
     if (input?.safeErrorCode !== CODE_AMBIGUOUS) conflict();
     return this._transaction(async (tx) => {
       const attempt = await tx.keywordResearchProviderAttempt.findUnique({
-        where: { taskId_attemptNumber: { taskId, attemptNumber } }
+        where: { taskId_attemptNumber: { taskId, attemptNumber } },
+        include: { task: { include: { stage: { include: { research: true } } } } }
       });
       if (!attempt) return { outcome: "not_found" };
       if (attempt.state === "ambiguous") {
@@ -725,7 +736,7 @@ export class PrismaKeywordResearchRepository {
           providerCostUsd: null, ambiguousAfter: now, updatedAt: now
         }
       });
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      const task = attempt.task;
       if (!task) return { outcome: "not_found" };
       if (!TASK_TERMINAL.has(task.state)) {
         await tx.keywordResearchTask.updateMany({
@@ -736,7 +747,7 @@ export class PrismaKeywordResearchRepository {
             updatedAt: now
           }
         });
-        const stage = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
+        const stage = task.stage;
         if (stage) {
           await tx.keywordResearchStage.update({
             where: { id: stage.id },
@@ -760,7 +771,7 @@ export class PrismaKeywordResearchRepository {
         }
       }
       return { outcome: "terminal" };
-    });
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async deferTask(input, now) {
@@ -771,7 +782,10 @@ export class PrismaKeywordResearchRepository {
     if (input?.safeErrorCode !== CODE_THROTTLED) conflict();
     const nextAttemptAt = input.nextAttemptAt;
     return this._transaction(async (tx) => {
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      const task = await tx.keywordResearchTask.findUnique({
+        where: { id: taskId },
+        include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }
+      });
       if (!task) return { outcome: "not_found" };
       if (task.state === "pending" && task.leaseToken === null && task.leaseExpiresAt === null &&
           task.nextAttemptAt instanceof Date && task.nextAttemptAt.getTime() === nextAttemptAt.getTime() &&
@@ -783,9 +797,7 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "lost" };
       }
       if (nextAttemptAt.getTime() <= now.getTime()) return { outcome: "conflict" };
-      const latest = await tx.keywordResearchProviderAttempt.findFirst({
-        where: { taskId }, orderBy: { attemptNumber: "desc" }
-      });
+      const latest = task.attempts[0] ?? null;
       if (latest && task.leaseAcquiredAt instanceof Date &&
           latest.plannedAt instanceof Date && latest.plannedAt.getTime() >= task.leaseAcquiredAt.getTime()) {
         return { outcome: "conflict" };
@@ -800,7 +812,7 @@ export class PrismaKeywordResearchRepository {
       });
       if (updated.count !== 1) return { outcome: "lost" };
       return { outcome: "delayed", retryAt: nextAttemptAt };
-    });
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async scheduleRetry(input, now) {
@@ -809,11 +821,12 @@ export class PrismaKeywordResearchRepository {
     const token = requireToken(input?.token);
     const attemptNumber = requireAttemptNumber(input?.attemptNumber);
     return this._transaction(async (tx) => {
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
-      if (!task) return { outcome: "not_found" };
-      const latest = await tx.keywordResearchProviderAttempt.findFirst({
-        where: { taskId }, orderBy: { attemptNumber: "desc" }
+      const task = await tx.keywordResearchTask.findUnique({
+        where: { id: taskId },
+        include: { attempts: { orderBy: { attemptNumber: "desc" }, take: 1 } }
       });
+      if (!task) return { outcome: "not_found" };
+      const latest = task.attempts[0] ?? null;
       if (!latest || latest.attemptNumber !== attemptNumber || latest.state !== "failed") {
         return { outcome: "conflict" };
       }
@@ -839,7 +852,7 @@ export class PrismaKeywordResearchRepository {
       });
       if (updated.count !== 1) return { outcome: "lost" };
       return { outcome: "delayed", retryAt };
-    });
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async terminalize(input, now) {
@@ -850,7 +863,10 @@ export class PrismaKeywordResearchRepository {
     if (input?.artifactS3Key !== undefined && input.artifactS3Key !== null) requireNonempty(input.artifactS3Key);
     if (input?.artifactFingerprint != null) requireFingerprint(input.artifactFingerprint);
     return this._transaction(async (tx) => {
-      const task = await tx.keywordResearchTask.findUnique({ where: { id: taskId } });
+      const task = await tx.keywordResearchTask.findUnique({
+        where: { id: taskId },
+        include: { stage: true }
+      });
       if (!task) return { outcome: "not_found" };
       if (TASK_TERMINAL.has(task.state)) {
         const duplicateSame = task.state === input.state &&
@@ -861,7 +877,7 @@ export class PrismaKeywordResearchRepository {
       }
       if (task.state !== "processing" || task.leaseToken !== token) return { outcome: "lost" };
       if (!(task.leaseExpiresAt instanceof Date) || task.leaseExpiresAt.getTime() <= now.getTime()) return { outcome: "lost" };
-      const updated = await tx.keywordResearchTask.updateMany({
+      const updated = await tx.keywordResearchTask.updateManyAndReturn({
         where: { id: taskId, state: "processing", leaseToken: token, leaseExpiresAt: { gt: now } },
         data: {
           state: input.state, terminalAt: now,
@@ -872,10 +888,10 @@ export class PrismaKeywordResearchRepository {
           updatedAt: now
         }
       });
-      if (updated.count !== 1) return { outcome: "lost" };
+      if (updated.length !== 1) return { outcome: "lost" };
       const counter = input.state === "succeeded" ? "succeededCount"
         : input.state === "skipped" ? "skippedCount" : "failedCount";
-      const stageRow = await tx.keywordResearchStage.findUnique({ where: { id: task.stageId } });
+      const stageRow = task.stage;
       await tx.keywordResearchStage.update({
         where: { id: task.stageId },
         data: { [counter]: { increment: 1 }, terminalCount: { increment: 1 }, updatedAt: now }
@@ -884,8 +900,8 @@ export class PrismaKeywordResearchRepository {
         where: { id: task.stageId, state: "collecting", terminalCount: { gte: stageRow.expectedCount } },
         data: { state: "ready", updatedAt: now }
       });
-      return { outcome: "terminal", task: workerTask(await tx.keywordResearchTask.findUnique({ where: { id: taskId } })) };
-    });
+      return { outcome: "terminal", task: workerTask(updated[0]) };
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async claimAggregator(input, now) {
@@ -918,7 +934,7 @@ export class PrismaKeywordResearchRepository {
         stage.succeededCount + stage.skippedCount + stage.failedCount === stage.expectedCount;
       if (stage.state === "ready") {
         if (!ready) return { outcome: "conflict" };
-        const updated = await tx.keywordResearchStage.updateMany({
+        const updated = await tx.keywordResearchStage.updateManyAndReturn({
           where: { id: stageId, state: "ready" },
           data: {
             state: "aggregating", aggregationOwner: owner, aggregationLeaseToken: token,
@@ -927,11 +943,11 @@ export class PrismaKeywordResearchRepository {
             aggregationAttempt: { increment: 1 }, updatedAt: now
           }
         });
-        if (updated.count !== 1) return { outcome: "lost" };
-        return { outcome: "claimed", stage: workerStage(await tx.keywordResearchStage.findUnique({ where: { id: stageId } })) };
+        if (updated.length !== 1) return { outcome: "lost" };
+        return { outcome: "claimed", stage: workerStage(updated[0]) };
       }
       if (stage.state === "aggregating") {
-        const updated = await tx.keywordResearchStage.updateMany({
+        const updated = await tx.keywordResearchStage.updateManyAndReturn({
           where: { id: stageId, state: "aggregating", aggregationLeaseExpiresAt: { lte: now } },
           data: {
             aggregationOwner: owner, aggregationLeaseToken: token,
@@ -940,11 +956,11 @@ export class PrismaKeywordResearchRepository {
             aggregationAttempt: { increment: 1 }, updatedAt: now
           }
         });
-        if (updated.count !== 1) return { outcome: "lost" };
-        return { outcome: "claimed", stage: workerStage(await tx.keywordResearchStage.findUnique({ where: { id: stageId } })) };
+        if (updated.length !== 1) return { outcome: "lost" };
+        return { outcome: "claimed", stage: workerStage(updated[0]) };
       }
       return { outcome: "conflict" };
-    });
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async heartbeatAggregator(input, now) {
@@ -987,11 +1003,13 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "conflict" };
       }
       const nextStageId = keywordStageId(researchId, input.nextStageName, generation);
-      const nextStage = await tx.keywordResearchStage.findUnique({ where: { id: nextStageId } });
+      const nextStage = await tx.keywordResearchStage.findUnique({
+        where: { id: nextStageId },
+        include: { tasks: { orderBy: { itemKey: "asc" } } }
+      });
       if (!nextStage) return { outcome: "conflict" };
-      const nextTasks = await tx.keywordResearchTask.findMany({ where: { stageId: nextStageId }, orderBy: { itemKey: "asc" } });
-      if (!sameTaskSet(nextTasks, input.nextStageTasks)) return { outcome: "conflict" };
-      return { outcome: "found", stage: workerStage(stage), nextStage: workerStage(nextStage), tasks: nextTasks.map(workerTask) };
+      if (!sameTaskSet(nextStage.tasks, input.nextStageTasks)) return { outcome: "conflict" };
+      return { outcome: "found", stage: workerStage(stage), nextStage: workerStage(nextStage), tasks: nextStage.tasks.map(workerTask) };
     }
     if (stage.state !== "aggregating" || stage.aggregationLeaseToken !== token) return { outcome: "lost" };
     if (!(stage.aggregationLeaseExpiresAt instanceof Date) || stage.aggregationLeaseExpiresAt.getTime() <= now.getTime()) {
@@ -1002,33 +1020,33 @@ export class PrismaKeywordResearchRepository {
         (stage.manifestS3Key !== input.manifestS3Key || stage.manifestFingerprint !== input.manifestFingerprint)) {
       return { outcome: "conflict" };
     }
-    const updated = await tx.keywordResearchStage.updateMany({
+    const updated = await tx.keywordResearchStage.updateManyAndReturn({
       where: { id: stageId, state: "aggregating", aggregationLeaseToken: token, aggregationLeaseExpiresAt: { gt: now } },
       data: {
         manifestS3Key: input.manifestS3Key, manifestFingerprint: input.manifestFingerprint,
         manifestProducedAt: stage.createdAt, state: "completed", completedAt: now, updatedAt: now
       }
     });
-    if (updated.count !== 1) return { outcome: "lost" };
+    if (updated.length !== 1) return { outcome: "lost" };
+    const completedStage = updated[0];
     const nextStageId = keywordStageId(researchId, input.nextStageName, generation);
-    await tx.keywordResearchStage.create({ data: {
+    const nextStage = await tx.keywordResearchStage.create({ data: {
       id: nextStageId, researchId, stage: input.nextStageName, generation,
       expectedCount: input.nextStageTasks.length,
       state: input.nextStageTasks.length === 0 ? "ready" : "collecting",
       createdAt: now, updatedAt: now
     } });
+    let nextTasks = [];
     if (input.nextStageTasks.length) {
-      await tx.keywordResearchTask.createMany({ data: input.nextStageTasks.map((task) => ({
+      nextTasks = await tx.keywordResearchTask.createManyAndReturn({ data: input.nextStageTasks.map((task) => ({
         id: keywordTaskId(nextStageId, task.itemKey), stageId: nextStageId, itemKey: task.itemKey,
         inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
         requestFingerprint: task.requestFingerprint,
         nextAttemptAt: task.nextAttemptAt instanceof Date ? task.nextAttemptAt : null,
         createdAt: now, updatedAt: now
       })) });
+      nextTasks.sort(compareTaskRowsByUnsignedItemKey);
     }
-    const nextStage = await tx.keywordResearchStage.findUnique({ where: { id: nextStageId } });
-    const nextTasks = await tx.keywordResearchTask.findMany({ where: { stageId: nextStageId }, orderBy: { itemKey: "asc" } });
-    const completedStage = await tx.keywordResearchStage.findUnique({ where: { id: stageId } });
     return {
       outcome: "terminal", stage: workerStage(completedStage), nextStage: workerStage(nextStage),
       tasks: nextTasks.map(workerTask)
@@ -1051,7 +1069,7 @@ export class PrismaKeywordResearchRepository {
       researchId, generation, token, manifestS3Key: input.manifestS3Key,
       manifestFingerprint: input.manifestFingerprint,
       stageName: "expansion", nextStageName: "anchor_screen", nextStageTasks: tasks
-    }, now));
+    }, now), SCALE_TRANSACTION_OPTIONS);
   }
 
   async publishShortlist(input, now) {
@@ -1071,7 +1089,7 @@ export class PrismaKeywordResearchRepository {
       researchId, generation, token, manifestS3Key: input.manifestS3Key,
       manifestFingerprint: input.manifestFingerprint,
       stageName: "anchor_screen", nextStageName: "market_overview", nextStageTasks: tasks
-    }, now));
+    }, now), SCALE_TRANSACTION_OPTIONS);
   }
 
   async publishResearchResult(input, now) {
@@ -1102,11 +1120,15 @@ export class PrismaKeywordResearchRepository {
     }
     try {
       return await this._transaction(async (tx) => {
-        const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
+        const research = await tx.keywordResearch.findUnique({
+          where: { id: researchId },
+          include: { stages: { where: { generation } } }
+        });
         if (!research) return { outcome: "not_found" };
         if (research.generation !== generation) return { outcome: "conflict" };
+        const stagesById = new Map(research.stages.map((row) => [row.id, row]));
         const marketStageId = keywordStageId(researchId, "market_overview", generation);
-        const marketStage = await tx.keywordResearchStage.findUnique({ where: { id: marketStageId } });
+        const marketStage = stagesById.get(marketStageId) ?? null;
         if (!marketStage) return { outcome: "conflict" };
         if (research.state === "completed") {
           const selectionMatches = research.selection !== null && typeof research.selection === "object" &&
@@ -1120,12 +1142,8 @@ export class PrismaKeywordResearchRepository {
             : { outcome: "conflict" };
         }
         if (research.state !== "running") return { outcome: "conflict" };
-        const expansionStage = await tx.keywordResearchStage.findUnique({
-          where: { id: keywordStageId(researchId, "expansion", generation) }
-        });
-        const anchorStage = await tx.keywordResearchStage.findUnique({
-          where: { id: keywordStageId(researchId, "anchor_screen", generation) }
-        });
+        const expansionStage = stagesById.get(keywordStageId(researchId, "expansion", generation)) ?? null;
+        const anchorStage = stagesById.get(keywordStageId(researchId, "anchor_screen", generation)) ?? null;
         if (!expansionStage || !anchorStage || expansionStage.state !== "completed" || anchorStage.state !== "completed") {
           return { outcome: "conflict", code: "KEYWORD_STAGES_INCOMPLETE" };
         }
@@ -1164,10 +1182,7 @@ export class PrismaKeywordResearchRepository {
         });
         if (researchUpdated.count !== 1) throw new FinalPublicationAbort("conflict");
         return { outcome: "terminal" };
-      }, {
-        maxWait: FINAL_PUBLICATION_TRANSACTION_MAX_WAIT_MS,
-        timeout: FINAL_PUBLICATION_TRANSACTION_TIMEOUT_MS
-      });
+      }, SCALE_TRANSACTION_OPTIONS);
     } catch (error) {
       if (error instanceof FinalPublicationAbort) return { outcome: error.mapping };
       throw error;
@@ -1197,7 +1212,7 @@ export class PrismaKeywordResearchRepository {
           safeErrorMessage: input.safeErrorMessage ?? null, completedAt: now, updatedAt: now }
       });
       return { outcome: "terminal" };
-    });
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async saveSelection(input, now) {
@@ -1222,7 +1237,7 @@ export class PrismaKeywordResearchRepository {
         return { outcome: "conflict", code: "KEYWORD_SELECTION_REVISION_CONFLICT" };
       }
       return { outcome: "created", selectionRevision: input.expectedRevision + 1 };
-    });
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async createRun(input, now) {
@@ -1240,17 +1255,23 @@ export class PrismaKeywordResearchRepository {
     if (typeof input?.constructRun !== "function" || typeof input?.constructQueries !== "function") conflict();
     try {
       return await this._transaction(async (tx) => {
-        const research = await tx.keywordResearch.findUnique({ where: { id: researchId } });
-        if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
-        const existingHandoff = await tx.keywordResearchHandoff.findUnique({
-          where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } }
+        const research = await tx.keywordResearch.findUnique({
+          where: { id: researchId },
+          include: {
+            handoffs: {
+              where: { clientRequestId: input.clientRequestId },
+              include: { run: true }
+            }
+          }
         });
+        if (!research || research.ownerId !== ownerId) return { outcome: "not_found" };
+        const existingHandoff = research.handoffs[0] ?? null;
         if (existingHandoff) {
           if (existingHandoff.selectionFingerprint !== input.selectionFingerprint ||
               existingHandoff.selectionRevision !== input.expectedSelectionRevision) {
             return { outcome: "conflict" };
           }
-          const run = await tx.run.findUnique({ where: { id: existingHandoff.runId } });
+          const run = existingHandoff.run;
           return run ? { outcome: "found", run } : { outcome: "conflict" };
         }
         if (research.state !== "completed") return { outcome: "conflict", code: "KEYWORD_RESEARCH_NOT_COMPLETED" };
@@ -1276,7 +1297,7 @@ export class PrismaKeywordResearchRepository {
           runId, createdAt: now
         } });
         return { outcome: "created", run };
-      });
+      }, SCALE_TRANSACTION_OPTIONS);
     } catch (error) {
       if (error instanceof RunHandoffAbort) {
         return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_INVALID" };
@@ -1285,26 +1306,29 @@ export class PrismaKeywordResearchRepository {
         const originalError = error;
         return await this._transaction(async (tx) => {
           const handoff = await tx.keywordResearchHandoff.findUnique({
-            where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } }
+            where: { researchId_clientRequestId: { researchId, clientRequestId: input.clientRequestId } },
+            include: { run: true }
           });
           if (!handoff) throw originalError;
           if (handoff.selectionFingerprint !== input.selectionFingerprint ||
               handoff.selectionRevision !== input.expectedSelectionRevision) {
             return { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_CONFLICT" };
           }
-          const run = await tx.run.findUnique({ where: { id: handoff.runId } });
+          const run = handoff.run;
           return run ? { outcome: "found", run } : { outcome: "conflict", code: "KEYWORD_RUN_HANDOFF_CONFLICT" };
-        });
+        }, SHORT_TRANSACTION_OPTIONS);
       }
       throw error;
     }
   }
 
-  async recover(now) {
+  async recover(now, { limit } = {}) {
     requireNow(now);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) conflict();
     return this._transaction(async (tx) => {
       const initializations = await tx.keywordResearch.findMany({
         where: { state: "queued", stages: { none: { stage: "expansion" } } },
+        take: limit,
         orderBy: { id: "asc" }
       });
       const tasks = await tx.keywordResearchTask.findMany({
@@ -1315,6 +1339,7 @@ export class PrismaKeywordResearchRepository {
           ]
         },
         include: { stage: true },
+        take: limit,
         orderBy: { id: "asc" }
       });
       const stages = await tx.keywordResearchStage.findMany({
@@ -1325,14 +1350,47 @@ export class PrismaKeywordResearchRepository {
           ]
         },
         include: { tasks: { orderBy: { itemKey: "asc" } } },
+        take: limit,
         orderBy: { id: "asc" }
       });
+      const candidates = [];
+      for (const research of initializations) {
+        candidates.push({
+          rank: 2, id: research.id, eligibility: research.createdAt, kind: "initialization", row: research
+        });
+      }
+      for (const task of tasks) {
+        if (!task.stage) continue;
+        const eligibility = task.state === "processing"
+          ? task.leaseExpiresAt
+          : task.nextAttemptAt ?? task.updatedAt;
+        candidates.push({ rank: 0, id: task.id, eligibility, kind: "task", row: task });
+      }
+      for (const stage of stages) {
+        const eligibility = stage.state === "ready" ? stage.updatedAt : stage.aggregationLeaseExpiresAt;
+        candidates.push({ rank: 1, id: stage.id, eligibility, kind: "stage", row: stage });
+      }
+      candidates.sort((left, right) => {
+        const byEligibility = left.eligibility.getTime() - right.eligibility.getTime();
+        if (byEligibility !== 0) return byEligibility;
+        if (left.rank !== right.rank) return left.rank - right.rank;
+        return compareUnsignedUtf8(left.id, right.id);
+      });
+      const selected = candidates.slice(0, limit);
+      const initializationRows = [];
+      const taskRows = [];
+      const stageRows = [];
+      for (const candidate of selected) {
+        if (candidate.kind === "initialization") initializationRows.push(candidate.row);
+        else if (candidate.kind === "task") taskRows.push(candidate.row);
+        else stageRows.push(candidate.row);
+      }
       return {
         outcome: "found",
-        initializations: initializations.map((research) => ({
+        initializations: initializationRows.map((research) => ({
           researchId: research.id, generation: research.generation
         })),
-        taskDispatches: tasks.filter((task) => task.stage).map((task) => ({
+        taskDispatches: taskRows.map((task) => ({
           researchId: task.stage.researchId,
           generation: task.stage.generation,
           stage: task.stage.stage,
@@ -1343,7 +1401,7 @@ export class PrismaKeywordResearchRepository {
           endpointKey: task.endpointKey,
           requestFingerprint: task.requestFingerprint
         })),
-        aggregateChecks: stages.map((stage) => ({
+        aggregateChecks: stageRows.map((stage) => ({
           researchId: stage.researchId,
           generation: stage.generation,
           stage: stage.stage,
@@ -1353,7 +1411,7 @@ export class PrismaKeywordResearchRepository {
           })
         }))
       };
-    });
+    }, SCALE_TRANSACTION_OPTIONS);
   }
 
   async cacheRead(input, now) {
@@ -1398,21 +1456,33 @@ export class PrismaKeywordResearchRepository {
     const minGapMs = input?.minGapMs ?? THROTTLE_MIN_GAP_MS;
     if (!Number.isInteger(minGapMs) || minGapMs < THROTTLE_MIN_GAP_MS) conflict();
     return this._transaction(async (tx) => {
-      const claimed = await tx.$queryRaw`
-        UPDATE "KeywordProviderThrottle"
-        SET "nextAllowedAt" = now() + make_interval(secs => ${minGapMs / 1000}::float8), "updatedAt" = now()
-        WHERE "provider" = ${provider} AND "nextAllowedAt" <= now()
-        RETURNING "nextAllowedAt"`;
-      if (claimed.length === 1) return { outcome: "claimed", nextAllowedAt: claimed[0].nextAllowedAt };
-      const inserted = await tx.$queryRaw`
-        INSERT INTO "KeywordProviderThrottle" ("provider", "nextAllowedAt", "updatedAt")
-        VALUES (${provider}, now() + make_interval(secs => ${minGapMs / 1000}::float8), now())
-        ON CONFLICT ("provider") DO NOTHING
-        RETURNING "nextAllowedAt"`;
-      if (inserted.length === 1) return { outcome: "claimed", nextAllowedAt: inserted[0].nextAllowedAt };
-      const [existing] = await tx.$queryRaw`
-        SELECT "nextAllowedAt" FROM "KeywordProviderThrottle" WHERE "provider" = ${provider}`;
-      return { outcome: "delayed", retryAt: existing?.nextAllowedAt ?? new Date() };
-    });
+      const [row] = await tx.$queryRaw`
+        WITH "inserted" AS (
+          INSERT INTO "KeywordProviderThrottle" ("provider", "nextAllowedAt", "updatedAt")
+          VALUES (${provider}, now() + make_interval(secs => ${minGapMs / 1000}::float8), now())
+          ON CONFLICT ("provider") DO NOTHING
+          RETURNING "nextAllowedAt"
+        ), "updated" AS (
+          UPDATE "KeywordProviderThrottle"
+          SET "nextAllowedAt" = now() + make_interval(secs => ${minGapMs / 1000}::float8), "updatedAt" = now()
+          WHERE "provider" = ${provider}
+            AND "nextAllowedAt" <= now()
+            AND NOT EXISTS (SELECT 1 FROM "inserted")
+          RETURNING "nextAllowedAt"
+        )
+        SELECT "claimStatus", "nextAllowedAt" FROM (
+          SELECT 'claimed' AS "claimStatus", "nextAllowedAt" FROM "inserted"
+          UNION ALL
+          SELECT 'claimed' AS "claimStatus", "nextAllowedAt" FROM "updated"
+          UNION ALL
+          SELECT 'delayed' AS "claimStatus", "nextAllowedAt" FROM "KeywordProviderThrottle"
+          WHERE "provider" = ${provider}
+            AND NOT EXISTS (SELECT 1 FROM "inserted")
+            AND NOT EXISTS (SELECT 1 FROM "updated")
+        ) AS "claimState"`;
+      return row?.claimStatus === "claimed"
+        ? { outcome: "claimed", nextAllowedAt: row.nextAllowedAt }
+        : { outcome: "delayed", retryAt: row?.nextAllowedAt ?? new Date() };
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 }

@@ -38,6 +38,10 @@ const DISPATCHER_METHODS = ["sendMany", "sendOne"];
 const SCHEMA_ABSENCE_QUERY = "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1";
 const SEED_KEYWORDS = ["insulated water bottle", "stainless lunch box", "silicone baking mat", "glass storage jar", "reusable straw set"];
 const NEON_AUTH_COOKIE_SECRET_VALUE = "kiw6-local-e2e-cookie-secret-0000000000000000000000";
+const NEON_AUTH_SESSION_COOKIE_NAME = "__Secure-neon-auth.session_token";
+const NEON_AUTH_SESSION_COOKIE_VALUE = "kiw6-local-session-token";
+const AUTH_SESSION_CREATED_AT = "2026-08-21T00:00:00.000Z";
+const AUTH_SESSION_EXPIRES_AT = "2099-01-01T00:00:00.000Z";
 const BACKEND_CONFIG = Object.freeze({
   port: 0,
   host: "127.0.0.1",
@@ -479,10 +483,32 @@ export async function createKeywordIntelligenceE2eHarness({
     else if (owner === null) authMode = "none";
     else throw new preflightError("unsupported auth owner");
   };
+  const authSessionBody = () => {
+    if (authMode === "none") return null;
+    const userId = authMode === "owner-a" ? ownerId : otherOwnerId;
+    return {
+      session: {
+        id: "kiw6-session-" + authMode,
+        userId,
+        token: NEON_AUTH_SESSION_COOKIE_VALUE,
+        expiresAt: AUTH_SESSION_EXPIRES_AT,
+        createdAt: AUTH_SESSION_CREATED_AT,
+        updatedAt: AUTH_SESSION_CREATED_AT
+      },
+      user: {
+        id: userId,
+        name: authMode === "owner-a" ? "KIW6 Owner A" : "KIW6 Owner B",
+        email: authMode + "@kiw6.invalid",
+        emailVerified: true,
+        createdAt: AUTH_SESSION_CREATED_AT,
+        updatedAt: AUTH_SESSION_CREATED_AT
+      }
+    };
+  };
   const authServer = http.createServer((request, response) => {
     const requestUrl = new URL(request.url || "/", "http://localhost");
     if (request.method === "GET" && requestUrl.pathname === "/get-session") {
-      const body = authMode === "none" ? null : { user: { id: authMode === "owner-a" ? ownerId : otherOwnerId } };
+      const body = authSessionBody();
       record({ kind: "auth", op: "get-session", at: nowMs(), mode: authMode, status: 200 });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify(body));
@@ -896,5 +922,10 @@ export async function createKeywordIntelligenceE2eHarness({
     NEON_AUTH_COOKIE_SECRET: NEON_AUTH_COOKIE_SECRET_VALUE
   });
 
-  return Object.freeze({ frontendEnv, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, drainDownstream, readDurableState, injectCapturedDefect, close });
+  const browserSessionCookie = Object.freeze({
+    name: NEON_AUTH_SESSION_COOKIE_NAME,
+    value: NEON_AUTH_SESSION_COOKIE_VALUE
+  });
+
+  return Object.freeze({ frontendEnv, browserSessionCookie, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, drainDownstream, readDurableState, injectCapturedDefect, close });
 }

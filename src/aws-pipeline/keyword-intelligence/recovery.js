@@ -28,8 +28,11 @@ export async function recoverKeywordWork({ now, limit = 100 }, runtime) {
     throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
   }
   const queueUrl = queueUrlOf(runtime);
-  const recovered = await runtime.repository.recover(now);
+  const recovered = await runtime.repository.recover(now, { limit });
   if (recovered.outcome !== "found") throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  if (recovered.initializations.length + recovered.taskDispatches.length + recovered.aggregateChecks.length > limit) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
 
   let sent = 0;
   for (const initialization of recovered.initializations) {

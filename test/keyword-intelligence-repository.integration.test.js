@@ -281,7 +281,8 @@ async function withPublicationTransactionProbe(client, { timeoutOverride } = {},
               if (!isFinalPublication) return value.apply(target, [query]);
               delayed = true;
               observation.delayActivated = true;
-              return tx.$queryRawUnsafe("SELECT pg_sleep(21.000)").then(() => value.apply(target, [query]));
+              return tx.$queryRawUnsafe("SELECT ''::text AS slept FROM pg_sleep(21.000)")
+                .then(() => value.apply(target, [query]));
             };
           }
           return typeof value === "function" ? value.bind(target) : value;
@@ -2061,5 +2062,751 @@ test("SCN-KI-023: same-token task heartbeat at original expiry +60,000ms returns
   assert.deepEqual(await db.keywordResearch.findUnique({ where: { id: resA } }), beforeA.research,
     "research row unchanged after stale A aggregation heartbeat");
 
+  await db.$disconnect();
+});
+
+const W6_SCALE_PROFILE = { maxWait: 5_000, timeout: 30_000 };
+const W6_SHORT_PROFILE = { maxWait: 5_000, timeout: 15_000 };
+const W6_COUNTED_MODELS = new Set(["keywordResearch", "keywordResearchStage", "keywordResearchTask",
+  "keywordResearchCache", "keywordResearchProviderAttempt", "keywordResearchHandoff", "run", "runQuery"]);
+const W6_DELEGATE_OPERATIONS = new Set(["findUnique", "findFirst", "findMany", "create", "createMany",
+  "createManyAndReturn", "update", "updateMany", "updateManyAndReturn", "delete", "deleteMany",
+  "count", "aggregate", "groupBy", "upsert"]);
+
+function createOperationCounter(db) {
+  const state = { delegateOps: 0, rawStatements: 0, opLog: [], transactionOptions: [] };
+  const sqlTextOf = (argument) => {
+    if (typeof argument === "string") return argument;
+    if (Array.isArray(argument?.strings)) return argument.strings.join(" ");
+    return String(argument?.sql ?? "");
+  };
+  const wrapDelegate = (delegate, modelName) => new Proxy(delegate, {
+    get(target, prop) {
+      if (prop === "then") return undefined;
+      const value = target[prop];
+      if (typeof value !== "function") return value;
+      if (W6_DELEGATE_OPERATIONS.has(prop)) {
+        return (...args) => {
+          state.delegateOps += 1;
+          state.opLog.push(`${modelName}.${prop}`);
+          return value.apply(target, args);
+        };
+      }
+      return value.bind(target);
+    }
+  });
+  const wrapOperations = (target) => new Proxy(target, {
+    get(t, prop) {
+      if (prop === "then") return undefined;
+      if (prop === "$transaction") {
+        const real = t.$transaction.bind(t);
+        return (work, options) => {
+          state.transactionOptions.push(options === undefined ? null : structuredClone(options));
+          return real((tx) => work(wrapOperations(tx)), options);
+        };
+      }
+      if (prop === "$queryRaw" || prop === "$queryRawUnsafe" ||
+          prop === "$executeRaw" || prop === "$executeRawUnsafe") {
+        const real = t[prop].bind(t);
+        return (...args) => {
+          if (!sqlTextOf(args[0]).includes("set_config")) state.rawStatements += 1;
+          return real(...args);
+        };
+      }
+      const value = t[prop];
+      if (W6_COUNTED_MODELS.has(prop) && value && typeof value === "object") {
+        return wrapDelegate(value, String(prop));
+      }
+      return typeof value === "function" ? value.bind(t) : value;
+    }
+  });
+  return {
+    client: wrapOperations(db),
+    reset() {
+      state.delegateOps = 0;
+      state.rawStatements = 0;
+      state.opLog.length = 0;
+      state.transactionOptions.length = 0;
+    },
+    snapshot() {
+      return {
+        delegateOps: state.delegateOps,
+        rawStatements: state.rawStatements,
+        opLog: [...state.opLog],
+        transactionOptions: state.transactionOptions.map((options) => structuredClone(options))
+      };
+    }
+  };
+}
+
+function clientWithOneExtraDelegateRead(client, modelName) {
+  const wrap = (target) => new Proxy(target, {
+    get(t, prop) {
+      if (prop === "then") return undefined;
+      const value = t[prop];
+      if (prop === "$transaction" && typeof value === "function") {
+        return (work, options) => value.call(t, (tx) => work(wrap(tx)), options);
+      }
+      if (prop === modelName && value && typeof value === "object") {
+        return new Proxy(value, {
+          get(delegate, delegateProp) {
+            if (delegateProp === "then") return undefined;
+            const fn = delegate[delegateProp];
+            if (delegateProp === "findUnique" && typeof fn === "function") {
+              return (...args) => Promise.resolve(fn.apply(delegate, args))
+                .then(() => fn.apply(delegate, args));
+            }
+            return typeof fn === "function" ? fn.bind(delegate) : fn;
+          }
+        });
+      }
+      return typeof value === "function" ? value.bind(t) : value;
+    }
+  });
+  return wrap(client);
+}
+
+test("SCN-KI-043: set-based transaction ceilings and bounded recovery", { skip: !enabled }, async (t) => {
+  const requiredCases = ["W6-DB-03", "W6-DB-04", "W6-DB-05", "W6-DB-06", "W6-DB-07"];
+  const controlCases = ["W6-NC-16"];
+  const unsignedSort = (left, right) => Buffer.from(left).compare(Buffer.from(right));
+  const sortedLfDigest = (members) => createHash("sha256").update(
+    [...members].sort(unsignedSort).join("\n") + "\n"
+  ).digest("hex");
+  assert.equal(new Set(requiredCases).size, requiredCases.length);
+  assert.equal(new Set(controlCases).size, controlCases.length);
+  assert.equal(sortedLfDigest(requiredCases), "5e80c31a18622c0466176aa8668ff82e00ef6e90a15484eb1fc2710f0ce14261");
+
+  const registered = [];
+  const registeredControls = [];
+  const executed = [];
+  const executedControls = [];
+
+  const { schema, db, repo } = await setupRepo(t, "kiw6_c115");
+  const [schemaWitness] = await db.$queryRawUnsafe("SELECT current_schema()::text AS current");
+  assert.equal(schemaWitness.current, schema, "SCN-KI-043 writes only inside its disposable schema");
+  assert.notEqual(schemaWitness.current, "public", "SCN-KI-043 never targets public");
+  const counter = createOperationCounter(db);
+  const measuredRepo = new PrismaKeywordResearchRepository(counter.client);
+
+  const assertScaleTransactions = (label) => {
+    const { transactionOptions } = counter.snapshot();
+    assert.ok(transactionOptions.length >= 1, `${label} recorded its transactions`);
+    for (const options of transactionOptions) assert.deepEqual(options, W6_SCALE_PROFILE, `${label} scale profile`);
+  };
+  const assertDelegateLog = (expectedLog, label) => {
+    assert.deepEqual(counter.snapshot().opLog, expectedLog, `${label} delegate operations`);
+  };
+  const assertDelegateCeiling = (ceiling, label) => {
+    assert.ok(counter.snapshot().delegateOps <= ceiling, `${label} at most ${ceiling} delegate operations`);
+  };
+
+  await t.test("W6-DB-06 bounded recovery: three reads, deterministic first 100, prefix bound", async () => {
+    registered.push("W6-DB-06");
+    const base = NOW.getTime();
+    const atSecond = (second) => new Date(base + second * 1000);
+    const initId = (index) => `kr_w6db06init${String(index).padStart(14, "0")}`;
+    const taskResearchId = (index) => `kr_w6db06task${String(index).padStart(14, "0")}`;
+    const stageResearchId = (index) => `kr_w6db06stg${String(index).padStart(15, "0")}`;
+    const researchRows = [];
+    for (let index = 0; index < 40; index += 1) {
+      researchRows.push({ id: initId(index), ownerId: "owner_kiw1", state: "queued", generation: 1,
+        contractVersion: 1, configSnapshot: {}, configFingerprint: fp(`w6db06-init-${index}`),
+        seeds: ["w6db06 seed"], markets: NINE_MARKETS, progress: {}, selectionRevision: 0,
+        createdAt: atSecond(81 + index), updatedAt: atSecond(81 + index) });
+    }
+    for (let index = 0; index < 40; index += 1) {
+      researchRows.push({ id: taskResearchId(index), ownerId: "owner_kiw1", state: "running",
+        generation: 1, contractVersion: 1, configSnapshot: {}, configFingerprint: fp(`w6db06-task-${index}`),
+        seeds: ["w6db06 seed"], markets: NINE_MARKETS, progress: {}, selectionRevision: 0,
+        createdAt: NOW, updatedAt: NOW });
+    }
+    for (let index = 0; index < 40; index += 1) {
+      researchRows.push({ id: stageResearchId(index), ownerId: "owner_kiw1", state: "running",
+        generation: 1, contractVersion: 1, configSnapshot: {}, configFingerprint: fp(`w6db06-stage-${index}`),
+        seeds: ["w6db06 seed"], markets: NINE_MARKETS, progress: {}, selectionRevision: 0,
+        createdAt: NOW, updatedAt: NOW });
+    }
+    const stageRows = [];
+    const taskRows = [];
+    const taskPlan = [];
+    for (let source = 0; source < 40; source += 1) {
+      const stageId = keywordStageId(taskResearchId(source), "expansion", 1);
+      taskPlan.push({ source, stageId, taskId: keywordTaskId(stageId, "0:suggestions") });
+    }
+    taskPlan.sort((left, right) => unsignedSort(left.taskId, right.taskId));
+    const expectedTaskIds = [];
+    taskPlan.forEach((plan, taskRank) => {
+      expectedTaskIds.push(plan.taskId);
+      stageRows.push({ id: plan.stageId, researchId: taskResearchId(plan.source), stage: "expansion",
+        generation: 1, expectedCount: 1, state: "collecting", createdAt: NOW, updatedAt: NOW });
+      taskRows.push({ id: plan.taskId, stageId: plan.stageId, itemKey: "0:suggestions",
+        inputFingerprint: fp(`w6db06-task-input-${plan.source}`), endpointKey: "keyword_suggestions",
+        requestFingerprint: fp(`w6db06-task-request-${plan.source}`), nextAttemptAt: atSecond(1 + taskRank),
+        state: "pending", attemptCount: 0, dispatchCount: 0, createdAt: NOW, updatedAt: NOW });
+    });
+    const readyPlan = [];
+    for (let source = 0; source < 20; source += 1) {
+      readyPlan.push({ source, stageId: keywordStageId(stageResearchId(source), "anchor_screen", 1) });
+    }
+    readyPlan.sort((left, right) => unsignedSort(left.stageId, right.stageId));
+    const expectedReadyStageIds = [];
+    readyPlan.forEach((plan, readyRank) => {
+      expectedReadyStageIds.push(plan.stageId);
+      stageRows.push({ id: plan.stageId, researchId: stageResearchId(plan.source), stage: "anchor_screen",
+        generation: 1, expectedCount: 0, state: "ready", createdAt: NOW, updatedAt: atSecond(41 + readyRank) });
+    });
+    const expiredPlan = [];
+    for (let source = 20; source < 40; source += 1) {
+      expiredPlan.push({ source, stageId: keywordStageId(stageResearchId(source), "market_overview", 1) });
+    }
+    expiredPlan.sort((left, right) => unsignedSort(left.stageId, right.stageId));
+    const expectedExpiredStageIds = [];
+    expiredPlan.forEach((plan, expiredRank) => {
+      expectedExpiredStageIds.push(plan.stageId);
+      stageRows.push({ id: plan.stageId, researchId: stageResearchId(plan.source), stage: "market_overview",
+        generation: 1, expectedCount: 0, state: "aggregating",
+        aggregationLeaseExpiresAt: atSecond(61 + expiredRank), createdAt: NOW, updatedAt: NOW });
+    });
+    await db.keywordResearch.createMany({ data: researchRows });
+    await db.keywordResearchStage.createMany({ data: stageRows });
+    await db.keywordResearchTask.createMany({ data: taskRows });
+    const recoverNow = atSecond(200);
+
+    counter.reset();
+    const recovered = await measuredRepo.recover(recoverNow, { limit: 100 });
+    assert.equal(recovered.outcome, "found");
+    assert.equal(counter.snapshot().delegateOps, 3, "W6-DB-06 exactly three bounded delegate reads");
+    assertDelegateLog(["keywordResearch.findMany", "keywordResearchTask.findMany",
+      "keywordResearchStage.findMany"], "W6-DB-06 recovery reads");
+    assertScaleTransactions("W6-DB-06 recovery");
+    assert.equal(recovered.taskDispatches.length, 40);
+    assert.equal(recovered.aggregateChecks.length, 40);
+    assert.equal(recovered.initializations.length, 20);
+    assert.equal(recovered.taskDispatches.length + recovered.aggregateChecks.length +
+      recovered.initializations.length, 100, "W6-DB-06 returns exactly the bounded first 100 members");
+    assert.deepEqual(recovered.taskDispatches.map(({ taskId }) => taskId), expectedTaskIds,
+      "W6-DB-06 task members follow ascending eligibility order");
+    assert.deepEqual(recovered.aggregateChecks.map(({ stageId }) => stageId),
+      [...expectedReadyStageIds, ...expectedExpiredStageIds],
+      "W6-DB-06 stage members order ready then expired-aggregation by eligibility");
+    assert.deepEqual(recovered.initializations.map(({ researchId }) => researchId),
+      Array.from({ length: 20 }, (_, index) => initId(index)),
+      "W6-DB-06 returns only the first twenty eligible initializations");
+    assert.ok(!recovered.initializations.some(({ researchId }) => researchId === initId(20)),
+      "W6-DB-06 never returns the 101st member");
+
+    counter.reset();
+    const prefix = await measuredRepo.recover(recoverNow, { limit: 7 });
+    assert.equal(prefix.outcome, "found");
+    assert.equal(counter.snapshot().delegateOps, 3, "W6-DB-06 prefix recovery also uses three reads");
+    assertDelegateLog(["keywordResearch.findMany", "keywordResearchTask.findMany",
+      "keywordResearchStage.findMany"], "W6-DB-06 prefix recovery reads");
+    assertScaleTransactions("W6-DB-06 prefix recovery");
+    assert.deepEqual(prefix.taskDispatches.map(({ taskId }) => taskId), expectedTaskIds.slice(0, 7),
+      "W6-DB-06 smaller limit returns the exact merged-order prefix");
+    assert.equal(prefix.aggregateChecks.length, 0);
+    assert.equal(prefix.initializations.length, 0);
+    executed.push("W6-DB-06");
+  });
+
+  await t.test("W6-DB-03 provider ledger: fenced attempts, settlement ceilings, rollback", async () => {
+    registered.push("W6-DB-03");
+    const researchId = newResearchId();
+    await freshResearch(repo, researchId, "owner_kiw1", 2);
+    const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+      tasks: expansionTasksFor(2) }, NOW);
+    const stageId = initialized.stage.id;
+    const taskA = keywordTaskId(stageId, "0:suggestions");
+    const taskB = keywordTaskId(stageId, "0:related");
+    const taskC = keywordTaskId(stageId, "1:suggestions");
+    const taskD = keywordTaskId(stageId, "1:related");
+    const rowA = await db.keywordResearchTask.findUnique({ where: { id: taskA } });
+    const rowB = await db.keywordResearchTask.findUnique({ where: { id: taskB } });
+    const rowC = await db.keywordResearchTask.findUnique({ where: { id: taskC } });
+    const rowD = await db.keywordResearchTask.findUnique({ where: { id: taskD } });
+    const cacheEntryFor = (row, normalized) => ({ cacheKey: `kw:w6db03:${row.requestFingerprint.slice(0, 12)}`,
+      endpointKey: row.endpointKey, contractVersion: 1, normalizedResponse: normalized,
+      resultFingerprint: fp(`w6db03-result-${row.requestFingerprint}`), ttlSeconds: 604800 });
+    const tokenA = newLeaseToken();
+    await repo.claim({ taskId: taskA, owner: "w", token: tokenA }, NOW);
+
+    counter.reset();
+    assert.equal((await measuredRepo.recordAttempt({ taskId: taskA, token: newLeaseToken(),
+      requestFingerprint: rowA.requestFingerprint, reservationCostUsd: "0.01560000",
+      maxCostPerResearchUsd: "3.00000000" }, NOW)).outcome, "lost");
+    assertDelegateCeiling(4, "W6-DB-03 recordAttempt fence loss");
+    assertDelegateLog(["keywordResearchTask.findUnique"], "W6-DB-03 recordAttempt fence loss");
+    assertScaleTransactions("W6-DB-03 recordAttempt fence loss");
+    assert.equal(await db.keywordResearchProviderAttempt.count({ where: { taskId: taskA } }), 0,
+      "W6-DB-03 fence loss creates no attempt row");
+
+    counter.reset();
+    const created = await measuredRepo.recordAttempt({ taskId: taskA, token: tokenA,
+      requestFingerprint: rowA.requestFingerprint, reservationCostUsd: "0.01560000",
+      maxCostPerResearchUsd: "3.00000000" }, NOW);
+    assert.equal(created.outcome, "created");
+    assert.equal(created.mayCall, true);
+    assert.equal(created.attempt.attemptNumber, 1);
+    assertDelegateCeiling(4, "W6-DB-03 recordAttempt created");
+    assertDelegateLog(["keywordResearchTask.findUnique", "keywordResearchProviderAttempt.create",
+      "keywordResearchTask.update"], "W6-DB-03 recordAttempt created");
+    assert.equal(counter.snapshot().rawStatements, 1,
+      "W6-DB-03 recordAttempt exposure aggregate is one statement");
+    assertScaleTransactions("W6-DB-03 recordAttempt created");
+
+    counter.reset();
+    const settled = await measuredRepo.settleAttempt({ taskId: taskA, token: tokenA, attemptNumber: 1,
+      state: "succeeded", providerCostUsd: "0.01200000",
+      resultFingerprint: fp(`w6db03-result-${rowA.requestFingerprint}`),
+      cacheEntry: cacheEntryFor(rowA, { keywords: ["w6db03-alpha"] }) }, NOW);
+    assert.equal(settled.outcome, "terminal");
+    assert.equal(settled.fenceActive, true);
+    assertDelegateCeiling(4, "W6-DB-03 settleAttempt success");
+    assertDelegateLog(["keywordResearchProviderAttempt.findUnique",
+      "keywordResearchProviderAttempt.updateManyAndReturn", "keywordResearchCache.findUnique",
+      "keywordResearchCache.create"], "W6-DB-03 settleAttempt success");
+    assertScaleTransactions("W6-DB-03 settleAttempt success");
+    const attemptRowA = await db.keywordResearchProviderAttempt.findUnique({
+      where: { taskId_attemptNumber: { taskId: taskA, attemptNumber: 1 } } });
+    assert.equal(attemptRowA.state, "succeeded");
+    assert.equal(Number(attemptRowA.providerCostUsd).toFixed(8), "0.01200000");
+    const cacheRowA = await db.keywordResearchCache.findUnique({
+      where: { requestFingerprint: rowA.requestFingerprint } });
+    assert.ok(cacheRowA, "W6-DB-03 success settlement persists the cache row");
+    assert.equal(cacheRowA.contractVersion, 1);
+    assert.equal(cacheRowA.expiresAt.getTime(), NOW.getTime() + 604800 * 1000);
+
+    counter.reset();
+    assert.equal((await measuredRepo.settleAttempt({ taskId: taskA, token: tokenA, attemptNumber: 1,
+      state: "succeeded", providerCostUsd: "0.01200000",
+      resultFingerprint: fp(`w6db03-result-${rowA.requestFingerprint}`),
+      cacheEntry: cacheEntryFor(rowA, { keywords: ["w6db03-alpha"] }) }, NOW)).outcome, "found");
+    assertDelegateCeiling(4, "W6-DB-03 settleAttempt exact replay");
+    assertDelegateLog(["keywordResearchProviderAttempt.findUnique", "keywordResearchCache.findUnique"],
+      "W6-DB-03 settleAttempt exact replay");
+    assertScaleTransactions("W6-DB-03 settleAttempt exact replay");
+    assert.equal(await db.keywordResearchProviderAttempt.count({ where: { taskId: taskA } }), 1,
+      "W6-DB-03 exact replay creates no second attempt row");
+
+    const tokenB = newLeaseToken();
+    await repo.claim({ taskId: taskB, owner: "w", token: tokenB }, NOW);
+    await repo.recordAttempt({ taskId: taskB, token: tokenB, requestFingerprint: rowB.requestFingerprint,
+      reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+    counter.reset();
+    const failed = await measuredRepo.settleAttempt({ taskId: taskB, token: tokenB, attemptNumber: 1,
+      state: "failed", providerCostUsd: "0.01200000", safeErrorCode: "KEYWORD_PROVIDER_TASK_FAILED",
+      cacheEntry: null }, NOW);
+    assert.equal(failed.outcome, "terminal");
+    assert.equal(failed.fenceActive, true);
+    assertDelegateCeiling(4, "W6-DB-03 settleAttempt failure");
+    assertDelegateLog(["keywordResearchProviderAttempt.findUnique",
+      "keywordResearchProviderAttempt.updateManyAndReturn"], "W6-DB-03 settleAttempt failure");
+    assertScaleTransactions("W6-DB-03 settleAttempt failure");
+    const attemptRowB = await db.keywordResearchProviderAttempt.findUnique({
+      where: { taskId_attemptNumber: { taskId: taskB, attemptNumber: 1 } } });
+    assert.equal(attemptRowB.state, "failed");
+    assert.equal(attemptRowB.safeErrorCode, "KEYWORD_PROVIDER_TASK_FAILED");
+    assert.equal(attemptRowB.ambiguousAfter, null);
+    assert.equal(await db.keywordResearchCache.count({ where: { requestFingerprint: rowB.requestFingerprint } }),
+      0, "W6-DB-03 failure settlement writes no cache row");
+
+    const tokenC = newLeaseToken();
+    await repo.claim({ taskId: taskC, owner: "w", token: tokenC }, NOW);
+    await repo.recordAttempt({ taskId: taskC, token: tokenC, requestFingerprint: rowC.requestFingerprint,
+      reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+    counter.reset();
+    const lostSettle = await measuredRepo.settleAttempt({ taskId: taskC, token: newLeaseToken(),
+      attemptNumber: 1, state: "succeeded", providerCostUsd: "0.01200000",
+      resultFingerprint: fp(`w6db03-result-${rowC.requestFingerprint}`),
+      cacheEntry: cacheEntryFor(rowC, { keywords: ["w6db03-gamma"] }) }, NOW);
+    assert.equal(lostSettle.outcome, "lost");
+    assert.equal(lostSettle.fenceActive, false);
+    assertDelegateCeiling(4, "W6-DB-03 settleAttempt fence loss");
+    assertDelegateLog(["keywordResearchProviderAttempt.findUnique",
+      "keywordResearchProviderAttempt.updateManyAndReturn", "keywordResearchCache.findUnique",
+      "keywordResearchCache.create"], "W6-DB-03 settleAttempt fence loss");
+    assertScaleTransactions("W6-DB-03 settleAttempt fence loss");
+    const attemptRowC = await db.keywordResearchProviderAttempt.findUnique({
+      where: { taskId_attemptNumber: { taskId: taskC, attemptNumber: 1 } } });
+    assert.equal(attemptRowC.state, "succeeded",
+      "W6-DB-03 fence loss still settles attempt cost atomically");
+    assert.equal(Number(attemptRowC.providerCostUsd).toFixed(8), "0.01200000");
+    assert.ok(await db.keywordResearchCache.findUnique({
+      where: { requestFingerprint: rowC.requestFingerprint } }),
+      "W6-DB-03 fence loss still persists the normalized cache row");
+
+    const tokenD = newLeaseToken();
+    await repo.claim({ taskId: taskD, owner: "w", token: tokenD }, NOW);
+    await repo.recordAttempt({ taskId: taskD, token: tokenD, requestFingerprint: rowD.requestFingerprint,
+      reservationCostUsd: "0.01560000", maxCostPerResearchUsd: "3.00000000" }, NOW);
+    const beforeRollback = {
+      attempt: await db.keywordResearchProviderAttempt.findUnique({
+        where: { taskId_attemptNumber: { taskId: taskD, attemptNumber: 1 } } }),
+      task: await db.keywordResearchTask.findUnique({ where: { id: taskD } })
+    };
+    const originalTransaction = db.$transaction;
+    const rollbackRepo = new PrismaKeywordResearchRepository(clientWithInjectedFailure(db, (path, args) =>
+      path === "keywordResearchCache.create" && args[0]?.data?.requestFingerprint === rowD.requestFingerprint));
+    try {
+      await assert.rejects(() => rollbackRepo.settleAttempt({ taskId: taskD, token: tokenD, attemptNumber: 1,
+        state: "succeeded", providerCostUsd: "0.01200000",
+        resultFingerprint: fp(`w6db03-result-${rowD.requestFingerprint}`),
+        cacheEntry: cacheEntryFor(rowD, { keywords: ["w6db03-delta"] }) }, NOW),
+      /injected:keywordResearchCache.create/);
+    } finally {
+      db.$transaction = originalTransaction;
+    }
+    assert.deepEqual(await db.keywordResearchProviderAttempt.findUnique({
+      where: { taskId_attemptNumber: { taskId: taskD, attemptNumber: 1 } } }), beforeRollback.attempt,
+      "W6-DB-03 rolled-back settlement leaves the attempt row unchanged");
+    assert.deepEqual(await db.keywordResearchTask.findUnique({ where: { id: taskD } }), beforeRollback.task,
+      "W6-DB-03 rolled-back settlement leaves the task row unchanged");
+    assert.equal(await db.keywordResearchCache.count({ where: { requestFingerprint: rowD.requestFingerprint } }),
+      0, "W6-DB-03 rolled-back settlement leaves no cache row");
+    executed.push("W6-DB-03");
+  });
+
+  await t.test("W6-DB-04 terminal/publication fencing, once-only counters, ready transition, ceilings", async () => {
+    registered.push("W6-DB-04");
+    const researchT = newResearchId();
+    await freshResearch(repo, researchT);
+    const initT = await repo.initialize({ researchId: researchT, generation: 1, stage: "expansion",
+      tasks: expansionTasksFor(1) }, NOW);
+    const stageT = initT.stage.id;
+    const taskOne = keywordTaskId(stageT, "0:suggestions");
+    const taskTwo = keywordTaskId(stageT, "0:related");
+    const tokenOne = newLeaseToken();
+    await repo.claim({ taskId: taskOne, owner: "w", token: tokenOne }, NOW);
+    const beforeStale = {
+      task: await db.keywordResearchTask.findUnique({ where: { id: taskOne } }),
+      stage: await db.keywordResearchStage.findUnique({ where: { id: stageT } })
+    };
+    counter.reset();
+    assert.equal((await measuredRepo.terminalize({ taskId: taskOne, token: newLeaseToken(),
+      state: "succeeded", artifactS3Key: "runs/w6db04-t.json", artifactFingerprint: fp("w6db04-t") },
+      NOW)).outcome, "lost");
+    assertDelegateCeiling(4, "W6-DB-04 stale terminalize");
+    assertDelegateLog(["keywordResearchTask.findUnique"], "W6-DB-04 stale terminalize");
+    assertScaleTransactions("W6-DB-04 stale terminalize");
+    assert.deepEqual(await db.keywordResearchTask.findUnique({ where: { id: taskOne } }), beforeStale.task,
+      "W6-DB-04 stale terminalize leaves the task row unchanged");
+    assert.deepEqual(await db.keywordResearchStage.findUnique({ where: { id: stageT } }), beforeStale.stage,
+      "W6-DB-04 stale terminalize increments no counter and writes no terminal state");
+
+    counter.reset();
+    assert.equal((await measuredRepo.terminalize({ taskId: taskOne, token: tokenOne, state: "succeeded",
+      artifactS3Key: "runs/w6db04-t.json", artifactFingerprint: fp("w6db04-t") }, NOW)).outcome, "terminal");
+    assertDelegateCeiling(4, "W6-DB-04 terminalize mutation");
+    assertDelegateLog(["keywordResearchTask.findUnique", "keywordResearchTask.updateManyAndReturn",
+      "keywordResearchStage.update", "keywordResearchStage.updateMany"], "W6-DB-04 terminalize mutation");
+    assertScaleTransactions("W6-DB-04 terminalize mutation");
+    const stageOneTerminal = await db.keywordResearchStage.findUnique({ where: { id: stageT } });
+    assert.equal(stageOneTerminal.succeededCount, 1);
+    assert.equal(stageOneTerminal.terminalCount, 1);
+    assert.equal(stageOneTerminal.state, "collecting",
+      "W6-DB-04 ready transition waits for full terminality");
+
+    counter.reset();
+    assert.equal((await measuredRepo.terminalize({ taskId: taskOne, token: tokenOne, state: "succeeded",
+      artifactS3Key: "runs/w6db04-t.json", artifactFingerprint: fp("w6db04-t") }, NOW)).outcome, "found");
+    assertDelegateCeiling(4, "W6-DB-04 terminalize replay");
+    assertDelegateLog(["keywordResearchTask.findUnique"], "W6-DB-04 terminalize replay");
+    assertScaleTransactions("W6-DB-04 terminalize replay");
+    const stageAfterReplay = await db.keywordResearchStage.findUnique({ where: { id: stageT } });
+    assert.equal(stageAfterReplay.succeededCount, 1, "W6-DB-04 counters stay once-only on replay");
+    assert.equal(stageAfterReplay.terminalCount, 1, "W6-DB-04 terminal counter stays once-only on replay");
+
+    const tokenTwo = newLeaseToken();
+    await repo.claim({ taskId: taskTwo, owner: "w", token: tokenTwo }, NOW);
+    counter.reset();
+    assert.equal((await measuredRepo.terminalize({ taskId: taskTwo, token: tokenTwo, state: "succeeded",
+      artifactS3Key: "runs/w6db04-t2.json", artifactFingerprint: fp("w6db04-t2") }, NOW)).outcome, "terminal");
+    assertDelegateCeiling(4, "W6-DB-04 terminalize completes the stage");
+    assertDelegateLog(["keywordResearchTask.findUnique", "keywordResearchTask.updateManyAndReturn",
+      "keywordResearchStage.update", "keywordResearchStage.updateMany"],
+      "W6-DB-04 terminalize completes the stage");
+    assertScaleTransactions("W6-DB-04 terminalize completes the stage");
+    const stageComplete = await db.keywordResearchStage.findUnique({ where: { id: stageT } });
+    assert.equal(stageComplete.state, "ready", "W6-DB-04 conditional ready transition at full terminality");
+    assert.equal(stageComplete.terminalCount, 2);
+
+    const anchorTask = { itemKey: "US:0", inputFingerprint: fp("w6db04-anchor-input"),
+      endpointKey: "keyword_overview", requestFingerprint: fp("w6db04-anchor-request") };
+    const anchorTaskSet = (list) => list.map((task) => ({ itemKey: task.itemKey,
+      inputFingerprint: task.inputFingerprint, endpointKey: task.endpointKey,
+      requestFingerprint: task.requestFingerprint }));
+    const researchCandidate = newResearchId();
+    await freshResearch(repo, researchCandidate);
+    const { token: candidateToken, stageId: candidateStageId } =
+      await setupExpansionAggregator(db, repo, researchCandidate);
+    const candidateOptions = { researchId: researchCandidate, stageIds: [candidateStageId],
+      nextStageId: keywordStageId(researchCandidate, "anchor_screen", 1) };
+    const beforeCandidate = await snapshotResearchRows(db, candidateOptions);
+    counter.reset();
+    assert.equal((await measuredRepo.publishCandidateManifest({ researchId: researchCandidate,
+      generation: 1, token: newLeaseToken(), manifestS3Key: "runs/w6db04-candidate.json",
+      manifestFingerprint: fp("w6db04-candidate"), nextStageTasks: [anchorTask] }, NOW)).outcome, "lost");
+    assertDelegateCeiling(4, "W6-DB-04 stale candidate publication");
+    assertDelegateLog(["keywordResearchStage.findUnique"], "W6-DB-04 stale candidate publication");
+    assertScaleTransactions("W6-DB-04 stale candidate publication");
+    await assertSnapshotUnchanged(db, { ...candidateOptions, before: beforeCandidate },
+      "W6-DB-04 stale candidate publication has zero visibility");
+
+    counter.reset();
+    const published = await measuredRepo.publishCandidateManifest({ researchId: researchCandidate,
+      generation: 1, token: candidateToken, manifestS3Key: "runs/w6db04-candidate.json",
+      manifestFingerprint: fp("w6db04-candidate"), nextStageTasks: [anchorTask] }, NOW);
+    assert.equal(published.outcome, "terminal");
+    assertDelegateCeiling(4, "W6-DB-04 candidate publication mutation");
+    assertDelegateLog(["keywordResearchStage.findUnique", "keywordResearchStage.updateManyAndReturn",
+      "keywordResearchStage.create", "keywordResearchTask.createManyAndReturn"],
+      "W6-DB-04 candidate publication mutation");
+    assertScaleTransactions("W6-DB-04 candidate publication mutation");
+    assert.equal(published.stage.state, "completed");
+    assert.equal(published.stage.manifestS3Key, "runs/w6db04-candidate.json");
+    assert.equal(published.nextStage.stage, "anchor_screen");
+
+    counter.reset();
+    const candidateReplay = await measuredRepo.publishCandidateManifest({ researchId: researchCandidate,
+      generation: 1, token: candidateToken, manifestS3Key: "runs/w6db04-candidate.json",
+      manifestFingerprint: fp("w6db04-candidate"), nextStageTasks: [anchorTask] }, NOW);
+    assert.equal(candidateReplay.outcome, "found");
+    assertDelegateCeiling(4, "W6-DB-04 candidate publication replay");
+    assertDelegateLog(["keywordResearchStage.findUnique", "keywordResearchStage.findUnique"],
+      "W6-DB-04 candidate publication replay");
+    assertScaleTransactions("W6-DB-04 candidate publication replay");
+    assert.deepEqual(candidateReplay.stage, published.stage, "W6-DB-04 replay stage equality");
+    assert.deepEqual(anchorTaskSet(candidateReplay.tasks), anchorTaskSet([anchorTask]),
+      "W6-DB-04 replay returns the exact anchor task set");
+
+    const researchShortlist = newResearchId();
+    await freshResearch(repo, researchShortlist);
+    const { token: shortlistToken, stageId: anchorStageId } =
+      await setupAnchorAggregator(db, repo, researchShortlist);
+    const shortlistOptions = { researchId: researchShortlist, stageIds: [anchorStageId],
+      nextStageId: keywordStageId(researchShortlist, "market_overview", 1) };
+    const beforeShortlist = await snapshotResearchRows(db, shortlistOptions);
+    const marketTasks = marketTasksFor();
+    counter.reset();
+    assert.equal((await measuredRepo.publishShortlist({ researchId: researchShortlist, generation: 1,
+      token: newLeaseToken(), manifestS3Key: "runs/w6db04-shortlist.json",
+      manifestFingerprint: fp("w6db04-shortlist"), marketTasks }, NOW)).outcome, "lost");
+    assertDelegateCeiling(4, "W6-DB-04 stale shortlist publication");
+    assertDelegateLog(["keywordResearchStage.findUnique"], "W6-DB-04 stale shortlist publication");
+    assertScaleTransactions("W6-DB-04 stale shortlist publication");
+    await assertSnapshotUnchanged(db, { ...shortlistOptions, before: beforeShortlist },
+      "W6-DB-04 stale shortlist publication has zero visibility");
+
+    counter.reset();
+    const shortlist = await measuredRepo.publishShortlist({ researchId: researchShortlist, generation: 1,
+      token: shortlistToken, manifestS3Key: "runs/w6db04-shortlist.json",
+      manifestFingerprint: fp("w6db04-shortlist"), marketTasks }, NOW);
+    assert.equal(shortlist.outcome, "terminal");
+    assertDelegateCeiling(4, "W6-DB-04 shortlist publication mutation");
+    assertDelegateLog(["keywordResearchStage.findUnique", "keywordResearchStage.updateManyAndReturn",
+      "keywordResearchStage.create", "keywordResearchTask.createManyAndReturn"],
+      "W6-DB-04 shortlist publication mutation");
+    assertScaleTransactions("W6-DB-04 shortlist publication mutation");
+    assert.equal(shortlist.nextStage.stage, "market_overview");
+    assert.equal(shortlist.tasks.length, 8);
+
+    counter.reset();
+    const shortlistReplay = await measuredRepo.publishShortlist({ researchId: researchShortlist,
+      generation: 1, token: shortlistToken, manifestS3Key: "runs/w6db04-shortlist.json",
+      manifestFingerprint: fp("w6db04-shortlist"), marketTasks }, NOW);
+    assert.equal(shortlistReplay.outcome, "found");
+    assertDelegateCeiling(4, "W6-DB-04 shortlist publication replay");
+    assertDelegateLog(["keywordResearchStage.findUnique", "keywordResearchStage.findUnique"],
+      "W6-DB-04 shortlist publication replay");
+    assertScaleTransactions("W6-DB-04 shortlist publication replay");
+    assert.deepEqual(shortlistReplay.stage, shortlist.stage, "W6-DB-04 shortlist replay stage equality");
+    assert.deepEqual(anchorTaskSet(shortlistReplay.tasks), anchorTaskSet(marketTasks)
+      .sort((left, right) => Buffer.compare(Buffer.from(left.itemKey), Buffer.from(right.itemKey))),
+      "W6-DB-04 shortlist replay returns the exact eight-market task set");
+    executed.push("W6-DB-04");
+  });
+
+  await t.test("W6-DB-05 maximum initialization and maximum saved handoff", async () => {
+    registered.push("W6-DB-05");
+    const researchInit = newResearchId();
+    await freshResearch(repo, researchInit, "owner_kiw1", 5);
+    counter.reset();
+    const initialized = await measuredRepo.initialize({ researchId: researchInit, generation: 1,
+      stage: "expansion", tasks: expansionTasksFor(5) }, NOW);
+    assert.equal(initialized.outcome, "created");
+    assert.equal(initialized.stage.expectedCount, 10);
+    assert.equal(initialized.tasks.length, 10);
+    assert.deepEqual(initialized.tasks.map((task) => task.itemKey),
+      ["0:related", "0:suggestions", "1:related", "1:suggestions", "2:related", "2:suggestions",
+        "3:related", "3:suggestions", "4:related", "4:suggestions"],
+      "W6-DB-05 ten itemKey-sorted expansion tasks");
+    assert.equal(await db.keywordResearchTask.count({ where: { stageId: initialized.stage.id } }), 10);
+    assertDelegateCeiling(5, "W6-DB-05 maximum initialization");
+    assertDelegateLog(["keywordResearch.findUnique", "keywordResearchStage.findUnique",
+      "keywordResearch.update", "keywordResearchStage.create", "keywordResearchTask.createManyAndReturn"],
+      "W6-DB-05 maximum initialization");
+    assert.equal(counter.snapshot().opLog[counter.snapshot().opLog.length - 1],
+      "keywordResearchTask.createManyAndReturn", "W6-DB-05 no post-create task reload");
+    assertScaleTransactions("W6-DB-05 maximum initialization");
+
+    const researchHandoff = newResearchId();
+    await freshResearch(repo, researchHandoff);
+    const { mktToken } = await advanceToMarketStage(db, repo, researchHandoff);
+    const keywords = Array.from({ length: 100 }, (_, index) => makeKeywordRow(`w6db05 handoff keyword ${index}`));
+    const result = makeResult(keywords, researchHandoff);
+    const selectionItems = defaultSelectionFor(keywords);
+    assert.equal(selectionItems.length, 100, "W6-DB-05 maximum saved selection has exactly 100 items");
+    assert.equal((await repo.publishResearchResult({ researchId: researchHandoff, generation: 1,
+      token: mktToken, manifestS3Key: "runs/w6db05-final.json", manifestFingerprint: fp("w6db05-final"),
+      result, resultFingerprint: fp("w6db05-result"), selectionItems }, NOW)).outcome, "terminal");
+    const runId = "run_kiw6_c115_handoff_0001";
+    const handoffInput = { researchId: researchHandoff, ownerId: "owner_kiw1", expectedSelectionRevision: 1,
+      clientRequestId: "client-request-w6db05-0001", selectionFingerprint: fp("w6db05-handoff"),
+      runId, items: selectionItems.map((item) => ({ itemId: item.itemId, keyword: item.keyword })) };
+    const constructRun = async (tx, { runId: id, research, now, items }) => tx.run.create({ data: {
+      id, ownerId: research.ownerId, state: "queued", stage: "keyword_research",
+      normalizedShopTypes: [], progress: {}, queryPlanSource: "keyword_research",
+      keywordResearchId: research.id, keywordSelectionRevision: 1,
+      keywordSelectionSnapshot: { items }, createdAt: now } });
+    const constructQueries = async (tx, { run, items, now }) => {
+      const rows = await tx.runQuery.createManyAndReturn({ data: items.map((item, index) => ({
+        id: `rq_${run.id}_${index}`, runId: run.id, categoryIndex: 0, sequence: index,
+        query: item.keyword, source: "generated", keywordResearchItemId: item.itemId,
+        createdAt: now, updatedAt: now })) });
+      const rowsById = new Map(rows.map((row) => [row.id, row]));
+      return items.map((item, index) => rowsById.get(`rq_${run.id}_${index}`));
+    };
+    counter.reset();
+    const createdRun = await measuredRepo.createRun({ ...handoffInput, constructRun, constructQueries }, NOW);
+    assert.equal(createdRun.outcome, "created");
+    assert.equal(createdRun.run.queryPlanSource, "keyword_research");
+    assert.equal(await db.run.count(), 1, "W6-DB-05 exactly one Run");
+    assert.equal(await db.runQuery.count({ where: { runId } }), 100, "W6-DB-05 exactly 100 RunQuery rows");
+    assert.equal(await db.keywordResearchHandoff.count({ where: { researchId: researchHandoff } }), 1,
+      "W6-DB-05 exactly one handoff row");
+    assert.deepEqual((await db.runQuery.findMany({ where: { runId }, orderBy: { sequence: "asc" } }))
+      .map((row) => row.keywordResearchItemId), selectionItems.map((item) => item.itemId),
+      "W6-DB-05 RunQuery lineage preserves selection order");
+    assertDelegateCeiling(4, "W6-DB-05 maximum handoff initial transaction");
+    assertDelegateLog(["keywordResearch.findUnique", "run.create", "runQuery.createManyAndReturn",
+      "keywordResearchHandoff.create"], "W6-DB-05 maximum handoff initial transaction");
+    assertScaleTransactions("W6-DB-05 maximum handoff initial transaction");
+
+    counter.reset();
+    const replayRun = await measuredRepo.createRun({ ...handoffInput, constructRun, constructQueries }, NOW);
+    assert.equal(replayRun.outcome, "found");
+    assert.equal(replayRun.run.id, runId, "W6-DB-05 same-key replay returns the same Run");
+    assert.equal(await db.run.count(), 1, "W6-DB-05 replay creates zero new Runs");
+    assert.equal(await db.runQuery.count({ where: { runId } }), 100,
+      "W6-DB-05 replay creates zero new RunQuery rows");
+    assert.equal(await db.keywordResearchHandoff.count({ where: { researchId: researchHandoff } }), 1,
+      "W6-DB-05 replay creates zero new handoff rows");
+    assertDelegateCeiling(4, "W6-DB-05 same-key replay");
+    assertDelegateLog(["keywordResearch.findUnique"], "W6-DB-05 same-key replay");
+    assertScaleTransactions("W6-DB-05 same-key replay");
+
+    counter.reset();
+    assert.equal((await measuredRepo.createRun({ ...handoffInput, constructRun, constructQueries,
+      selectionFingerprint: fp("w6db05-unequal") }, NOW)).outcome, "conflict",
+      "W6-DB-05 unequal same-key request conflicts");
+    assertDelegateCeiling(4, "W6-DB-05 unequal same-key conflict");
+    assertDelegateLog(["keywordResearch.findUnique"], "W6-DB-05 unequal same-key conflict");
+    assertScaleTransactions("W6-DB-05 unequal same-key conflict");
+    executed.push("W6-DB-05");
+  });
+
+  await t.test("W6-DB-07 concurrent throttle: one statement, one claimant, shared boundary, due reclaim", async () => {
+    registered.push("W6-DB-07");
+    const provider = "w6db07_throttle_probe";
+    counter.reset();
+    const concurrent = await Promise.all(Array.from({ length: 5 }, () =>
+      measuredRepo.claimThrottle({ provider })));
+    const concurrentSnapshot = counter.snapshot();
+    assert.equal(concurrentSnapshot.delegateOps, 0, "W6-DB-07 throttle uses no delegate operations");
+    assert.equal(concurrentSnapshot.rawStatements, 5,
+      "W6-DB-07 exactly one SQL statement per invocation");
+    assert.equal(concurrentSnapshot.transactionOptions.length, 5,
+      "W6-DB-07 one transaction per invocation");
+    for (const options of concurrentSnapshot.transactionOptions) {
+      assert.deepEqual(options, W6_SHORT_PROFILE, "W6-DB-07 short transaction profile");
+    }
+    assert.equal(concurrent.filter(({ outcome }) => outcome === "claimed").length, 1,
+      "W6-DB-07 exactly one claimant");
+    const delayed = concurrent.filter(({ outcome }) => outcome === "delayed");
+    assert.equal(delayed.length, 4, "W6-DB-07 all competitors delayed");
+    const [claimed] = concurrent.filter(({ outcome }) => outcome === "claimed");
+    assert.ok(claimed.nextAllowedAt instanceof Date);
+    for (const competitor of delayed) {
+      assert.ok(competitor.retryAt instanceof Date);
+      assert.equal(competitor.retryAt.getTime(), claimed.nextAllowedAt.getTime(),
+        "W6-DB-07 every competitor shares the same future boundary timestamp");
+    }
+    const throttleRow = await db.keywordProviderThrottle.findUnique({ where: { provider } });
+    assert.equal(throttleRow.nextAllowedAt.getTime(), claimed.nextAllowedAt.getTime(),
+      "W6-DB-07 durable row carries the shared boundary");
+
+    counter.reset();
+    assert.equal((await measuredRepo.claimThrottle({ provider })).outcome, "delayed",
+      "W6-DB-07 the boundary is still future for the next claimant");
+    assert.equal(counter.snapshot().rawStatements, 1, "W6-DB-07 boundary recheck is one statement");
+    assert.equal(counter.snapshot().delegateOps, 0);
+    assert.deepEqual(counter.snapshot().transactionOptions, [W6_SHORT_PROFILE],
+      "W6-DB-07 boundary recheck transaction profile");
+
+    await db.$executeRawUnsafe(
+      `UPDATE "KeywordProviderThrottle" SET "nextAllowedAt" = now() - interval '1 second' ` +
+      `WHERE "provider" = '${provider}'`);
+    counter.reset();
+    const dueClaim = await measuredRepo.claimThrottle({ provider });
+    assert.equal(dueClaim.outcome, "claimed", "W6-DB-07 an exact-due claimant claims after the gap");
+    assert.ok(dueClaim.nextAllowedAt instanceof Date);
+    assert.equal(counter.snapshot().rawStatements, 1, "W6-DB-07 due claim is one statement");
+    assert.equal(counter.snapshot().delegateOps, 0);
+    assert.deepEqual(counter.snapshot().transactionOptions, [W6_SHORT_PROFILE],
+      "W6-DB-07 due claim transaction profile");
+    executed.push("W6-DB-07");
+  });
+
+  await t.test("W6-NC-16 negative control: one reintroduced delegate read falsifies the ceiling", async () => {
+    registeredControls.push("W6-NC-16");
+    const researchId = newResearchId();
+    await freshResearch(repo, researchId);
+    const initialized = await repo.initialize({ researchId, generation: 1, stage: "expansion",
+      tasks: expansionTasksFor(1) }, NOW);
+    const taskId = keywordTaskId(initialized.stage.id, "0:suggestions");
+    const ceilingWitness = async (repoUnderTest) => {
+      counter.reset();
+      const context = await repoUnderTest.getTaskContext({ taskId });
+      assert.equal(context.outcome, "found");
+      assertDelegateCeiling(1, "W6-NC-16 getTaskContext single delegate read");
+    };
+    const wrappedRepo = new PrismaKeywordResearchRepository(
+      clientWithOneExtraDelegateRead(counter.client, "keywordResearchTask"));
+    await assert.rejects(() => ceilingWitness(wrappedRepo), assert.AssertionError,
+      "W6-NC-16 the extra redundant read must make the unchanged ceiling assertion throw");
+    await ceilingWitness(measuredRepo);
+    executedControls.push("W6-NC-16");
+  });
+
+  assert.equal(registered.length, requiredCases.length, "SCN-KI-043 registered the five required cases");
+  assert.equal(new Set(registered).size, registered.length, "SCN-KI-043 zero duplicate registrations");
+  assert.deepEqual([...registered].sort(unsignedSort), [...requiredCases].sort(unsignedSort),
+    "SCN-KI-043 registered equals required");
+  assert.equal(executed.length, requiredCases.length,
+    "SCN-KI-043 executed the five required cases with zero skips");
+  assert.equal(new Set(executed).size, executed.length, "SCN-KI-043 zero duplicate executions");
+  assert.deepEqual([...executed].sort(unsignedSort), [...requiredCases].sort(unsignedSort),
+    "SCN-KI-043 executed equals registered equals required");
+  assert.equal(sortedLfDigest(executed), "5e80c31a18622c0466176aa8668ff82e00ef6e90a15484eb1fc2710f0ce14261",
+    "SCN-KI-043 sorted-LF digest of the executed case set");
+  assert.deepEqual([...registeredControls].sort(unsignedSort), [...controlCases].sort(unsignedSort),
+    "SCN-KI-043 registered control set equality");
+  assert.equal(new Set(registeredControls).size, registeredControls.length,
+    "SCN-KI-043 zero duplicate registered controls");
+  assert.deepEqual([...executedControls].sort(unsignedSort), [...controlCases].sort(unsignedSort),
+    "SCN-KI-043 control set equality");
+  assert.equal(new Set(executedControls).size, executedControls.length,
+    "SCN-KI-043 zero duplicate controls");
   await db.$disconnect();
 });
