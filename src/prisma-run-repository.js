@@ -1812,28 +1812,65 @@ export class PrismaRunRepository {
   }
 
   async saveQueryValidation(runIdentifier, lease, rows, now = new Date()) {
+    const normalized = requireUniqueBatchKeys(
+      "query validation rows",
+      requireBoundedBatch("query validation rows", rows, 100),
+      (row) => row.id
+    ).map((row) => ({
+      id: row.id,
+      query: row.query,
+      validationState: row.validationState,
+      rejectionReason: row.rejectionReason || null,
+      writeProbeSummary: row.probeSummary != null,
+      probeSummary: row.probeSummary ?? null,
+      writeProbeResults: row.probeResults != null,
+      probeResults: row.probeResults ?? null,
+      probeContractVersion: row.probeContractVersion || null,
+      probeFingerprint: row.probeFingerprint || null,
+      probedAt: row.probedAt || null
+    }));
     return this.prisma.$transaction(async (transaction) => {
       const fenced = await transaction.run.updateMany({
         where: activeLeaseWhere(runIdentifier, lease, now),
         data: { stage: "validating_confirmed_queries" }
       });
       requireLeaseMutation(fenced);
-      for (const row of rows) {
-        await transaction.runQuery.updateMany({
-          where: { id: row.id, runId: runIdentifier },
-          data: {
-            query: row.query,
-            validationState: row.validationState,
-            rejectionReason: row.rejectionReason || null,
-            probeSummary: jsonValue(row.probeSummary),
-            probeResults: jsonValue(row.probeResults),
-            probeContractVersion: row.probeContractVersion || null,
-            probeFingerprint: row.probeFingerprint || null,
-            probedAt: row.probedAt || null
-          }
-        });
+      await selectBulkSchema(transaction, this.databaseSchema);
+      const updated = normalized.length ? await transaction.$queryRaw`
+        UPDATE "RunQuery" AS query SET
+          "query" = input."query",
+          "validationState" = input."validationState"::"RunQueryValidationState",
+          "rejectionReason" = input."rejectionReason",
+          "probeSummary" = CASE WHEN input."writeProbeSummary"
+            THEN input."probeSummary" ELSE query."probeSummary" END,
+          "probeResults" = CASE WHEN input."writeProbeResults"
+            THEN input."probeResults" ELSE query."probeResults" END,
+          "probeContractVersion" = input."probeContractVersion",
+          "probeFingerprint" = input."probeFingerprint",
+          "probedAt" = input."probedAt",
+          "updatedAt" = ${now}
+        FROM jsonb_to_recordset(${JSON.stringify(normalized)}::jsonb) AS input(
+          "id" text,
+          "query" text,
+          "validationState" text,
+          "rejectionReason" text,
+          "writeProbeSummary" boolean,
+          "probeSummary" jsonb,
+          "writeProbeResults" boolean,
+          "probeResults" jsonb,
+          "probeContractVersion" text,
+          "probeFingerprint" text,
+          "probedAt" timestamptz
+        )
+        WHERE query."id" = input."id" AND query."runId" = ${runIdentifier}
+        RETURNING query."id"
+      ` : [];
+      const updatedIds = new Set(updated.map(({ id }) => id));
+      if (updated.length !== normalized.length || updatedIds.size !== normalized.length ||
+          normalized.some(({ id }) => !updatedIds.has(id))) {
+        throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
-    });
+    }, { maxWait: 5_000, timeout: 30_000 });
   }
 
   async returnRunToQueryReview(

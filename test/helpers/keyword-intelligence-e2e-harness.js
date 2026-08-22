@@ -89,7 +89,12 @@ const PIPELINE_CONFIG = Object.freeze({
   awsPipelineFinalAggregationQueueUrl: "https://sqs.kiw6.local/final-aggregation",
   awsPipelineRecoveryAgeMs: 1
 });
-const PIPELINE_SECRETS = Object.freeze({ dataForSeoLogin: "kiw6-login", dataForSeoPassword: "kiw6-password" });
+const PIPELINE_SECRETS = Object.freeze({
+  dataForSeoLogin: "kiw6-login",
+  dataForSeoPassword: "kiw6-password",
+  googleApiKey: "kiw6-google-api-key",
+  googleSearchEngineId: RUN_REPOSITORY_OPTIONS.googleSearchEngineId
+});
 const stoppedMonitor = () => ({ assertActive() {}, async renewNow() {}, async stop() {} });
 
 export async function createKeywordIntelligenceE2eHarness({
@@ -447,16 +452,18 @@ export async function createKeywordIntelligenceE2eHarness({
   };
   const flushRunStartSchedule = () => {
     const pendingBefore = scheduledCallbacks.length;
-    if (pendingBefore !== 1) {
-      throw new preflightError(`expected exactly one parked run-start callback, saw ${pendingBefore}`);
+    if (pendingBefore !== 2) {
+      throw new preflightError(`expected one stale and one live run-start callback, saw ${pendingBefore}`);
     }
-    const callback = scheduledCallbacks.shift();
-    callback();
+    const liveCallback = scheduledCallbacks.pop();
+    const discardedStaleCallbacks = scheduledCallbacks.length;
+    scheduledCallbacks.length = 0;
+    liveCallback();
     const pendingAfter = scheduledCallbacks.length;
     if (pendingAfter !== 0) {
       throw new preflightError(`run-start flush left ${pendingAfter} parked callbacks`);
     }
-    const witness = Object.freeze({ pendingBefore, flushedCallbacks: 1, pendingAfter });
+    const witness = Object.freeze({ pendingBefore, discardedStaleCallbacks, flushedCallbacks: 1, pendingAfter });
     record({ kind: "harness", op: "flush-run-start-schedule", at: nowMs(), ...witness });
     return witness;
   };
@@ -556,7 +563,23 @@ export async function createKeywordIntelligenceE2eHarness({
     recoveryIntervalMs: 15000,
     setIntervalFn,
     clearIntervalFn,
-    logger: () => {},
+    logger: (event, details = {}) => {
+      if (!["queue_drain_failed", "run_failed", "run_lease_lost", "query_confirmation_rejected", "run_failure_persistence_failed"].includes(event)) return;
+      const errorName = typeof details?.error?.name === "string" &&
+        /^[A-Za-z][A-Za-z0-9_]{0,79}$/u.test(details.error.name)
+        ? details.error.name
+        : "Error";
+      const candidateCode = details?.error?.code ?? details?.code;
+      const errorCode = typeof candidateCode === "string" &&
+        /^[A-Z][A-Z0-9_]{0,31}$/u.test(candidateCode)
+        ? candidateCode
+        : null;
+      const frameMatch = typeof details?.error?.stack === "string"
+        ? details.error.stack.match(/(?:^|\n)\s*at [^\n]*?\/((?:src|test)\/[A-Za-z0-9_./-]+:\d+:\d+)/u)
+        : null;
+      const errorFrame = frameMatch?.[1] ?? null;
+      record({ kind: "backend-log", op: event, at: nowMs(), errorName, errorCode, errorFrame });
+    },
     pipelineRuntimeFactory,
     researchQueryValidationPipeline
   });
