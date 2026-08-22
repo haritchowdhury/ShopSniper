@@ -445,6 +445,21 @@ export async function createKeywordIntelligenceE2eHarness({
       scheduledCallbacks.shift()();
     }
   };
+  const flushRunStartSchedule = () => {
+    const pendingBefore = scheduledCallbacks.length;
+    if (pendingBefore !== 1) {
+      throw new preflightError(`expected exactly one parked run-start callback, saw ${pendingBefore}`);
+    }
+    const callback = scheduledCallbacks.shift();
+    callback();
+    const pendingAfter = scheduledCallbacks.length;
+    if (pendingAfter !== 0) {
+      throw new preflightError(`run-start flush left ${pendingAfter} parked callbacks`);
+    }
+    const witness = Object.freeze({ pendingBefore, flushedCallbacks: 1, pendingAfter });
+    record({ kind: "harness", op: "flush-run-start-schedule", at: nowMs(), ...witness });
+    return witness;
+  };
   const recordedIntervals = [];
   const setIntervalFn = (callback, intervalMs) => {
     const handle = { callback, intervalMs, cleared: false, unref() {} };
@@ -927,5 +942,5 @@ export async function createKeywordIntelligenceE2eHarness({
     value: NEON_AUTH_SESSION_COOKIE_VALUE
   });
 
-  return Object.freeze({ frontendEnv, browserSessionCookie, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, drainDownstream, readDurableState, injectCapturedDefect, close });
+  return Object.freeze({ frontendEnv, browserSessionCookie, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, flushRunStartSchedule, drainDownstream, readDurableState, injectCapturedDefect, close });
 }
