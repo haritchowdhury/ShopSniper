@@ -721,7 +721,26 @@ export async function createKeywordIntelligenceE2eHarness({
     const discoveryStage = await state.prisma.pipelineStage.findFirst({ where: { runId: run.id, stage: "discovery" } });
     return discoveryStage?.state === "completed";
   };
-  const drainDownstream = async () => {
+  let activeDownstreamDrain = null;
+  let activeDownstreamMessage = null;
+  let downstreamDrainStarted = false;
+  const downstreamErrorProjection = (error) => {
+    const errorName = typeof error?.name === "string" &&
+      /^[A-Za-z][A-Za-z0-9_]{0,79}$/u.test(error.name)
+      ? error.name
+      : "Error";
+    const candidateCode = error?.code ?? null;
+    const errorCode = typeof candidateCode === "string" &&
+      /^[A-Z][A-Z0-9_]{0,31}$/u.test(candidateCode)
+      ? candidateCode
+      : null;
+    const frameMatch = typeof error?.stack === "string"
+      ? error.stack.match(/(?:^|\n)\s*at [^\n]*?\/((?:src|test)\/[A-Za-z0-9_./-]+:\d+:\d+)/u)
+      : null;
+    const errorFrame = frameMatch?.[1] ?? null;
+    return { errorName, errorCode, errorFrame };
+  };
+  const runDownstreamDrain = async () => {
     const processedByType = {};
     let invocations = 0;
     let idlePolls = 0;
@@ -742,11 +761,22 @@ export async function createKeywordIntelligenceE2eHarness({
         const entry = takeQueueHead(selectedQueue);
         invocations += 1;
         idlePolls = 0;
-        if (selectedQueue === discoveryQueueUrl) {
-          await processDiscoveryMessage(entry.message, downstreamRuntime());
-        } else {
-          await processDomainAggregation(entry.message, downstreamRuntime(), { createLeaseMonitorFn: stoppedMonitor });
+        const queueClass = selectedQueue === discoveryQueueUrl ? "discovery" : "domain";
+        activeDownstreamMessage = { queueClass, type: entry.message.type, deliveryId: entry.deliveryId };
+        record({ kind: "downstream-message", op: "message-start", at: nowMs(), queueClass, type: entry.message.type, deliveryId: entry.deliveryId });
+        try {
+          if (selectedQueue === discoveryQueueUrl) {
+            await processDiscoveryMessage(entry.message, downstreamRuntime());
+          } else {
+            await processDomainAggregation(entry.message, downstreamRuntime(), { createLeaseMonitorFn: stoppedMonitor });
+          }
+        } catch (error) {
+          activeDownstreamMessage = null;
+          record({ kind: "downstream-message", op: "message-failed", at: nowMs(), queueClass, type: entry.message.type, deliveryId: entry.deliveryId, ...downstreamErrorProjection(error) });
+          throw error;
         }
+        activeDownstreamMessage = null;
+        record({ kind: "downstream-message", op: "message-complete", at: nowMs(), queueClass, type: entry.message.type, deliveryId: entry.deliveryId });
         processedByType[entry.message.type] = (processedByType[entry.message.type] ?? 0) + 1;
         continue;
       }
@@ -770,6 +800,76 @@ export async function createKeywordIntelligenceE2eHarness({
       leadTasks = leadStage?.expectedCount ?? 0;
     }
     return { processedByType, discoveryTasks, stableDomains, leadTasks };
+  };
+  const releaseDownstreamDrain = (drained) => () => {
+    if (activeDownstreamDrain === drained) {
+      activeDownstreamDrain = null;
+      activeDownstreamMessage = null;
+    }
+  };
+  const drainDownstream = async () => {
+    if (activeDownstreamDrain) {
+      throw new preflightError("a downstream drain is already active");
+    }
+    const drained = runDownstreamDrain();
+    drained.catch(() => {});
+    activeDownstreamDrain = drained;
+    downstreamDrainStarted = true;
+    drained.then(releaseDownstreamDrain(drained), releaseDownstreamDrain(drained));
+    return drained;
+  };
+
+  const compareNullableText = (left, right) => {
+    if (left === null && right === null) return 0;
+    if (left === null) return -1;
+    if (right === null) return 1;
+    return left < right ? -1 : left > right ? 1 : 0;
+  };
+  const compareActivityRows = (left, right) =>
+    compareNullableText(left.state, right.state) ||
+    compareNullableText(left.wait_event_type, right.wait_event_type) ||
+    compareNullableText(left.wait_event, right.wait_event);
+  const downstreamActivityQuery = "SELECT \"state\"::text AS \"state\", \"wait_event_type\"::text AS \"wait_event_type\", \"wait_event\"::text AS \"wait_event\" FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()";
+  const readDownstreamDiagnostics = async () => {
+    let active;
+    try {
+      active = activeDownstreamMessage ? Object.freeze({ ...activeDownstreamMessage }) : null;
+    } catch {
+      active = "unavailable";
+    }
+    let recentTrace;
+    try {
+      recentTrace = Object.freeze(events.slice(-20));
+    } catch {
+      recentTrace = "unavailable";
+    }
+    let durable;
+    try {
+      const stageRows = await admin.$queryRawUnsafe(
+        `SELECT "stage"::text AS "stage", "state"::text AS "state", COUNT(*)::int AS "count" FROM "${schema}"."PipelineStage" GROUP BY "stage", "state" ORDER BY "stage" ASC, "state" ASC`
+      );
+      const taskRows = await admin.$queryRawUnsafe(
+        `SELECT "state"::text AS "state", COUNT(*)::int AS "count" FROM "${schema}"."PipelineTask" GROUP BY "state" ORDER BY "state" ASC`
+      );
+      durable = Object.freeze({
+        pipelineStage: Object.freeze(stageRows.map((row) => Object.freeze({ stage: row.stage, state: row.state, count: row.count }))),
+        pipelineTask: Object.freeze(taskRows.map((row) => Object.freeze({ state: row.state, count: row.count })))
+      });
+    } catch {
+      durable = "unavailable";
+    }
+    let activity;
+    try {
+      const rows = await admin.$queryRawUnsafe(downstreamActivityQuery);
+      activity = Object.freeze(rows.map((row) => Object.freeze({
+        state: typeof row.state === "string" ? row.state : null,
+        wait_event_type: typeof row.wait_event_type === "string" ? row.wait_event_type : null,
+        wait_event: typeof row.wait_event === "string" ? row.wait_event : null
+      })).sort(compareActivityRows));
+    } catch {
+      activity = "unavailable";
+    }
+    return Object.freeze({ active, recentTrace, durable, activity });
   };
 
   const fixtureProjection = async (entry, notReadyFlag) => {
@@ -934,20 +1034,53 @@ export async function createKeywordIntelligenceE2eHarness({
     throw new preflightError(`unsupported fault identifier ${faultId}`);
   };
 
+  const settleWithin = (promise, limitMs) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), limitMs);
+    if (typeof timer?.unref === "function") timer.unref();
+    promise.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    }, () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+
   let closeMemo = null;
   const close = () => {
     if (!closeMemo) {
       closeMemo = (async () => {
         await stopServer(state.backendServer).catch(() => {});
         await stopServer(authServer).catch(() => {});
+        const drainPromise = activeDownstreamDrain;
+        let settlement = "settled-before-drop";
+        let preDropDiagnostics = null;
+        if (drainPromise) {
+          settlement = "still-pending";
+          if (await settleWithin(drainPromise, 5000)) {
+            settlement = "settled-before-drop";
+          } else {
+            preDropDiagnostics = await readDownstreamDiagnostics();
+          }
+        }
         await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
         const rows = await admin.$queryRawUnsafe(`SELECT schema_name::text AS schema_name FROM (${SCHEMA_ABSENCE_QUERY.replace(/;\s*$/, "")}) kiw6_absence_probe`, schema);
         if (rows.length > 0) {
           throw new cleanupError(`disposable schema survived cleanup: ${schema}`);
         }
+        if (drainPromise && settlement === "still-pending") {
+          if (await settleWithin(drainPromise, 5000)) {
+            settlement = "settled-after-drop";
+          }
+        }
         await state.prisma.$disconnect().catch(() => {});
         await admin.$disconnect();
-        return { droppedSchema: schema, absenceWitness: { query: SCHEMA_ABSENCE_QUERY, rowCount: 0 } };
+        const downstreamCleanup = downstreamDrainStarted
+          ? (preDropDiagnostics === null
+            ? Object.freeze({ drainStarted: true, settlement })
+            : Object.freeze({ drainStarted: true, settlement, diagnostics: preDropDiagnostics }))
+          : Object.freeze({ drainStarted: false, settlement: "settled-before-drop" });
+        return { droppedSchema: schema, absenceWitness: { query: SCHEMA_ABSENCE_QUERY, rowCount: 0 }, downstreamCleanup };
       })();
     }
     return closeMemo;
@@ -965,5 +1098,5 @@ export async function createKeywordIntelligenceE2eHarness({
     value: NEON_AUTH_SESSION_COOKIE_VALUE
   });
 
-  return Object.freeze({ frontendEnv, browserSessionCookie, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, flushRunStartSchedule, drainDownstream, readDurableState, injectCapturedDefect, close });
+  return Object.freeze({ frontendEnv, browserSessionCookie, ownerId, otherOwnerId, trace, setAuthOwner, drainKeywordWork, restartBackend, flushRunStartSchedule, drainDownstream, readDownstreamDiagnostics, readDurableState, injectCapturedDefect, close });
 }
