@@ -50,7 +50,7 @@ export async function processDomainAggregation(message, runtime, {
       leaseDurationMs: 120000 }, now) });
   try {
     const complete = await runtime.coordinator.getCompleteStage({ runId: message.runId,
-      stage: "discovery", generation: message.generation, token });
+      stage: "discovery", generation: message.generation, token }, new Date());
     if (complete.tasks.some((task) => task.state !== "succeeded")) {
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     }

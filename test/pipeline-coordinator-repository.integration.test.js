@@ -327,8 +327,11 @@ test("G5 coordinator CAS protocol holds under real PostgreSQL concurrency",
       await assert.rejects(repositoryA.completeAggregator({ stageId, token: loserToken, state: "completed" },
         new Date(now.getTime() + 5000)), (error) => error.code === "PIPELINE_LEASE_LOST");
       const complete = await repositoryA.getCompleteStage({ runId: run1, stage: "discovery", generation: 1,
-        token: winner.stage.aggregationLeaseToken });
+        token: winner.stage.aggregationLeaseToken }, new Date(now.getTime() + 5000));
       assert.deepEqual(complete.tasks.map(({ itemKey }) => itemKey), ["query_a", "query_b"]);
+      await assert.rejects(repositoryA.getCompleteStage({ runId: run1, stage: "discovery", generation: 1,
+        token: winner.stage.aggregationLeaseToken }, new Date(now.getTime() + 124001)),
+      (error) => error.code === "PIPELINE_LEASE_LOST");
       await repositoryA.renewAggregator({ stageId, token: winner.stage.aggregationLeaseToken, leaseDurationMs: 120000 },
         new Date(now.getTime() + 5000));
       await repositoryA.completeAggregator({ stageId, token: winner.stage.aggregationLeaseToken, state: "completed" },

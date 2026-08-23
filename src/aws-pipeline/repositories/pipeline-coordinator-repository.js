@@ -259,7 +259,7 @@ export class PipelineCoordinatorRepository {
       const expiresAt = plusMilliseconds(now, leaseDurationMs);
       await transaction.pipelineTask.update({ where: { id: taskId }, data: { leaseExpiresAt: expiresAt } });
       return { expiresAt };
-    });
+    }, { maxWait: 5_000, timeout: 30_000 });
   }
 
   async recordTerminal(input, now) {
@@ -350,10 +350,11 @@ export class PipelineCoordinatorRepository {
     });
   }
 
-  async getCompleteStage(input) {
+  async getCompleteStage(input, now) {
+    requireNow(now);
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      return assertCompleteAggregatorInTransaction(transaction, input, new Date());
+      return assertCompleteAggregatorInTransaction(transaction, input, now);
     });
   }
 

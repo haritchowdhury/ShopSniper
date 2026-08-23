@@ -33,7 +33,7 @@ export async function processLeadAggregation(message, runtime, {
       leaseDurationMs: 120000 }, now) });
   try {
     const complete = await runtime.coordinator.getCompleteStage({ runId: message.runId, stage: "lead",
-      generation: message.generation, token });
+      generation: message.generation, token }, new Date());
     const producedAt = complete.stage.manifestProducedAt instanceof Date
       ? complete.stage.manifestProducedAt.toISOString() : new Date(complete.stage.manifestProducedAt).toISOString();
     const storedManifest = await runtime.artifactStore.getValidated({ key: complete.stage.manifestS3Key,

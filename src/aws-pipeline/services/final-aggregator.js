@@ -133,7 +133,7 @@ export async function processFinalAggregation(message, runtime, {
   try {
     phase = "load_complete_stage";
     const complete = await runtime.coordinator.getCompleteStage({ runId: message.runId,
-      stage: "traffic_crux", generation: message.generation, token });
+      stage: "traffic_crux", generation: message.generation, token }, new Date());
     if (complete.tasks.some(({ state }) => state !== "succeeded"))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     phase = "domain_manifest";

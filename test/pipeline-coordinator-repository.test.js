@@ -66,6 +66,25 @@ test("coordinator exports every locked method and rejects non-exact lease bounds
     (error) => error.code === "PIPELINE_INPUT_CONFLICT");
 });
 
+test("renewTask uses the bounded coordinator transaction profile", async () => {
+  const stopped = new Error("stop after transaction profile capture");
+  let options;
+  const prisma = {
+    $transaction: async (_operation, receivedOptions) => {
+      options = receivedOptions;
+      throw stopped;
+    }
+  };
+  const repository = new PipelineCoordinatorRepository(prisma);
+
+  await assert.rejects(repository.renewTask({
+    taskId: "task_profile_fixture",
+    token: "00000000-0000-4000-8000-000000000001",
+    leaseDurationMs: 60000
+  }, new Date("2026-08-23T00:00:00.000Z")), (error) => error === stopped);
+  assert.deepEqual(options, { maxWait: 5_000, timeout: 30_000 });
+});
+
 test("stage registration reconciles exact task identities independently of database collation order", async () => {
   const now = new Date("2026-08-14T10:17:58.965Z");
   let stageRow;
