@@ -146,7 +146,9 @@ function exportedAsyncFunctionSpan(source, name) {
   if (start === -1) throw new Error(`exported async function ${name} is absent`);
   assert.equal(source.indexOf(marker, start + marker.length), -1,
     `exported async function ${name} must be unique`);
-  const open = source.indexOf("{", start + marker.length);
+  const parametersOpen = start + marker.length - 1;
+  const parameters = callTextFrom(source, parametersOpen);
+  const open = source.indexOf("{", parametersOpen + parameters.length);
   if (open === -1) throw new Error(`exported async function ${name} has no body`);
   let depth = 0;
   for (let index = open; index < source.length; index += 1) {

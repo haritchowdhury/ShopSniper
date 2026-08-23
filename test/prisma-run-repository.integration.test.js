@@ -152,6 +152,16 @@ function acceptsBulkValidationSource(source) {
     !method.includes("transaction.runQuery.updateMany");
 }
 
+function replaceOnceInBulkValidationMethod(source, literal, replacement) {
+  const start = source.indexOf("  async saveQueryValidation(");
+  const end = source.indexOf("\n  async returnRunToQueryReview(", start);
+  const method = source.slice(start, end);
+  assert.ok(start >= 0 && end > start, "saveQueryValidation method boundaries must exist");
+  assert.equal(method.split(literal).length - 1, 1,
+    "saveQueryValidation must contain the mutation target exactly once");
+  return source.slice(0, start) + method.replace(literal, replacement) + source.slice(end);
+}
+
 test("query validation bulk path has one scale transaction and rejects sequential/default-timeout controls", async () => {
   const source = readFileSync(new URL("../src/prisma-run-repository.js", import.meta.url), "utf8");
   assert.equal(acceptsBulkValidationSource(source), true);
@@ -159,7 +169,7 @@ test("query validation bulk path has one scale transaction and rejects sequentia
     "updatedIds.size !== normalized.length",
     "false"
   )), false);
-  assert.equal(acceptsBulkValidationSource(source.replace(
+  assert.equal(acceptsBulkValidationSource(replaceOnceInBulkValidationMethod(source,
     "{ maxWait: 5_000, timeout: 30_000 }",
     "{}"
   )), false);
