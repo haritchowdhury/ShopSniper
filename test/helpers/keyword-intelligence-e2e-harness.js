@@ -95,8 +95,6 @@ const PIPELINE_SECRETS = Object.freeze({
   googleApiKey: "kiw6-google-api-key",
   googleSearchEngineId: RUN_REPOSITORY_OPTIONS.googleSearchEngineId
 });
-const stoppedMonitor = () => ({ assertActive() {}, async renewNow() {}, async stop() {} });
-
 export async function createKeywordIntelligenceE2eHarness({
   testDatabaseUrl = process.env.TEST_DATABASE_URL,
   testDirectDatabaseUrl = process.env.TEST_DIRECT_DATABASE_URL,
@@ -768,7 +766,7 @@ export async function createKeywordIntelligenceE2eHarness({
           if (selectedQueue === discoveryQueueUrl) {
             await processDiscoveryMessage(entry.message, downstreamRuntime());
           } else {
-            await processDomainAggregation(entry.message, downstreamRuntime(), { createLeaseMonitorFn: stoppedMonitor });
+            await processDomainAggregation(entry.message, downstreamRuntime());
           }
         } catch (error) {
           activeDownstreamMessage = null;

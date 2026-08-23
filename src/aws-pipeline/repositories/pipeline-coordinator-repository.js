@@ -239,7 +239,7 @@ export class PipelineCoordinatorRepository {
         leaseExpiresAt: plusMilliseconds(now, input.leaseDurationMs)
       } });
       return { outcome: "owned", task, stage };
-    });
+    }, { maxWait: 5_000, timeout: 30_000 });
   }
 
   async renewTask({ taskId, token, leaseDurationMs }, now) {
