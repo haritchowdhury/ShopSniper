@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { dispatchConfirmedQueries } from "../src/aws-pipeline/services/confirmed-query-dispatcher.js";
 import { processDiscoveryMessage } from "../src/aws-pipeline/services/discovery-worker.js";
+import { resolveStoreIdentity } from "../src/domain-resolver.js";
 import { fingerprintJson } from "../src/aws-pipeline/core/canonical.js";
 import { executeRun } from "../src/server.js";
 
@@ -172,4 +173,222 @@ test("AWS executeRun validates from a durable probe result before manifest publi
   assert.ok(events.indexOf("save") < events.indexOf("manifest"));
   assert.ok(events.indexOf("manifest") < events.indexOf("publish"));
   assert.ok(events.indexOf("publish") < events.indexOf("send"));
+});
+
+function w6BridgeFixture() {
+  const manifest = structuredClone(fixture);
+  manifest.queries = [structuredClone(fixture.queries[0])];
+  const query = manifest.queries[0];
+  query.probeResults = Array.from({ length: 10 }, (_, index) => {
+    const rank = index + 1;
+    const nn = String(rank).padStart(2, "0");
+    return {
+      query: query.query,
+      rank,
+      url: `https://w6-bridge-q001-r${nn}.myshopify.com/products/result-${nn}`,
+      title: query.query,
+      snippet: query.query,
+      rejectionReason: ""
+    };
+  });
+  return manifest;
+}
+
+async function runW6BridgeTrial({ sentinel = false } = {}) {
+  const manifest = w6BridgeFixture();
+  const query = manifest.queries[0];
+  const manifestFingerprint = fingerprintJson(manifest);
+  const message = {
+    version: 1,
+    type: "discovery.query",
+    runId: manifest.runId,
+    stage: "discovery",
+    generation: manifest.generation,
+    itemId: query.id,
+    manifestKey: `runs/${manifest.runId}/queries/manifest.json`,
+    manifestFingerprint,
+    manifestProducedAt: producedAt,
+    attempt: 1
+  };
+  const expectedUrls = new Map(query.probeResults.map((result) => [
+    result.url,
+    String(result.rank).padStart(2, "0")
+  ]));
+  let resolverCalls = 0;
+  let fetchCalls = 0;
+  let manifestReads = 0;
+  let optionalReads = 0;
+  let immutableWrites = 0;
+  let terminalTransitions = 0;
+  let aggregationChecks = 0;
+  let artifact;
+  let terminalInput;
+  let aggregationCheck;
+  const deterministicFetch = async (url, config, options) => {
+    fetchCalls += 1;
+    assert.equal(expectedUrls.has(url), true);
+    assert.equal(options.purpose, "storefront");
+    assert.deepEqual(options.allowedHostnames, [new URL(url).hostname]);
+    assert.equal(config.requestTimeoutMs, manifest.awsProviderConfig.discoveryIdentity.requestTimeoutMs);
+    assert.equal(config.browserlessEnabled, false);
+    const nn = expectedUrls.get(url);
+    return {
+      status: 200,
+      finalUrl: url,
+      contentType: "text/html",
+      body: `<!doctype html><html><head><link rel="canonical" href="${url}"><meta name="generator" content="Shopify"></head><body><script>Shopify.theme={};</script><main><h1>${query.query}</h1><a href="/products/result-${nn}">${query.query}</a><img src="https://cdn.shopify.com/w6-fixture.png"></main></body></html>`,
+      rendered: false,
+      renderAttempted: false,
+      renderContractVersion: "",
+      fetchAssessment: null
+    };
+  };
+  const sentinelFetch = async () => {
+    fetchCalls += 1;
+    throw new Error("W6SentinelFetchError");
+  };
+  const runtime = {
+    config: { awsPipelineDomainAggregationQueueUrl: "aggregate" },
+    artifactStore: {
+      async getValidated() {
+        manifestReads += 1;
+        return { value: manifest, contentFingerprint: manifestFingerprint };
+      },
+      async getOptionalValidated() {
+        optionalReads += 1;
+        return { outcome: "missing" };
+      },
+      async putImmutable(input) {
+        immutableWrites += 1;
+        artifact = input.schema.parse(input.value);
+        return { contentFingerprint: fingerprintJson(artifact) };
+      }
+    },
+    coordinator: {
+      async claimTask() {
+        return { outcome: "owned", task: { id: "task_w6_bridge", createdAt: new Date(producedAt) }, stage: {} };
+      },
+      async renewTask() {
+        return { expiresAt: new Date(Date.now() + 60000) };
+      },
+      async recordTerminal(input) {
+        terminalTransitions += 1;
+        terminalInput = input;
+        return { outcome: "recorded" };
+      }
+    },
+    dispatcher: {
+      async sendOne(queue, value, schema) {
+        aggregationChecks += 1;
+        assert.equal(queue, "aggregate");
+        aggregationCheck = schema.parse(value);
+        return { sentItemIds: ["check"], failedItemIds: [] };
+      }
+    }
+  };
+  const resolver = (result, config) => {
+    resolverCalls += 1;
+    return resolveStoreIdentity(result, config, {
+      fetch: sentinel ? sentinelFetch : deterministicFetch
+    });
+  };
+  const globalFetchBefore = globalThis.fetch;
+  const returned = await processDiscoveryMessage(message, runtime, { resolveStoreIdentityFn: resolver });
+  assert.equal(globalThis.fetch, globalFetchBefore);
+  return {
+    manifest,
+    query,
+    returned,
+    artifact,
+    terminalInput,
+    aggregationCheck,
+    resolverCalls,
+    fetchCalls,
+    manifestReads,
+    optionalReads,
+    immutableWrites,
+    terminalTransitions,
+    aggregationChecks
+  };
+}
+
+function assertW6Db13Oracle(trial) {
+  assert.equal(trial.resolverCalls, 10);
+  assert.equal(trial.fetchCalls, 10);
+  assert.equal(trial.manifestReads, 1);
+  assert.equal(trial.optionalReads, 1);
+  assert.equal(trial.immutableWrites, 1);
+  assert.equal(trial.terminalTransitions, 1);
+  assert.equal(trial.aggregationChecks, 1);
+  assert.deepEqual(trial.returned, { terminal: true, outcome: "recorded" });
+  assert.equal(trial.terminalInput.state, "succeeded");
+  assert.equal(trial.aggregationCheck.type, "aggregation.check");
+  assert.equal(trial.aggregationCheck.runId, trial.manifest.runId);
+  assert.equal(trial.aggregationCheck.stage, "discovery");
+  assert.equal(trial.aggregationCheck.generation, trial.manifest.generation);
+  assert.equal(trial.aggregationCheck.reason, "terminal_task_recorded");
+  assert.equal(trial.artifact.stores.length, 10);
+  assert.deepEqual(trial.artifact.diagnostics, []);
+  const expectedDomains = trial.query.probeResults.map((result) => new URL(result.url).hostname).sort();
+  const stableKeys = trial.artifact.stores.map(({ identity }) => identity.stableKey).sort();
+  const myshopifyDomains = trial.artifact.stores.map(({ identity }) => identity.myshopifyDomain).sort();
+  assert.equal(new Set(stableKeys).size, 10);
+  assert.equal(new Set(myshopifyDomains).size, 10);
+  assert.deepEqual(stableKeys, expectedDomains);
+  assert.deepEqual(myshopifyDomains, expectedDomains);
+  assert.ok(trial.artifact.stores.every(({ identity, candidatePayload }) =>
+    identity.stableKey === candidatePayload.stableIdentity &&
+    identity.myshopifyDomain === candidatePayload.myshopifyDomain));
+}
+
+test("W6-DB-13: discovery enforces the default and injected real resolver boundary", async () => {
+  let invalidManifestReads = 0;
+  const invalidRuntime = {
+    artifactStore: {
+      async getValidated() {
+        invalidManifestReads += 1;
+        throw new Error("manifest read after invalid dependency");
+      }
+    }
+  };
+  const invalidDependencies = [
+    null,
+    [],
+    Object.create(null),
+    { unknown: true },
+    { resolveStoreIdentityFn: "not-a-function" }
+  ];
+  for (const dependencies of invalidDependencies) {
+    await assert.rejects(
+      processDiscoveryMessage({}, invalidRuntime, dependencies),
+      (error) => error?.code === "PIPELINE_INPUT_CONFLICT"
+    );
+  }
+  assert.equal(invalidManifestReads, 0);
+  const source = await readFile(new URL("../src/aws-pipeline/services/discovery-worker.js", import.meta.url), "utf8");
+  assert.match(source, /import \{ resolveStoreIdentity \} from "\.\.\/\.\.\/domain-resolver\.js";/u);
+  assert.match(source, /const resolveStoreIdentityFn = dependencies\.resolveStoreIdentityFn \?\? resolveStoreIdentity;/u);
+  assertW6Db13Oracle(await runW6BridgeTrial());
+});
+
+test("W6-NC-22: sentinel resolver falsifies the bridge oracle before a fresh positive", async () => {
+  const control = await runW6BridgeTrial({ sentinel: true });
+  assert.equal(control.resolverCalls, 10);
+  assert.equal(control.artifact.stores.length, 0);
+  assert.throws(() => assertW6Db13Oracle(control));
+  assertW6Db13Oracle(await runW6BridgeTrial());
+  console.log(JSON.stringify({
+    certificate: "KI-W6-C153",
+    required: 1,
+    registered: 1,
+    executed: 1,
+    activated: 1,
+    controlExpected: 1,
+    controlFalsified: 1,
+    freshPositive: 1,
+    cases: ["W6-DB-13"],
+    caseDigest: "16c3ae0197bc816cf676cb918ebf93914b30ebd40024966fd0afc0e3b7da3694",
+    controls: ["W6-NC-22"],
+    controlDigest: "e705d01d6de53d7659e5da3a2d0e44f89e7527206e0788d84d6684fb7361bb20"
+  }));
 });

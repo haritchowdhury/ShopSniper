@@ -37,7 +37,15 @@ function queryPlan(query, category, acceptedResults) {
   };
 }
 
-export async function processDiscoveryMessage(message, runtime) {
+export async function processDiscoveryMessage(message, runtime, dependencies = {}) {
+  if (dependencies === null || typeof dependencies !== "object" ||
+      Object.getPrototypeOf(dependencies) !== Object.prototype ||
+      Object.keys(dependencies).some((key) => key !== "resolveStoreIdentityFn") ||
+      (dependencies.resolveStoreIdentityFn !== undefined &&
+       typeof dependencies.resolveStoreIdentityFn !== "function")) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  const resolveStoreIdentityFn = dependencies.resolveStoreIdentityFn ?? resolveStoreIdentity;
   const manifestStored = await runtime.artifactStore.getValidated({
     key: message.manifestKey,
     expected: {
@@ -99,7 +107,7 @@ export async function processDiscoveryMessage(message, runtime) {
         failures: 0, occurrenceFailures: 0 };
       const discovery = await discoverStoresFromQueryPlans(identityConfig, status, {
         queryPlans: [queryPlan(query, category, accepted)],
-        resolve: (result) => resolveStoreIdentity(result, identityConfig)
+        resolve: (result) => resolveStoreIdentityFn(result, identityConfig)
       });
       const rejectionDiagnostics = rejected.sort((left, right) => left.rank - right.rank).map((item) => ({
         scope: "occurrence", code: item.rejectionReason, shop_type: category.shopType,
