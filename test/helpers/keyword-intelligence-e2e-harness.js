@@ -432,10 +432,31 @@ export async function createKeywordIntelligenceE2eHarness({
       return (...args) => value.apply(target, withClock(args));
     }
   });
+  let operationSequence = 0;
+  const traceRepositoryOperations = (base, component, methods) => new Proxy(base, {
+    get(target, property) {
+      const value = Reflect.get(target, property);
+      if (!methods.includes(property) || typeof value !== "function") {
+        return value;
+      }
+      return async (...args) => {
+        const sequence = operationSequence += 1;
+        record({ kind: "operation", op: "start", at: nowMs(), component, method: property, sequence });
+        try {
+          const result = await value(...args);
+          record({ kind: "operation", op: "complete", at: nowMs(), component, method: property, sequence });
+          return result;
+        } catch (error) {
+          record({ kind: "operation", op: "failed", at: nowMs(), component, method: property, sequence, ...downstreamErrorProjection(error) });
+          throw error;
+        }
+      };
+    }
+  });
   const rebuildRepositories = () => {
-    state.runRepository = pinDates(new PrismaRunRepository(state.prisma, RUN_REPOSITORY_OPTIONS));
+    state.runRepository = traceRepositoryOperations(pinDates(new PrismaRunRepository(state.prisma, RUN_REPOSITORY_OPTIONS)), "run-repository", ["readAwsReuseInputs", "publishAwsDomainCheckpoint"]);
     state.keywordRepository = wrapKeywordRepository(new PrismaKeywordResearchRepository(state.prisma));
-    state.coordinator = pinDates(new PipelineCoordinatorRepository(state.prisma));
+    state.coordinator = traceRepositoryOperations(pinDates(new PipelineCoordinatorRepository(state.prisma)), "coordinator", ["claimTask", "renewTask", "recordTerminal", "claimAggregator", "renewAggregator", "getCompleteStage", "completeAggregator"]);
   };
   rebuildRepositories();
 
