@@ -49,3 +49,9 @@ export function createPipelineLeaseMonitor({
     }
   });
 }
+
+export async function preparePipelineTerminalLease(monitor) {
+  await monitor.renewNow();
+  await monitor.stop();
+  monitor.assertActive();
+}

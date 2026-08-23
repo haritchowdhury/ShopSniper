@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { PrismaRunRepository } from "../src/prisma-run-repository.js";
+import {
+  createPipelineLeaseMonitor,
+  preparePipelineTerminalLease
+} from "../src/aws-pipeline/core/lease-monitor.js";
 
 const sourceUrl = (relative) => new URL(relative, import.meta.url);
 const COORDINATOR_FILE = "../src/aws-pipeline/repositories/pipeline-coordinator-repository.js";
@@ -10,9 +14,12 @@ const RUN_REPOSITORY_FILE = "../src/prisma-run-repository.js";
 const DOMAIN_AGGREGATOR_FILE = "../src/aws-pipeline/services/domain-aggregator.js";
 const LEAD_AGGREGATOR_FILE = "../src/aws-pipeline/services/lead-aggregator.js";
 const FINAL_AGGREGATOR_FILE = "../src/aws-pipeline/services/final-aggregator.js";
+const LEASE_MONITOR_FILE = "../src/aws-pipeline/core/lease-monitor.js";
+const DISCOVERY_WORKER_FILE = "../src/aws-pipeline/services/discovery-worker.js";
+const LEAD_WORKER_FILE = "../src/aws-pipeline/services/lead-worker.js";
 
-const REQUIRED = ["W6-DB-08", "W6-DB-09", "W6-DB-10", "W6-DB-11"];
-const CONTROLS = ["W6-NC-18", "W6-NC-19", "W6-NC-20"];
+const REQUIRED = ["W6-DB-08", "W6-DB-09", "W6-DB-10", "W6-DB-11", "W6-DB-12"];
+const CONTROLS = ["W6-NC-18", "W6-NC-19", "W6-NC-20", "W6-NC-21"];
 const COORDINATOR_METHODS = [
   "registerStage", "recordDispatch", "claimTask", "renewTask", "recordTerminal",
   "claimAggregator", "renewAggregator", "getCompleteStage", "completeAggregator",
@@ -46,9 +53,9 @@ const RUN_TRANSACTION_LITERAL =
 const INLINE_PROFILE = "{ maxWait: 5_000, timeout: 30_000 }";
 const FROZEN_PROFILE = "Object.freeze({ maxWait: 5_000, timeout: 30_000 })";
 const REQUIRED_DIGEST =
-  "e8bd1b4a3b3deb8f853eac0e8bcea5609278177945389f292b1b12a7309bf030";
+  "1aba569c8f08f9ca3ee240a10c4ddb4fbb0e6ec0bb00608b74aa414faefaaf39";
 const CONTROLS_DIGEST =
-  "89e40c02b11dd426c8445de018a9d85fa2c110b6da9728cee8dff4e3cc31db1b";
+  "3068f94cf9c935bfdec5f0374182c5261fc0acaf7e5d8bf80d6b278cfa5b981c";
 
 const registered = [];
 const executed = [];
@@ -56,23 +63,33 @@ const witnesses = {
   coordinatorTransactions: 0,
   runRepositoryTransactions: 0,
   assertionClockSites: 0,
-  serviceCallers: 0
+  serviceCallers: 0,
+  terminalLeaseWorkers: 0,
+  terminalLeaseRenewals: 0,
+  terminalLeaseTimerClears: 0
 };
 const failures = [];
 const falsifiedControls = [];
 
 const readSource = (relative) => readFile(sourceUrl(relative), "utf8");
 const [coordinatorSource, runRepositorySource, domainAggregatorSource,
-  leadAggregatorSource, finalAggregatorSource] = await Promise.all([
+  leadAggregatorSource, finalAggregatorSource, leaseMonitorSource,
+  discoveryWorkerSource, leadWorkerSource] = await Promise.all([
     readSource(COORDINATOR_FILE),
     readSource(RUN_REPOSITORY_FILE),
     readSource(DOMAIN_AGGREGATOR_FILE),
     readSource(LEAD_AGGREGATOR_FILE),
-    readSource(FINAL_AGGREGATOR_FILE)
+    readSource(FINAL_AGGREGATOR_FILE),
+    readSource(LEASE_MONITOR_FILE),
+    readSource(DISCOVERY_WORKER_FILE),
+    readSource(LEAD_WORKER_FILE)
   ]);
 const REAL = {
   coordinatorSource,
   runRepositorySource,
+  leaseMonitorSource,
+  discoveryWorkerSource,
+  leadWorkerSource,
   serviceSources: {
     [DOMAIN_AGGREGATOR_FILE]: domainAggregatorSource,
     [LEAD_AGGREGATOR_FILE]: leadAggregatorSource,
@@ -121,6 +138,25 @@ function moduleFunctionSpan(source, name) {
   const boundary = /\n\S/u.exec(tail);
   const end = start + 1 + (boundary ? boundary.index : tail.length);
   return { text: source.slice(start + 1, end), start: start + 1, end };
+}
+
+function exportedAsyncFunctionSpan(source, name) {
+  const marker = `export async function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start === -1) throw new Error(`exported async function ${name} is absent`);
+  assert.equal(source.indexOf(marker, start + marker.length), -1,
+    `exported async function ${name} must be unique`);
+  const open = source.indexOf("{", start + marker.length);
+  if (open === -1) throw new Error(`exported async function ${name} has no body`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return { text: source.slice(start, index + 1), start, end: index + 1 };
+    }
+  }
+  throw new Error(`exported async function ${name} is unbalanced`);
 }
 
 function callTextFrom(source, openIndex) {
@@ -259,6 +295,45 @@ function oracleW6Db10(context = REAL) {
     "recordDispatch performs exactly one updateMany");
 }
 
+function oracleTerminalLeaseWorkers(context = REAL) {
+  const workers = [
+    {
+      source: context.discoveryWorkerSource,
+      functionName: "processDiscoveryMessage",
+      sendUrl: "runtime.config.awsPipelineDomainAggregationQueueUrl",
+      cleanupStops: 1
+    },
+    {
+      source: context.leadWorkerSource,
+      functionName: "processLeadMessage",
+      sendUrl: "runtime.config.awsPipelineLeadAggregationQueueUrl",
+      cleanupStops: 3
+    }
+  ];
+  for (const worker of workers) {
+    const importPattern = /import\s*\{[^}]*\bpreparePipelineTerminalLease\b[^}]*\}\s*from "\.\.\/core\/lease-monitor\.js";/gu;
+    assert.equal([...worker.source.matchAll(importPattern)].length, 1,
+      `${worker.functionName} imports the terminal lease helper exactly once`);
+    const span = exportedAsyncFunctionSpan(worker.source, worker.functionName).text;
+    assert.equal(occurrences(span, "preparePipelineTerminalLease(monitor)"), 1,
+      `${worker.functionName} calls the terminal lease helper exactly once`);
+    assert.equal(occurrences(span, "monitor.renewNow()"), 0,
+      `${worker.functionName} has zero direct renewNow calls`);
+    assert.equal(occurrences(span, "monitor.stop()"), worker.cleanupStops,
+      `${worker.functionName} retains only its existing cleanup stops`);
+    const helperIndex = span.indexOf("await preparePipelineTerminalLease(monitor);");
+    const terminalIndex = span.indexOf("runtime.coordinator.recordTerminal(");
+    const sendIndex = span.indexOf(`runtime.dispatcher.sendOne(${worker.sendUrl}`);
+    assert.ok(helperIndex !== -1 && terminalIndex !== -1 && sendIndex !== -1,
+      `${worker.functionName} contains helper, terminal, and aggregation send anchors`);
+    assert.ok(helperIndex < terminalIndex && terminalIndex < sendIndex,
+      `${worker.functionName} orders helper before terminal before aggregation send`);
+    assert.equal(span.slice(terminalIndex, sendIndex).includes("monitor.stop()"), false,
+      `${worker.functionName} has no monitor stop between terminal and aggregation send`);
+  }
+  witnesses.terminalLeaseWorkers = workers.length;
+}
+
 const VALID_NOW = new Date("2026-08-23T00:00:00.000Z");
 const CLOCK_INPUTS = new Map([
   ["readAwsReuseInputs", {}],
@@ -307,6 +382,75 @@ async function oracleW6Db11() {
   }
 }
 
+async function oracleW6Db12() {
+  assert.ok(leaseMonitorSource.includes("export async function preparePipelineTerminalLease(monitor)"),
+    "the accepted terminal lease helper export is present");
+  oracleTerminalLeaseWorkers(REAL);
+
+  const events = [];
+  const timerToken = Object.freeze({ id: "W6-DB-12-TIMER" });
+  let capturedTimerCallback;
+  let timerRegistrations = 0;
+  let timerClears = 0;
+  let renewalCount = 0;
+  let releaseFirst;
+  let markFirstStarted;
+  const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const monitor = createPipelineLeaseMonitor({
+    intervalMs: 20000,
+    now: () => VALID_NOW,
+    setIntervalFn: (callback, intervalMs) => {
+      timerRegistrations += 1;
+      assert.equal(timerRegistrations, 1, "exactly one timer is registered");
+      assert.equal(intervalMs, 20000, "the task monitor uses the 20-second interval");
+      capturedTimerCallback = callback;
+      return timerToken;
+    },
+    clearIntervalFn: (token) => {
+      assert.equal(token, timerToken, "the captured timer token is cleared");
+      timerClears += 1;
+      assert.equal(timerClears, 1, "the timer is cleared exactly once");
+    },
+    renew: async (now) => {
+      assert.equal(now.getTime(), VALID_NOW.getTime(), "renewal receives the controlled clock");
+      renewalCount += 1;
+      const ordinal = renewalCount;
+      events.push(`renewal-${ordinal}-start`);
+      if (ordinal === 1) {
+        markFirstStarted();
+        await firstRelease;
+      }
+      events.push(`renewal-${ordinal}-complete`);
+    }
+  });
+  assert.equal(typeof capturedTimerCallback, "function", "the fake timer captures one callback");
+
+  capturedTimerCallback();
+  const terminalBoundary = preparePipelineTerminalLease(monitor);
+  await firstStarted;
+  releaseFirst();
+  await terminalBoundary;
+
+  assert.deepEqual(events, [
+    "renewal-1-start",
+    "renewal-1-complete",
+    "renewal-2-start",
+    "renewal-2-complete"
+  ], "timer and explicit renewals complete serially");
+  assert.equal(renewalCount, 2, "exactly two renewals complete before terminalization");
+  assert.equal(timerClears, 1, "terminal preparation clears exactly one timer");
+  monitor.assertActive();
+
+  capturedTimerCallback();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(renewalCount, 2, "a stale callback cannot renew after terminal preparation");
+
+  witnesses.terminalLeaseRenewals = renewalCount;
+  witnesses.terminalLeaseTimerClears = timerClears;
+}
+
 function replaceOnceInMethod(source, className, methodName, literal, replacement) {
   const methods = classMethods(source, className);
   const method = methods.get(methodName);
@@ -343,6 +487,19 @@ function mutateLockedStage(source) {
   return source.slice(0, absolute) + insertion + source.slice(absolute);
 }
 
+function mutateDiscoveryTerminalBoundary(source) {
+  const span = exportedAsyncFunctionSpan(source, "processDiscoveryMessage");
+  const helper = "await preparePipelineTerminalLease(monitor);";
+  assert.equal(occurrences(span.text, helper), 1,
+    "discovery helper call mutation target is unique");
+  let mutatedSpan = span.text.replace(helper, "await monitor.renewNow();");
+  const send = "await runtime.dispatcher.sendOne(runtime.config.awsPipelineDomainAggregationQueueUrl";
+  assert.equal(occurrences(mutatedSpan, send), 1,
+    "discovery aggregation send mutation target is unique");
+  mutatedSpan = mutatedSpan.replace(send, `await monitor.stop();\n    ${send}`);
+  return source.slice(0, span.start) + mutatedSpan + source.slice(span.end);
+}
+
 async function runRequired(id, oracle) {
   registered.push(id);
   try {
@@ -361,6 +518,9 @@ test("W6-DB-09: nine assertion clock sites and required-now plumbing", () => run
 test("W6-DB-10: lock and read ceilings inside transactions", () => runRequired("W6-DB-10", oracleW6Db10));
 
 test("W6-DB-11: required-now rejection before any transaction", () => runRequired("W6-DB-11", oracleW6Db11));
+
+test("W6-DB-12: terminal lease boundary serializes renewals before terminalization", () =>
+  runRequired("W6-DB-12", oracleW6Db12));
 
 test("W6-NC-18: removing listRecoverable options falsifies W6-DB-08", () => {
   const mutated = mutateListRecoverable(coordinatorSource);
@@ -395,10 +555,24 @@ test("W6-NC-20: restoring a lockedStage reload falsifies W6-DB-10", () => {
   oracleW6Db10(REAL);
 });
 
+test("W6-NC-21: direct renewal and post-terminal stop falsify W6-DB-12", () => {
+  const mutated = mutateDiscoveryTerminalBoundary(discoveryWorkerSource);
+  assert.notEqual(mutated, discoveryWorkerSource);
+  assert.throws(() => oracleTerminalLeaseWorkers({
+    ...REAL,
+    discoveryWorkerSource: mutated
+  }), "W6-DB-12 source oracle must reject the old terminal lease ordering");
+  falsifiedControls.push("W6-NC-21");
+  oracleTerminalLeaseWorkers(REAL);
+});
+
 test("KI_W6_TXN_CLOCK_ENFORCEMENT certificate", () => {
   const digest = (ids) => createHash("sha256")
     .update(Buffer.from([...new Set(ids)].sort().map((id) => `${id}\n`).join(""), "utf8"))
     .digest("hex");
+  const duplicates = (ids) => ids.length - new Set(ids).size;
+  const unexpected = [...new Set([...registered, ...executed])]
+    .filter((id) => !REQUIRED.includes(id));
   assert.deepEqual(registered, REQUIRED, "registered equals required");
   assert.deepEqual(executed, REQUIRED, "executed equals required with zero skips");
   assert.deepEqual(failures, [], "no oracle failures");
@@ -409,11 +583,23 @@ test("KI_W6_TXN_CLOCK_ENFORCEMENT certificate", () => {
     registered: [...registered],
     executed: [...executed],
     skipped: [],
+    totals: {
+      required: REQUIRED.length,
+      registered: registered.length,
+      executed: executed.length,
+      skipped: 0,
+      failures: failures.length,
+      duplicates: duplicates(registered) + duplicates(executed),
+      unexpected: unexpected.length
+    },
     activationWitnesses: {
       coordinatorTransactions: witnesses.coordinatorTransactions,
       runRepositoryTransactions: witnesses.runRepositoryTransactions,
       assertionClockSites: witnesses.assertionClockSites,
-      serviceCallers: witnesses.serviceCallers
+      serviceCallers: witnesses.serviceCallers,
+      terminalLeaseWorkers: witnesses.terminalLeaseWorkers,
+      terminalLeaseRenewals: witnesses.terminalLeaseRenewals,
+      terminalLeaseTimerClears: witnesses.terminalLeaseTimerClears
     },
     oracleFailures: failures.map(({ id }) => id),
     negativeControls: {
@@ -432,12 +618,24 @@ test("KI_W6_TXN_CLOCK_ENFORCEMENT certificate", () => {
     coordinatorTransactions: 11,
     runRepositoryTransactions: 21,
     assertionClockSites: 9,
-    serviceCallers: 5
+    serviceCallers: 5,
+    terminalLeaseWorkers: 2,
+    terminalLeaseRenewals: 2,
+    terminalLeaseTimerClears: 1
+  });
+  assert.deepEqual(certificate.totals, {
+    required: 5,
+    registered: 5,
+    executed: 5,
+    skipped: 0,
+    failures: 0,
+    duplicates: 0,
+    unexpected: 0
   });
   assert.deepEqual(certificate.negativeControls, {
-    expected: 3,
-    falsified: 3,
-    ids: ["W6-NC-18", "W6-NC-19", "W6-NC-20"]
+    expected: 4,
+    falsified: 4,
+    ids: ["W6-NC-18", "W6-NC-19", "W6-NC-20", "W6-NC-21"]
   });
   assert.equal(certificate.digests.required, REQUIRED_DIGEST);
   assert.equal(certificate.digests.registered, REQUIRED_DIGEST);

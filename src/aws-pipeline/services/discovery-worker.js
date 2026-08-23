@@ -11,7 +11,10 @@ import { aggregationCheckMessageSchema } from "../contracts/messages.js";
 import { PipelineInvariantError } from "../contracts/errors.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { queryArtifactKey } from "../core/keys.js";
-import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import {
+  createPipelineLeaseMonitor,
+  preparePipelineTerminalLease
+} from "../core/lease-monitor.js";
 
 function queryInputFingerprint(manifest, manifestFingerprint, query) {
   return fingerprintJson({
@@ -118,10 +121,9 @@ export async function processDiscoveryMessage(message, runtime) {
     monitor.assertActive();
     const artifact = parseQueryDiscoveryArtifact(stored.value);
     const artifactFingerprint = stored.contentFingerprint || fingerprintJson(artifact);
-    await monitor.renewNow();
+    await preparePipelineTerminalLease(monitor);
     const terminal = await runtime.coordinator.recordTerminal({ taskId: claimed.task.id, token, inputFingerprint,
       state: "succeeded", artifactS3Key: key, artifactFingerprint }, new Date());
-    await monitor.stop();
     await runtime.dispatcher.sendOne(runtime.config.awsPipelineDomainAggregationQueueUrl, {
       version: 1, type: "aggregation.check", runId: message.runId, stage: "discovery",
       generation: message.generation, reason: "terminal_task_recorded", attempt: 1

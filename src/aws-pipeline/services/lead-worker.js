@@ -22,7 +22,10 @@ import { aggregationCheckMessageSchema } from "../contracts/messages.js";
 import { PipelineInvariantError, safePipelineError } from "../contracts/errors.js";
 import { fingerprintJson } from "../core/canonical.js";
 import { aiNormalizationAttemptKey, browserlessAttemptArtifactKey, leadArtifactKey } from "../core/keys.js";
-import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
+import {
+  createPipelineLeaseMonitor,
+  preparePipelineTerminalLease
+} from "../core/lease-monitor.js";
 import { executeBrowserlessDomainBatch } from "../lead/browserless-function-client.js";
 import { fetchAwsDomainPages } from "../lead/domain-page-fetcher.js";
 
@@ -167,13 +170,12 @@ export async function processLeadMessage(message, runtime) {
     }
     const artifact = parseLeadResultArtifact(stored.value);
     const artifactFingerprint = stored.contentFingerprint || fingerprintJson(artifact);
-    await monitor.renewNow();
+    await preparePipelineTerminalLease(monitor);
     const terminalState = artifact.result.state === "failed" ? "failed" : "succeeded";
     const safe = artifact.result.diagnostic?.code;
     const terminal = await runtime.coordinator.recordTerminal({ taskId: claimed.task.id, token,
       inputFingerprint, state: terminalState, artifactS3Key: key, artifactFingerprint,
       ...(safe ? { safeErrorCode: safe, safeErrorMessage: safe } : {}) }, new Date());
-    await monitor.stop();
     await runtime.dispatcher.sendOne(runtime.config.awsPipelineLeadAggregationQueueUrl, {
       version: 1, type: "aggregation.check", runId: message.runId, stage: "lead",
       generation: message.generation, reason: "terminal_task_recorded", attempt: 1
