@@ -70,7 +70,7 @@ export async function processLeadAggregation(message, runtime, {
     }
     const reusable = await runtime.repository.readAwsReusableProfiles({ runId: message.runId,
       generation: message.generation, stageId: complete.stage.id, aggregationToken: token,
-      selections: reusableSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) });
+      selections: reusableSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) }, new Date());
     const profileByShop = new Map(reusable.profiles.map((row) => [row.shopId, parseShopLeadProfile(row.profilePayload)]));
     const outcomes = [];
     for (const plan of [...manifest.workPlan.domains].sort((a, b) => a.shopId.localeCompare(b.shopId))) {

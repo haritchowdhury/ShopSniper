@@ -86,7 +86,7 @@ export async function processDomainAggregation(message, runtime, {
     const evaluatedAt = complete.stage.createdAt;
     const reuse = await runtime.repository.readAwsReuseInputs({ runId: message.runId,
       generation: message.generation, stageId: complete.stage.id, aggregationToken: token,
-      domains, evaluatedAt });
+      domains, evaluatedAt }, new Date());
     if (canonicalJson(reuse.awsProviderConfig) !== canonicalJson(confirmed.awsProviderConfig)) {
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     }

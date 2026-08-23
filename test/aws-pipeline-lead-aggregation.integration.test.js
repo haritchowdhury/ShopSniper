@@ -47,11 +47,18 @@ test("G10 atomically materializes a private reused Lead and a zero traffic stage
         owner: "g10", token, leaseDurationMs: 120000 }, new Date(now.getTime() + 1))).outcome, "owned");
       const profileFingerprint = fingerprintJson(fixture.success.profile);
       step = "reusable profile read";
-      const selected = await repository.readAwsReusableProfiles({ runId: manifest.runId, generation: 1,
-        stageId: lead.stage.id, aggregationToken: token, evaluatedAt: now,
-        selections: [{ shopId: domain.shopId, profileShopId: domain.shopId, profileFingerprint,
-          stableIdentity: domain.identity.stableKey }] });
+      const reuseInput = { runId: manifest.runId, generation: 1, stageId: lead.stage.id, aggregationToken: token, evaluatedAt: now, selections: [{ shopId: domain.shopId, profileShopId: domain.shopId, profileFingerprint, stableIdentity: domain.identity.stableKey }] };
+      const selected = await repository.readAwsReusableProfiles(reuseInput, new Date(now.getTime() + 2));
       assert.equal(selected.profiles.length, 1);
+      step = "reusable profile clock rejection";
+      await assert.rejects(repository.readAwsReusableProfiles(reuseInput),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+      await assert.rejects(repository.readAwsReusableProfiles(reuseInput, new Date("invalid")),
+        (error) => error.code === "PIPELINE_INPUT_CONFLICT");
+      await assert.rejects(repository.readAwsReusableProfiles(reuseInput,
+        new Date(now.getTime() + 120001)), (error) => error.code === "PIPELINE_LEASE_LOST");
+      assert.equal((await prisma.pipelineStage.findUnique({ where: { id: lead.stage.id } })).state,
+        "aggregating");
       step = "lead checkpoint publication";
       const published = await repository.publishAwsLeadCheckpoint({ runId: manifest.runId, generation: 1,
         stageId: lead.stage.id, aggregationToken: token, outcomes: [{ shopId: domain.shopId,

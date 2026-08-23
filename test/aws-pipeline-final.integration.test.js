@@ -50,7 +50,8 @@ test("G12 atomically publishes a zero-task AWS run and terminal replay cannot re
         owner: "g12", token, leaseDurationMs: 120000 }, new Date(now.getTime() + 1));
       assert.equal(claim.outcome, "owned");
       const read = await repository.readAwsFinalReuseRows({ runId, generation: 1,
-        stageId: registered.stage.id, aggregationToken: token, selections: [], evaluatedAt: now });
+        stageId: registered.stage.id, aggregationToken: token, selections: [], evaluatedAt: now },
+        new Date(now.getTime() + 2));
       assert.deepEqual(read.trafficRows, []); assert.deepEqual(read.leadTasks, []);
       assert.deepEqual(read.leads, []);
       const published = await repository.publishAwsFinalResults({ runId, generation: 1,
@@ -129,7 +130,7 @@ test("G-R8 nonempty final transaction locks paid evidence and rolls back every n
       const resolvedTerminalWork = await repository.readAwsTerminalCruxBigQueryWork({
         runId, generation: 1, aggregationToken: token,
         candidates: [{ shopId, pipelineTaskId: taskClaim.task.id, state: "contract_mismatch" }]
-      });
+      }, new Date(now.getTime() + 2));
       assert.deepEqual(resolvedTerminalWork, [{ shopId, pipelineTaskId: taskClaim.task.id,
         state: "contract_mismatch", scopeKey: "month:202607" }]);
       const input = { runId, generation: 1, stageId: registered.stage.id, aggregationToken: token,
@@ -296,4 +297,106 @@ test("G-R31 publishes three consecutive 1,000-domain and 12,000-outcome trials b
       context.diagnostic(JSON.stringify(trial));
     }
     assert.deepEqual(trials.map(({ trialOrdinal }) => trialOrdinal), [1, 2, 3]);
+  });
+
+test("W6-DB-11 five aggregation readers reject, expire, and succeed under explicit controlled clocks",
+  { skip: !enabled, timeout: 180000 }, async () => {
+    const schema = `w6clk_final_${Date.now()}_${process.pid}`;
+    const { admin: base, scopedUrl } = await createIsolatedTestSchema(schema);
+    let prisma;
+    try {
+      deployPrismaMigrations(scopedUrl); prisma = createPrismaClient(scopedUrl);
+      await assertMigrationStayedInSchema(prisma, schema);
+      const repository = new PrismaRunRepository(prisma);
+      const coordinator = new PipelineCoordinatorRepository(prisma);
+      const now = new Date("2026-08-23T00:00:00.000Z"); const runId = "run_w6clk_final_fixture_0001";
+      const traffic = trafficEnrichmentConfigSnapshot({});
+      const provider = awsProviderConfigSnapshot({ browserlessUrl: "https://fixture.example",
+        googleSearchEngineId: "fixture", googleResultsPerQuery: 10, requestTimeoutMs: 10000,
+        maxPagesPerStore: 5, pageFetchConcurrency: 2, maxQueries: 20, generatedQueryCount: 10,
+        queryProbeFreshnessMs: 60000, queryProbeConcurrency: 1, minQueryResults: 1,
+        minQueryUniqueHosts: 1, minQueryRelevantResults: 1, minQueryRelevanceRatio: 0.1,
+        minQueryBaseScore: 1, browserlessEnabled: false, enableAiNormalization: false });
+      await prisma.run.create({ data: { id: runId, state: "running", phase: "scraping",
+        stage: "aws_traffic_crux", normalizedShopTypes: [], progress: {}, executionBackend: "aws",
+        pipelineGeneration: 1, trafficEnrichmentConfig: traffic, awsProviderConfig: provider,
+        resultsAvailable: false } });
+      const registerZeroTaskStage = (stage) => coordinator.registerStage({ runId, stage, generation: 1,
+        manifestS3Key: `runs/${runId}/domains-manifest.json`, manifestFingerprint: "a".repeat(64),
+        manifestProducedAt: now, tasks: [] }, now);
+      const discoveryStage = await registerZeroTaskStage("discovery");
+      const leadStage = await registerZeroTaskStage("lead");
+      const trafficStage = await registerZeroTaskStage("traffic_crux");
+      const discoveryToken = randomUUID(); const leadToken = randomUUID(); const trafficToken = randomUUID();
+      for (const [stage, token] of [["discovery", discoveryToken], ["lead", leadToken],
+        ["traffic_crux", trafficToken]]) {
+        assert.equal((await coordinator.claimAggregator({ runId, stage, generation: 1,
+          owner: "w6clk", token, leaseDurationMs: 120000 }, new Date(now.getTime() + 1))).outcome,
+          "owned");
+      }
+      const readers = {
+        domain: { read: (input, clock) => repository.readAwsReuseInputs(input, clock),
+          input: { runId, generation: 1, stageId: discoveryStage.stage.id,
+            aggregationToken: discoveryToken, domains: [], evaluatedAt: discoveryStage.stage.createdAt } },
+        lead: { read: (input, clock) => repository.readAwsReusableProfiles(input, clock),
+          input: { runId, generation: 1, stageId: leadStage.stage.id,
+            aggregationToken: leadToken, evaluatedAt: now, selections: [] } },
+        finalReuse: { read: (input, clock) => repository.readAwsFinalReuseRows(input, clock),
+          input: { runId, generation: 1, stageId: trafficStage.stage.id,
+            aggregationToken: trafficToken, selections: [], evaluatedAt: now } },
+        ambiguousTargets: { read: (input, clock) => repository.readAwsAmbiguousDataForSeoTargets(input, clock),
+          input: { runId, generation: 1, aggregationToken: trafficToken, candidates: [] } },
+        terminalWork: { read: (input, clock) => repository.readAwsTerminalCruxBigQueryWork(input, clock),
+          input: { runId, generation: 1, aggregationToken: trafficToken, candidates: [] } }
+      };
+      const runBefore = await prisma.run.findUnique({ where: { id: runId } });
+      for (const reader of Object.values(readers)) {
+        await assert.rejects(reader.read(reader.input), { code: "PIPELINE_INPUT_CONFLICT" });
+      }
+      for (const reader of Object.values(readers)) {
+        await assert.rejects(reader.read(reader.input, new Date("invalid")), { code: "PIPELINE_INPUT_CONFLICT" });
+      }
+      for (const registered of [discoveryStage, leadStage, trafficStage]) {
+        assert.equal((await prisma.pipelineStage.findUnique({ where: { id: registered.stage.id } })).state,
+          "aggregating");
+      }
+      assert.deepEqual(await prisma.run.findUnique({ where: { id: runId } }), runBefore);
+      const expired = new Date(now.getTime() + 120001);
+      for (const reader of Object.values(readers)) {
+        await assert.rejects(reader.read(reader.input, expired), { code: "PIPELINE_LEASE_LOST" });
+      }
+      const domainRead = await readers.domain.read(readers.domain.input, new Date(now.getTime() + 2));
+      assert.equal(domainRead.awsProviderConfig.browserless.origin, provider.browserless.origin);
+      assert.equal(domainRead.awsProviderConfig.leadFetch.maxPagesPerStore, 5);
+      assert.equal(domainRead.trafficSnapshot.dataForSeo.contractVersion, traffic.dataForSeo.contractVersion);
+      assert.equal(domainRead.trafficSnapshot.crux.rest.metricSetKey, traffic.crux.rest.metricSetKey);
+      assert.equal(domainRead.trafficSnapshot.crux.bigQuery.originLimit, traffic.crux.bigQuery.originLimit);
+      const leadRead = await readers.lead.read(readers.lead.input, new Date(now.getTime() + 2));
+      assert.equal(leadRead.profiles.length, 0);
+      const leadCompletion = await coordinator.completeAggregator({ stageId: leadStage.stage.id,
+        token: leadToken, state: "completed" }, new Date(now.getTime() + 3));
+      assert.equal(leadCompletion.stage.state, "completed");
+      assert.equal((await prisma.pipelineStage.findUnique({ where: { id: leadStage.stage.id } })).state,
+        "completed");
+      const finalReuseRead = await readers.finalReuse.read(readers.finalReuse.input,
+        new Date(now.getTime() + 4));
+      assert.deepEqual(finalReuseRead.trafficRows, []); assert.deepEqual(finalReuseRead.leadTasks, []);
+      assert.deepEqual(finalReuseRead.leads, []);
+      assert.deepEqual(await readers.ambiguousTargets.read(readers.ambiguousTargets.input,
+        new Date(now.getTime() + 4)), []);
+      assert.deepEqual(await readers.terminalWork.read(readers.terminalWork.input,
+        new Date(now.getTime() + 4)), []);
+      assert.equal((await prisma.pipelineStage.findUnique({ where: { id: discoveryStage.stage.id } })).state,
+        "aggregating");
+      assert.equal((await prisma.pipelineStage.findUnique({ where: { id: trafficStage.stage.id } })).state,
+        "aggregating");
+      assert.deepEqual(await prisma.run.findUnique({ where: { id: runId } }), runBefore);
+    } finally {
+      await prisma?.$disconnect();
+      await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      const [absent] = await base.$queryRawUnsafe(
+        `SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '${schema}') AS present`);
+      assert.equal(absent.present, false);
+      await base.$disconnect();
+    }
   });

@@ -69,6 +69,14 @@ import {
 const ACTIVE_STATES = ["queued", "running"];
 const BULK_CHECKPOINT_LIMIT = 500;
 
+function requireAwsPipelineNow(now) {
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+    throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
+  }
+  return now;
+}
+const AWS_PIPELINE_TRANSACTION_OPTIONS = Object.freeze({ maxWait: 5_000, timeout: 30_000 });
+
 function runId() {
   return `run_${randomBytes(18).toString("base64url")}`;
 }
@@ -1539,16 +1547,17 @@ export class PrismaRunRepository {
       const finalRun = await transaction.run.findUnique({ where: { id: input.runId } });
       return { run: finalRun, stage: registered.stage,
         dispatchItems: registered.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
-  async readAwsReuseInputs(input) {
+  async readAwsReuseInputs(input, now) {
+    requireAwsPipelineNow(now);
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, {
         runId: input.runId, stage: "discovery", generation: input.generation,
         token: input.aggregationToken
-      }, new Date());
+      }, now);
       if (!(input.evaluatedAt instanceof Date) || input.evaluatedAt.getTime() !== owned.stage.createdAt.getTime()) {
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
@@ -1589,16 +1598,17 @@ export class PrismaRunRepository {
       }) : [];
       return { profiles, trafficRows, latestCruxMonth, trafficSnapshot, awsProviderConfig,
         stage: owned.stage, tasks: owned.tasks };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
-  async readAwsReusableProfiles(input) {
+  async readAwsReusableProfiles(input, now) {
+    requireAwsPipelineNow(now);
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       await assertCompleteAggregatorInTransaction(transaction, {
         runId: input.runId, stage: "lead", generation: input.generation,
         token: input.aggregationToken
-      }, new Date());
+      }, now);
       if (!(input.evaluatedAt instanceof Date) || !Array.isArray(input.selections)) {
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       }
@@ -1624,7 +1634,7 @@ export class PrismaRunRepository {
         assertProfileMatchesShop(profile, selection.stableIdentity);
       }
       return { profiles };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async publishAwsDomainCheckpoint(input, now = new Date()) {
@@ -1679,7 +1689,7 @@ export class PrismaRunRepository {
       }, now);
       return { stage: completed.stage, leadStage: lead.stage,
         dispatchItems: lead.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async publishAwsLeadCheckpoint(input, now = new Date()) {
@@ -1808,7 +1818,7 @@ export class PrismaRunRepository {
         token: input.aggregationToken, state: "completed" }, now);
       return { stage: completed.stage, trafficStage: traffic.stage, summary,
         dispatchItems: traffic.tasks.map((task) => ({ itemKey: task.itemKey, inputFingerprint: task.inputFingerprint })) };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async saveQueryValidation(runIdentifier, lease, rows, now = new Date()) {
@@ -2211,7 +2221,7 @@ export class PrismaRunRepository {
         processingPipelineTaskId: taskId, safeErrorCode: null, safeErrorMessage: null,
         startedAt: now, completedAt: null } });
       return { outcome: "owned" };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async claimAwsRunLease(
@@ -2255,7 +2265,7 @@ export class PrismaRunRepository {
       if (claimed.count !== 1) return { outcome: "busy" };
       const durable = await transaction.run.findUnique({ where: { id: runIdentifier } });
       return { outcome: "owned", lease: { owner, token, attempt: durable.leaseAttempt, expiresAt } };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async renewAwsRunLease(
@@ -2279,7 +2289,7 @@ export class PrismaRunRepository {
         lastHeartbeatAt: now } });
       if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_LEASE_LOST");
       return { run: await transaction.run.findUnique({ where: { id: runIdentifier } }) };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async loadAwsTrafficStage({ runId: runIdentifier, generation, runLease }, now = new Date()) {
@@ -2299,7 +2309,7 @@ export class PrismaRunRepository {
       const leads = await transaction.lead.findMany({ where: { runId: runIdentifier, status: "qualified" },
         orderBy: [{ shopId: "asc" }, { id: "asc" }] });
       return { run, stage, tasks, leads };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
     return { ...loaded, run: { ...loaded.run,
       trafficEnrichmentConfig: parseTrafficRunConfig(loaded.run.trafficEnrichmentConfig),
       awsProviderConfig: parseAwsProviderConfig(loaded.run.awsProviderConfig) } };
@@ -2423,7 +2433,7 @@ export class PrismaRunRepository {
       return output.map(({ workId, ...item }) => item.outcome === "pending_cas"
         ? { ...item, outcome: "owned" }
         : item);
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async recordAwsDataForSeoOutcome(runIdentifier, runLease, outcome, now = new Date()) {
@@ -2456,16 +2466,17 @@ export class PrismaRunRepository {
         safeErrorCode: outcome.safeErrorCode ?? null, reservationCostUsd: null,
         ambiguousAfter: null, completedAt: now } });
       return { ledger: updated };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
-  async readAwsFinalReuseRows(input) {
+  async readAwsFinalReuseRows(input, now) {
+    requireAwsPipelineNow(now);
     if (!(input.evaluatedAt instanceof Date) || !Array.isArray(input.selections))
       throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
-        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
       const selections = [...input.selections].sort((left, right) =>
         left.cacheId.localeCompare(right.cacheId) || left.shopId.localeCompare(right.shopId));
       requireUniqueBatchKeys("AWS final reuse selections", selections,
@@ -2505,10 +2516,11 @@ export class PrismaRunRepository {
       if (leads.length !== trafficShopIds.length || leads.some((lead, index) =>
         lead.shopId !== trafficShopIds[index])) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return { trafficRows, leadStage, leadTasks, leads };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
-  async readAwsAmbiguousDataForSeoTargets(input) {
+  async readAwsAmbiguousDataForSeoTargets(input, now) {
+    requireAwsPipelineNow(now);
     if (!Array.isArray(input?.candidates)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     const candidates = input.candidates.map((candidate, ordinal) => ({ ...candidate, ordinal }));
     requireUniqueBatchKeys("AWS ambiguous DataForSEO candidates", candidates,
@@ -2519,15 +2531,16 @@ export class PrismaRunRepository {
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
-        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
       const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
       for (const candidate of candidates) if (!taskByShop.has(candidate.shopId))
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return candidates.map(({ ordinal: _ordinal, ...candidate }) => candidate);
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
-  async readAwsTerminalCruxBigQueryWork(input) {
+  async readAwsTerminalCruxBigQueryWork(input, now) {
+    requireAwsPipelineNow(now);
     if (!Array.isArray(input?.candidates)) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
     const candidates = input.candidates.map((candidate, ordinal) => ({ ...candidate, ordinal }));
     requireUniqueBatchKeys("AWS terminal latest CrUX BigQuery candidates", candidates, ({ shopId }) => shopId);
@@ -2538,7 +2551,7 @@ export class PrismaRunRepository {
     return this.prisma.$transaction(async (transaction) => {
       await selectBulkSchema(transaction, this.databaseSchema);
       const owned = await assertCompleteAggregatorInTransaction(transaction, { runId: input.runId,
-        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, new Date());
+        stage: "traffic_crux", generation: input.generation, token: input.aggregationToken }, now);
       const taskByShop = new Map(owned.tasks.map((task) => [task.itemKey, task]));
       for (const candidate of candidates) if (taskByShop.get(candidate.shopId)?.id !== candidate.pipelineTaskId)
         throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
@@ -2561,7 +2574,7 @@ export class PrismaRunRepository {
       ` : [];
       if (rows.length !== candidates.length) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return rows.map(({ ordinal: _ordinal, ...row }) => row);
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async publishAwsFinalResults(input, now = new Date(), { afterStep = async () => {} } = {}) {
@@ -2835,7 +2848,7 @@ export class PrismaRunRepository {
       if (updated.count !== 1) throw new PipelineInvariantError("PIPELINE_INPUT_CONFLICT");
       return { run: await transaction.run.findUnique({ where: { id: input.runId } }),
         stage: await transaction.pipelineStage.findUnique({ where: { id: input.stageId } }), resultFingerprint };
-    }, { maxWait: 5_000, timeout: 30_000 });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async claimShopWork(
@@ -3813,7 +3826,7 @@ export class PrismaRunRepository {
       return transaction.trafficEnrichmentCache.findMany({
         where: { expiresAt: { gt: now }, OR }
       });
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async readReusableLatestCruxBigQueryCache(
@@ -3840,7 +3853,7 @@ export class PrismaRunRepository {
         },
         orderBy: [{ scopeKey: "desc" }, { identity: "asc" }]
       });
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async saveTrafficSourceResults(
@@ -4189,7 +4202,7 @@ export class PrismaRunRepository {
               data: { requestFingerprint: request.requestFingerprint, ...data }
             });
         return { outcome: "planned", ledger };
-      });
+      }, AWS_PIPELINE_TRANSACTION_OPTIONS);
     } catch (error) {
       if (retryAfterConflict && isUniqueConstraint(error)) {
         return this.planDataForSeoRequest(
@@ -4262,7 +4275,7 @@ export class PrismaRunRepository {
           : exposureUsd,
         ledger
       };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async markDataForSeoRequestSucceeded(
@@ -4469,7 +4482,7 @@ export class PrismaRunRepository {
       });
       const value = aggregate._sum.providerCostUsd;
       return value == null ? 0 : Number(value);
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async getDataForSeoRunExposureUsd(runIdentifier, lease, now = new Date()) {
@@ -4533,7 +4546,7 @@ export class PrismaRunRepository {
         : { count: 0 };
       const workCount = await markPaidWorkForAmbiguousLedgers(transaction, now);
       return { count: transitioned.count, workCount };
-    });
+    }, AWS_PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async saveCompletedResults(runIdentifier, lease, {

@@ -293,7 +293,7 @@ export async function processFinalAggregation(message, runtime, {
     const ownedAmbiguousDataForSeo = ambiguousDataForSeoCandidates.length
       ? await runtime.repository.readAwsAmbiguousDataForSeoTargets({ runId: message.runId,
         generation: message.generation, aggregationToken: token,
-        candidates: ambiguousDataForSeoCandidates }) : [];
+        candidates: ambiguousDataForSeoCandidates }, new Date()) : [];
     const ambiguousDataForSeoTargetsByScope = new Map();
     for (const candidate of ownedAmbiguousDataForSeo) {
       const targets = ambiguousDataForSeoTargetsByScope.get(candidate.scopeKey) || new Map();
@@ -323,7 +323,7 @@ export async function processFinalAggregation(message, runtime, {
     if (terminalLatestCruxBigQueryCandidates.length) {
       const resolved = await runtime.repository.readAwsTerminalCruxBigQueryWork({ runId: message.runId,
         generation: message.generation, aggregationToken: token,
-        candidates: terminalLatestCruxBigQueryCandidates });
+        candidates: terminalLatestCruxBigQueryCandidates }, new Date());
       workOutcomes.push(...resolved.map((item) => ({ ...item, workType: "crux_bigquery" })));
     }
     const reuseSelections = manifest.workPlan.domains.flatMap((plan) =>
@@ -333,7 +333,7 @@ export async function processFinalAggregation(message, runtime, {
     phase = "reuse_rows";
     const reused = await runtime.repository.readAwsFinalReuseRows({ runId: message.runId,
       generation: message.generation, stageId: complete.stage.id, aggregationToken: token,
-      selections: reuseSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) });
+      selections: reuseSelections, evaluatedAt: new Date(manifest.workPlan.evaluatedAt) }, new Date());
     cacheRows.push(...reused.trafficRows);
     const reusedPublication = materializeSkippedReuse({ combinedEntries, selections: reuseSelections,
       trafficRows: reused.trafficRows, leads: reused.leads || [] });

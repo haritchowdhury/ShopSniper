@@ -7,6 +7,7 @@ const FINISHED_STAGE_STATES = new Set(["completed", "failed"]);
 const FINGERPRINT = /^[a-f0-9]{64}$/u;
 const SCHEMA = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const PIPELINE_TRANSACTION_OPTIONS = Object.freeze({ maxWait: 5_000, timeout: 30_000 });
 
 function conflict(code = "PIPELINE_INPUT_CONFLICT") {
   throw new PipelineInvariantError(code);
@@ -67,24 +68,26 @@ async function selectSchema(transaction, schema) {
 
 async function lockedTask(transaction, taskId) {
   const rows = await transaction.$queryRaw`
-    SELECT "id" FROM "PipelineTask" WHERE "id" = ${taskId} FOR UPDATE
+    SELECT * FROM "PipelineTask" WHERE "id" = ${taskId} FOR UPDATE
   `;
   if (rows.length !== 1) conflict();
-  return transaction.pipelineTask.findUnique({ where: { id: taskId } });
+  return rows[0];
 }
 
 async function lockedStage(transaction, stageId) {
   const rows = await transaction.$queryRaw`
-    SELECT "id" FROM "PipelineStage" WHERE "id" = ${stageId} FOR UPDATE
+    SELECT * FROM "PipelineStage" WHERE "id" = ${stageId} FOR UPDATE
   `;
   if (rows.length !== 1) conflict();
-  return transaction.pipelineStage.findUnique({ where: { id: stageId } });
+  return rows[0];
 }
 
 async function lockedRun(transaction, runId) {
-  const rows = await transaction.$queryRaw`SELECT "id" FROM "Run" WHERE "id" = ${runId} FOR UPDATE`;
+  const rows = await transaction.$queryRaw`
+    SELECT * FROM "Run" WHERE "id" = ${runId} FOR UPDATE
+  `;
   if (rows.length !== 1) conflict();
-  return transaction.run.findUnique({ where: { id: runId } });
+  return rows[0];
 }
 
 function activeAwsRun(run, generation) {
@@ -188,7 +191,7 @@ export class PipelineCoordinatorRepository {
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
       return registerStageInTransaction(transaction, input, now);
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async recordDispatch({ stageId, itemKeys }, now) {
@@ -196,19 +199,21 @@ export class PipelineCoordinatorRepository {
     if (!Array.isArray(itemKeys) || new Set(itemKeys).size !== itemKeys.length) conflict();
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
-      const taskLocks = await transaction.$queryRaw`
-        SELECT "id" FROM "PipelineTask" WHERE "stageId" = ${stageId} ORDER BY "id" FOR UPDATE
+      const lockedTasks = await transaction.$queryRaw`
+        SELECT * FROM "PipelineTask" WHERE "stageId" = ${stageId} ORDER BY "id" FOR UPDATE
       `;
       const stage = await lockedStage(transaction, stageId);
       if (["failed", "cancelled"].includes(stage.state)) conflict("PIPELINE_CANCELLED");
-      const existing = await transaction.pipelineTask.findMany({ where: { stageId, itemKey: { in: itemKeys } } });
-      if (existing.length !== itemKeys.length || taskLocks.length !== stage.expectedCount) conflict();
+      if (lockedTasks.length !== stage.expectedCount) conflict();
+      const requestedItemKeys = new Set(itemKeys);
+      const requested = lockedTasks.filter((task) => requestedItemKeys.has(task.itemKey));
+      if (requested.length !== itemKeys.length) conflict();
       const updated = await transaction.pipelineTask.updateMany({
         where: { stageId, itemKey: { in: itemKeys } },
         data: { dispatchCount: { increment: 1 }, lastDispatchedAt: now }
       });
       return { count: updated.count };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async claimTask(input, now) {
@@ -239,7 +244,7 @@ export class PipelineCoordinatorRepository {
         leaseExpiresAt: plusMilliseconds(now, input.leaseDurationMs)
       } });
       return { outcome: "owned", task, stage };
-    }, { maxWait: 5_000, timeout: 30_000 });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async renewTask({ taskId, token, leaseDurationMs }, now) {
@@ -259,7 +264,7 @@ export class PipelineCoordinatorRepository {
       const expiresAt = plusMilliseconds(now, leaseDurationMs);
       await transaction.pipelineTask.update({ where: { id: taskId }, data: { leaseExpiresAt: expiresAt } });
       return { expiresAt };
-    }, { maxWait: 5_000, timeout: 30_000 });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async recordTerminal(input, now) {
@@ -299,7 +304,7 @@ export class PipelineCoordinatorRepository {
         stage = await transaction.pipelineStage.update({ where: { id: stage.id }, data: { state: "ready" } });
       }
       return { outcome: "recorded", task, stageBecameReady };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async claimAggregator(input, now) {
@@ -328,7 +333,7 @@ export class PipelineCoordinatorRepository {
         aggregationAttempt: { increment: 1 }
       } });
       return { outcome: "owned", stage };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async renewAggregator({ stageId, token, leaseDurationMs }, now) {
@@ -347,7 +352,7 @@ export class PipelineCoordinatorRepository {
       const expiresAt = plusMilliseconds(now, leaseDurationMs);
       await transaction.pipelineStage.update({ where: { id: stageId }, data: { aggregationLeaseExpiresAt: expiresAt } });
       return { expiresAt };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async getCompleteStage(input, now) {
@@ -355,7 +360,7 @@ export class PipelineCoordinatorRepository {
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
       return assertCompleteAggregatorInTransaction(transaction, input, now);
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async completeAggregator(input, now) {
@@ -365,7 +370,7 @@ export class PipelineCoordinatorRepository {
     return this.prisma.$transaction(async (transaction) => {
       await selectSchema(transaction, this.databaseSchema);
       return completeAggregatorInTransaction(transaction, input, now);
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async listRecoverable({ olderThan, limit = 100 }, now) {
@@ -388,7 +393,7 @@ export class PipelineCoordinatorRepository {
       });
       const tasks = taskRows.map(({ stage, ...task }) => ({ task, stage }));
       return { tasks, stages };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 
   async cancelRunGeneration({ runId, generation }, now) {
@@ -434,6 +439,6 @@ export class PipelineCoordinatorRepository {
         lastHeartbeatAt: null } });
       if (updated.count !== 1) conflict("PIPELINE_CANCELLED");
       return { run: await transaction.run.findUnique({ where: { id: runId } }), stages, tasks };
-    });
+    }, PIPELINE_TRANSACTION_OPTIONS);
   }
 }
