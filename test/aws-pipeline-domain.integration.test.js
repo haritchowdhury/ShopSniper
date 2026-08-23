@@ -567,7 +567,7 @@ test("SCN-KI-046 bridges 100 strict discovery artifacts to 1,000 fenced durable 
           try {
             await base.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
             const residual = await base.$queryRawUnsafe(
-              "SELECT nspname FROM pg_namespace WHERE nspname = $1", schema);
+              "SELECT nspname::text AS \"nspname\" FROM pg_namespace WHERE nspname = $1", schema);
             schemaRowCount = residual.length;
             assert.equal(schemaRowCount, 0);
           } finally {
