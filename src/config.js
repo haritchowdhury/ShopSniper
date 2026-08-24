@@ -195,6 +195,12 @@ export function loadConfig({ cwd = process.cwd() } = {}) {
     }),
     runExecutionBackend: process.env.RUN_EXECUTION_BACKEND || "local",
     awsPipelineEnabled: strictBoolean("AWS_PIPELINE_ENABLED", false),
+    awsPipelineKeywordResearchEnabled: strictBoolean(
+      "AWS_PIPELINE_KEYWORD_RESEARCH_ENABLED",
+      false
+    ),
+    awsPipelineKeywordResearchQueueUrl:
+      process.env.AWS_PIPELINE_KEYWORD_RESEARCH_QUEUE_URL || "",
     awsRegion: process.env.AWS_REGION || "ap-south-2",
     awsPipelineBucket: process.env.AWS_PIPELINE_BUCKET || "",
     awsPipelineDiscoveryQueueUrl: process.env.AWS_PIPELINE_DISCOVERY_QUEUE_URL || "",

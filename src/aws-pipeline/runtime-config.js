@@ -20,7 +20,11 @@ export function loadAwsPipelineConfig(baseConfig) {
     throw new Error("AWS pipeline base configuration is required");
   }
   if (baseConfig.runExecutionBackend === "local" && !baseConfig.awsPipelineEnabled) {
-    return Object.freeze({ ...baseConfig, awsPipelineActive: false });
+    return Object.freeze({
+      ...baseConfig,
+      awsPipelineActive: false,
+      awsPipelineKeywordResearchActive: false
+    });
   }
   if (baseConfig.runExecutionBackend !== "aws" || baseConfig.awsPipelineEnabled !== true) {
     throw new Error("AWS pipeline requires RUN_EXECUTION_BACKEND=aws and AWS_PIPELINE_ENABLED=true");
@@ -33,5 +37,21 @@ export function loadAwsPipelineConfig(baseConfig) {
     if (!validHttpsUrl(baseConfig[key])) missing.push(key);
   }
   if (missing.length) throw new Error(`Missing or invalid AWS pipeline configuration: ${missing.join(", ")}`);
-  return Object.freeze({ ...baseConfig, awsPipelineActive: true });
+  if (baseConfig.awsPipelineKeywordResearchEnabled !== true) {
+    return Object.freeze({
+      ...baseConfig,
+      awsPipelineActive: true,
+      awsPipelineKeywordResearchActive: false
+    });
+  }
+  if (!validHttpsUrl(baseConfig.awsPipelineKeywordResearchQueueUrl)) {
+    throw Object.assign(new Error("KEYWORD_RUNTIME_CONFIG_INVALID"), {
+      code: "KEYWORD_RUNTIME_CONFIG_INVALID"
+    });
+  }
+  return Object.freeze({
+    ...baseConfig,
+    awsPipelineActive: true,
+    awsPipelineKeywordResearchActive: true
+  });
 }

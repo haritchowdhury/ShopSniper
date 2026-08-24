@@ -76,6 +76,33 @@
       "Type": "String",
       "MinLength": 1,
       "MaxLength": 1024
+    },
+    "KeywordWorkerCodeKey": {
+      "Type": "String",
+      "AllowedPattern": "^deployment/[a-f0-9]{64}/keyword-worker\\.zip$"
+    },
+    "KeywordWorkerCodeVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    },
+    "KeywordResearchEnabled": {
+      "Type": "String",
+      "AllowedValues": [
+        "false",
+        "true"
+      ],
+      "Default": "false"
+    }
+  },
+  "Conditions": {
+    "KeywordResearchEnabledCondition": {
+      "Fn::Equals": [
+        {
+          "Ref": "KeywordResearchEnabled"
+        },
+        "true"
+      ]
     }
   },
   "Resources": {
@@ -343,6 +370,70 @@
           {
             "Key": "QueueRole",
             "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "KeywordResearchDlq": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-research-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "dead-letter"
+          }
+        ]
+      }
+    },
+    "KeywordResearchQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-research"
+        },
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 1080,
+        "MaximumMessageSize": 262144,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "KeywordResearchDlq",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          },
+          {
+            "Key": "QueueRole",
+            "Value": "source"
           }
         ]
       }
@@ -1542,6 +1633,161 @@
                         "TrafficCheckQueue",
                         "Arn"
                       ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "KeywordResearchQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "StoreSignal"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "Environment"
+            }
+          }
+        ]
+      }
+    },
+    "KeywordWorkerLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-keyword-worker"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "KeywordWorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "lambda.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PipelineAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WriteOwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-keyword-worker:*"
+                  }
+                },
+                {
+                  "Sid": "ReadPipelineSecret",
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": {
+                    "Ref": "PipelineSecret"
+                  }
+                },
+                {
+                  "Sid": "ConsumeAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:ChangeMessageVisibility",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "KeywordResearchQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "SendAssignedQueues",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "KeywordResearchQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ListAssignedArtifactKeys",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/keyword-research/*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "ReadAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/keyword-research/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteAssignedArtifacts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucketName}/runs/keyword-research/*"
                     }
                   ]
                 }
@@ -1630,6 +1876,12 @@
                 {
                   "Fn::GetAtt": [
                     "DiscoveryCheckQueue",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "KeywordResearchQueue",
                     "Arn"
                   ]
                 }
@@ -2194,7 +2446,17 @@
             "AWS_PIPELINE_TASK_LEASE_MS": "60000",
             "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
             "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
-            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000"
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000",
+            "AWS_PIPELINE_KEYWORD_RESEARCH_QUEUE_URL": {
+              "Ref": "KeywordResearchQueue"
+            },
+            "AWS_PIPELINE_KEYWORD_RESEARCH_ENABLED": {
+              "Fn::If": [
+                "KeywordResearchEnabledCondition",
+                "true",
+                "false"
+              ]
+            }
           }
         },
         "Tracing": "Disabled",
@@ -2204,6 +2466,123 @@
             "Ref": "Environment"
           }
         }
+      }
+    },
+    "KeywordWorker": {
+      "Type": "AWS::Serverless::Function",
+      "DependsOn": [
+        "KeywordWorkerLogGroup"
+      ],
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-worker"
+        },
+        "Description": "StoreSignal keyword-worker pipeline handler",
+        "CodeUri": {
+          "Bucket": {
+            "Ref": "ArtifactBucketName"
+          },
+          "Key": {
+            "Ref": "KeywordWorkerCodeKey"
+          },
+          "Version": {
+            "Ref": "KeywordWorkerCodeVersion"
+          }
+        },
+        "Handler": "index.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "x86_64"
+        ],
+        "MemorySize": 1024,
+        "ReservedConcurrentExecutions": 1,
+        "Timeout": 180,
+        "EphemeralStorage": {
+          "Size": 512
+        },
+        "Role": {
+          "Fn::GetAtt": [
+            "KeywordWorkerRole",
+            "Arn"
+          ]
+        },
+        "Environment": {
+          "Variables": {
+            "RUN_EXECUTION_BACKEND": "aws",
+            "AWS_PIPELINE_ENABLED": "true",
+            "AWS_PIPELINE_BUCKET": {
+              "Ref": "ArtifactBucketName"
+            },
+            "AWS_PIPELINE_DISCOVERY_QUEUE_URL": {
+              "Ref": "DiscoveryQueue"
+            },
+            "AWS_PIPELINE_DOMAIN_AGGREGATION_QUEUE_URL": {
+              "Ref": "DiscoveryCheckQueue"
+            },
+            "AWS_PIPELINE_LEAD_QUEUE_URL": {
+              "Ref": "LeadQueue"
+            },
+            "AWS_PIPELINE_LEAD_AGGREGATION_QUEUE_URL": {
+              "Ref": "LeadCheckQueue"
+            },
+            "AWS_PIPELINE_TRAFFIC_QUEUE_URL": {
+              "Ref": "TrafficQueue"
+            },
+            "AWS_PIPELINE_FINAL_AGGREGATION_QUEUE_URL": {
+              "Ref": "TrafficCheckQueue"
+            },
+            "AWS_PIPELINE_SECRET_ID": {
+              "Ref": "PipelineSecret"
+            },
+            "AWS_PIPELINE_TASK_LEASE_MS": "60000",
+            "AWS_PIPELINE_AGGREGATOR_LEASE_MS": "120000",
+            "AWS_PIPELINE_RECOVERY_AGE_MS": "300000",
+            "AWS_PIPELINE_MAX_ARTIFACT_BYTES": "5000000",
+            "AWS_PIPELINE_KEYWORD_RESEARCH_QUEUE_URL": {
+              "Ref": "KeywordResearchQueue"
+            },
+            "AWS_PIPELINE_KEYWORD_RESEARCH_ENABLED": {
+              "Fn::If": [
+                "KeywordResearchEnabledCondition",
+                "true",
+                "false"
+              ]
+            }
+          }
+        },
+        "Tracing": "Disabled",
+        "Tags": {
+          "Project": "StoreSignal",
+          "Environment": {
+            "Ref": "Environment"
+          }
+        }
+      }
+    },
+    "KeywordResearchMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "Enabled": {
+          "Fn::If": [
+            "KeywordResearchEnabledCondition",
+            true,
+            false
+          ]
+        },
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "KeywordResearchQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "KeywordWorker"
+        },
+        "BatchSize": 1,
+        "MaximumBatchingWindowInSeconds": 0,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ]
       }
     },
     "DiscoveryMapping": {
@@ -2375,6 +2754,112 @@
             "Arn"
           ]
         }
+      }
+    },
+    "KeywordResearchDlqDepthAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-research-dlq-depth"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "KeywordResearchDlq",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "KeywordResearchOldestMessageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-research-oldest-message"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 300,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "KeywordResearchQueue",
+                "QueueName"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "KeywordWorkerErrorsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-worker-errors"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "KeywordWorker"
+            }
+          }
+        ]
+      }
+    },
+    "KeywordWorkerThrottlesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "${AWS::StackName}-keyword-worker-throttles"
+        },
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "MetricName": "Throttles",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "KeywordWorker"
+            }
+          }
+        ]
       }
     },
     "DiscoveryDlqDepthAlarm": {
@@ -3296,6 +3781,35 @@
       "Value": {
         "Fn::GetAtt": [
           "Recovery",
+          "Arn"
+        ]
+      }
+    },
+    "KeywordResearchQueueUrl": {
+      "Value": {
+        "Ref": "KeywordResearchQueue"
+      }
+    },
+    "KeywordResearchQueueArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "KeywordResearchQueue",
+          "Arn"
+        ]
+      }
+    },
+    "KeywordResearchDlqArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "KeywordResearchDlq",
+          "Arn"
+        ]
+      }
+    },
+    "KeywordWorkerFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "KeywordWorker",
           "Arn"
         ]
       }

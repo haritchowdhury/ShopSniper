@@ -13,6 +13,9 @@ import { pipelineLog } from "../src/aws-pipeline/pipeline-log.js";
 import { createPipelineRuntime } from "../src/aws-pipeline/runtime.js";
 import { loadAwsPipelineConfig } from "../src/aws-pipeline/runtime-config.js";
 import { loadPipelineSecrets } from "../src/aws-pipeline/secrets.js";
+import { loadConfig } from "../src/config.js";
+
+const W7_OWNER_REGISTRY = Object.freeze({"owner":"runtime_config","requiredCases":["W7-RUNTIME-01"],"requiredControls":["W7-NC-01","W7-NC-02"]}); // W7-REGISTRY
 
 const fp = (character) => character.repeat(64);
 const valueSchema = z.object({ value: z.string() }).strict();
@@ -50,6 +53,165 @@ test("AWS config remains inert locally and validates the exact AWS activation su
   assert.equal(active.awsPipelineActive, true);
   assert.throws(() => loadAwsPipelineConfig({ ...active, awsPipelineTrafficQueueUrl: "http://unsafe" }));
   assert.throws(() => loadAwsPipelineConfig({ runExecutionBackend: "aws", awsPipelineEnabled: false }));
+});
+
+const W7_QUEUE_VALUES = Object.freeze({
+  awsPipelineDiscoveryQueueUrl: "https://sqs.example/discovery",
+  awsPipelineDomainAggregationQueueUrl: "https://sqs.example/domain",
+  awsPipelineLeadQueueUrl: "https://sqs.example/lead",
+  awsPipelineLeadAggregationQueueUrl: "https://sqs.example/lead-aggregation",
+  awsPipelineTrafficQueueUrl: "https://sqs.example/traffic",
+  awsPipelineFinalAggregationQueueUrl: "https://sqs.example/final"
+});
+
+function w7AwsConfig(overrides = {}) {
+  return {
+    runExecutionBackend: "aws",
+    awsPipelineEnabled: true,
+    awsRegion: "ap-south-2",
+    awsPipelineBucket: "fixture-bucket",
+    awsPipelineSecretId: "fixture-secret",
+    ...W7_QUEUE_VALUES,
+    awsPipelineKeywordResearchEnabled: true,
+    awsPipelineKeywordResearchQueueUrl: "https://sqs.example/keyword-research",
+    ...overrides
+  };
+}
+
+function assertW7QueuesPreserved(input, output) {
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(W7_QUEUE_VALUES).map((key) => [key, output[key]])),
+    Object.fromEntries(Object.keys(W7_QUEUE_VALUES).map((key) => [key, input[key]]))
+  );
+}
+
+function assertW7ActiveConfig(input) {
+  const output = loadAwsPipelineConfig(input);
+  assert.equal(output.awsPipelineActive, true);
+  assert.equal(output.awsPipelineKeywordResearchEnabled, true);
+  assert.equal(output.awsPipelineKeywordResearchQueueUrl, "https://sqs.example/keyword-research");
+  assert.equal(output.awsPipelineKeywordResearchActive, true);
+  assert.equal(Object.isFrozen(output), true);
+  assertW7QueuesPreserved(input, output);
+  return output;
+}
+
+function isW7RuntimeConfigError(error) {
+  return error instanceof Error && error.message === "KEYWORD_RUNTIME_CONFIG_INVALID" &&
+    error.code === "KEYWORD_RUNTIME_CONFIG_INVALID";
+}
+
+function w7CaseRecord(id) {
+  return `KI_W7_EXECUTION_RECORD_V1=${JSON.stringify({
+    schema: "ki-w7-execution-record-v1",
+    id,
+    kind: "case",
+    owner: W7_OWNER_REGISTRY.owner,
+    executed: true,
+    activated: true,
+    oraclePassed: true,
+    skipped: false
+  })}`;
+}
+
+function w7ControlRecord(id) {
+  return `KI_W7_EXECUTION_RECORD_V1=${JSON.stringify({
+    schema: "ki-w7-execution-record-v1",
+    id,
+    kind: "control",
+    owner: W7_OWNER_REGISTRY.owner,
+    executed: true,
+    activated: true,
+    positivePassed: true,
+    mutationFalsified: true,
+    freshPositivePassed: true,
+    skipped: false
+  })}`;
+}
+
+test("[W7 CASE W7-RUNTIME-01] keyword runtime config partitions preserve established queues", (t) => {
+  const enabledName = "AWS_PIPELINE_KEYWORD_RESEARCH_ENABLED";
+  const queueName = "AWS_PIPELINE_KEYWORD_RESEARCH_QUEUE_URL";
+  const previousEnabled = process.env[enabledName];
+  const previousQueue = process.env[queueName];
+  try {
+    delete process.env[enabledName];
+    delete process.env[queueName];
+    const defaults = loadConfig({ cwd: "/tmp/ki-w7-no-dotenv-runtime-config" });
+    assert.deepEqual({
+      awsPipelineKeywordResearchEnabled: defaults.awsPipelineKeywordResearchEnabled,
+      awsPipelineKeywordResearchQueueUrl: defaults.awsPipelineKeywordResearchQueueUrl
+    }, {
+      awsPipelineKeywordResearchEnabled: false,
+      awsPipelineKeywordResearchQueueUrl: ""
+    });
+    process.env[enabledName] = "true";
+    process.env[queueName] = "https://sqs.example/keyword-research";
+    const enabled = loadConfig({ cwd: "/tmp/ki-w7-no-dotenv-runtime-config" });
+    assert.deepEqual({
+      awsPipelineKeywordResearchEnabled: enabled.awsPipelineKeywordResearchEnabled,
+      awsPipelineKeywordResearchQueueUrl: enabled.awsPipelineKeywordResearchQueueUrl
+    }, {
+      awsPipelineKeywordResearchEnabled: true,
+      awsPipelineKeywordResearchQueueUrl: "https://sqs.example/keyword-research"
+    });
+  } finally {
+    if (previousEnabled === undefined) delete process.env[enabledName];
+    else process.env[enabledName] = previousEnabled;
+    if (previousQueue === undefined) delete process.env[queueName];
+    else process.env[queueName] = previousQueue;
+  }
+
+  const local = loadAwsPipelineConfig({
+    runExecutionBackend: "local",
+    awsPipelineEnabled: false,
+    awsPipelineKeywordResearchEnabled: false,
+    awsPipelineKeywordResearchQueueUrl: ""
+  });
+  assert.deepEqual({
+    awsPipelineActive: local.awsPipelineActive,
+    awsPipelineKeywordResearchActive: local.awsPipelineKeywordResearchActive
+  }, { awsPipelineActive: false, awsPipelineKeywordResearchActive: false });
+  assert.equal(Object.isFrozen(local), true);
+
+  const inactiveInput = w7AwsConfig({
+    awsPipelineKeywordResearchEnabled: false,
+    awsPipelineKeywordResearchQueueUrl: ""
+  });
+  const inactive = loadAwsPipelineConfig(inactiveInput);
+  assert.equal(inactive.awsPipelineActive, true);
+  assert.equal(inactive.awsPipelineKeywordResearchActive, false);
+  assert.equal(Object.isFrozen(inactive), true);
+  assertW7QueuesPreserved(inactiveInput, inactive);
+
+  assertW7ActiveConfig(w7AwsConfig());
+  assert.throws(
+    () => loadAwsPipelineConfig(w7AwsConfig({ awsPipelineKeywordResearchQueueUrl: "" })),
+    isW7RuntimeConfigError
+  );
+  t.diagnostic(w7CaseRecord("W7-RUNTIME-01"));
+});
+
+test("[W7 CONTROL W7-NC-01] active keyword runtime rejects an empty queue URL", (t) => {
+  assertW7ActiveConfig(w7AwsConfig());
+  assert.throws(
+    () => assertW7ActiveConfig(w7AwsConfig({ awsPipelineKeywordResearchQueueUrl: "" })),
+    isW7RuntimeConfigError
+  );
+  assertW7ActiveConfig(w7AwsConfig());
+  t.diagnostic(w7ControlRecord("W7-NC-01"));
+});
+
+test("[W7 CONTROL W7-NC-02] active keyword runtime rejects an HTTP queue URL", (t) => {
+  assertW7ActiveConfig(w7AwsConfig());
+  assert.throws(
+    () => assertW7ActiveConfig(w7AwsConfig({
+      awsPipelineKeywordResearchQueueUrl: "http://sqs.example/keyword-research"
+    })),
+    isW7RuntimeConfigError
+  );
+  assertW7ActiveConfig(w7AwsConfig());
+  t.diagnostic(w7ControlRecord("W7-NC-02"));
 });
 
 test("runtime factory stays dependency-free in local mode and preserves the exact return surface", async () => {
