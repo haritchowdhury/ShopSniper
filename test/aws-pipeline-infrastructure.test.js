@@ -113,7 +113,7 @@ function validate(candidate) {
   assert.equal(resources.RecoverySchedule.Properties.ScheduleExpression, "rate(5 minutes)");
 
   const roles = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::IAM::Role");
-  assert.equal(roles.length, 7);
+  assert.equal(roles.length, 8);
   for (const [, role] of roles) for (const statement of policyStatements(role)) {
     const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
     const targets = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
@@ -151,14 +151,14 @@ function validate(candidate) {
   assert.equal(resources.ControlPlanePolicy.Properties.Groups, undefined);
 
   const alarms = Object.values(resources).filter(({ Type }) => Type === "AWS::CloudWatch::Alarm");
-  assert.equal(alarms.length, 27);
+  assert.equal(alarms.length, 31);
   assert(alarms.every(({ Properties }) => Properties.Dimensions?.length === 1 &&
     Properties.TreatMissingData === "notBreaching" && !Properties.AlarmActions));
   return true;
 }
 
 test("template implements the exact active topology", () => {
-  assert.equal(Object.keys(template.Resources).length, 72);
+  assert.equal(Object.keys(template.Resources).length, 82);
   assert.equal(validate(template), true);
 });
 
@@ -205,7 +205,7 @@ test("deployment commands are exact, dry-run-first, and secret-value hostile", a
   assert.throws(() => parseArguments([...args, "--apply-reviewed-change-set"]));
   const packet = await buildDeploymentPacket(expected);
   assert.equal(packet.zips.length, 7);
-  assert.equal(packet.full.resources.length, 72);
+  assert.equal(packet.full.resources.length, 82);
   assert.equal(packet.bootstrap.resources.length, 2);
   assert(packet.full.bytes > 51_200);
   assert.equal(packet.full.key,
