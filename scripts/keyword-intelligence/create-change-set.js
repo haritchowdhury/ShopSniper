@@ -200,7 +200,7 @@ function expectedAction(options) {
   if (options.phase === "full") {
     return options.applyReviewedChangeSet ? "W8-ACT-02" : "W8-ACT-01";
   }
-  return "W8-ACT-05";
+  return "W8-ACT-02";
 }
 
 async function requireApproval(packet, options) {
