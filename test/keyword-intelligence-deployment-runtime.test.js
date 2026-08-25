@@ -107,6 +107,13 @@ async function runHandlerCaptureHelper() {
   handlerUrl.searchParams.set("w7-runtime-composition", "1");
   const { handler } = await import(handlerUrl.href);
   const uninjectedResult = await handler(handlerEvent());
+  const lambdaContextResult = await handler(handlerEvent(), {
+    awsRequestId: "w7-runtime-request",
+    functionName: "storesignal-production-pipeline-keyword-worker",
+    getRemainingTimeInMillis() {
+      return 180_000;
+    }
+  });
   const injectedResult = await handler(handlerEvent(), {
     ...base,
     prisma: undefined,
@@ -115,9 +122,11 @@ async function runHandlerCaptureHelper() {
   return {
     createRuntimeCalls,
     uninjectedResult,
+    lambdaContextResult,
     injectedResult,
     uninjected: captures[0],
-    injected: captures[1]
+    lambdaContext: captures[1],
+    injected: captures[2]
   };
 }
 
@@ -134,8 +143,9 @@ function runHandlerCapture() {
 }
 
 function assertHandlerCapture(capture) {
-  assert.equal(capture.createRuntimeCalls, 1);
+  assert.equal(capture.createRuntimeCalls, 2);
   assert.deepEqual(capture.uninjectedResult, { batchItemFailures: [] });
+  assert.deepEqual(capture.lambdaContextResult, { batchItemFailures: [] });
   assert.deepEqual(capture.injectedResult, { batchItemFailures: [] });
   assert.deepEqual(capture.uninjected, {
     messageType: "keyword.initialize.v1",
@@ -157,6 +167,7 @@ function assertHandlerCapture(capture) {
     artifactStoreReplaced: true,
     dispatcherPreserved: true
   });
+  assert.deepEqual(capture.lambdaContext, capture.uninjected);
 }
 
 function recoveryBase({ active, pipelineFailure } = {}) {

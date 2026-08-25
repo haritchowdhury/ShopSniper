@@ -7,9 +7,17 @@ import { processKeywordMessage } from "./service.js";
 
 export const KEYWORD_ARTIFACT_MAX_BYTES = 33554432;
 
-export async function handler(event = {}, runtime) {
-  const injected = runtime != null;
-  const base = injected ? runtime : await createPipelineRuntime();
+function isLambdaContext(value) {
+  return value != null &&
+    typeof value === "object" &&
+    typeof value.awsRequestId === "string" &&
+    typeof value.functionName === "string" &&
+    typeof value.getRemainingTimeInMillis === "function";
+}
+
+export async function handler(event = {}, runtimeOrContext) {
+  const injected = runtimeOrContext != null && !isLambdaContext(runtimeOrContext);
+  const base = injected ? runtimeOrContext : await createPipelineRuntime();
   if (!injected) {
     let keywordQueueUrl;
     try {

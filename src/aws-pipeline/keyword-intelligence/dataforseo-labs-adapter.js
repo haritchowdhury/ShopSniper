@@ -99,13 +99,28 @@ function normalizeOverviewMetrics(items) {
   const metrics = [];
   for (const item of items) {
     if (!item.keyword || !item.keyword.trim()) continue;
-    const volume = item.keyword_info.search_volume;
+    const info = item.keyword_info ?? {};
+    const volume = info.search_volume;
     if (volume === null || volume === undefined || !Number.isFinite(volume) || volume <= 0) continue;
     const metric = {
       keyword: item.keyword,
-      keyword_info: { ...item.keyword_info, monthly_searches: item.monthly_searches },
-      keyword_properties: item.keyword_properties,
-      search_intent_info: item.search_intent_info
+      keyword_info: {
+        search_volume: volume,
+        cpc: info.cpc ?? null,
+        competition: info.competition ?? null,
+        competition_level: info.competition_level ?? null,
+        monthly_searches: (info.monthly_searches ?? []).map((month) => ({
+          year: month.year,
+          month: month.month,
+          search_volume: month.search_volume ?? 0
+        }))
+      },
+      keyword_properties: {
+        keyword_difficulty: item.keyword_properties?.keyword_difficulty ?? null
+      },
+      search_intent_info: {
+        main_intent: item.search_intent_info?.main_intent ?? null
+      }
     };
     keywordMarketMetricSchema.parse(metric);
     metrics.push(metric);

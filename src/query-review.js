@@ -342,6 +342,17 @@ export function validateResearchBackedConfirmedQueryRows(rows, categories, confi
   return confirmResearchBackedQueryRows(rows, categories, config, status, options);
 }
 
+function keywordResearchProbeConfig(config) {
+  return {
+    ...config,
+    minQueryResults: 1,
+    minQueryUniqueHosts: 1,
+    minQueryRelevantResults: 0,
+    minQueryRelevanceRatio: 0,
+    minQueryBaseScore: 0,
+  };
+}
+
 async function confirmResearchBackedQueryRows(rows, categories, config, status, {
   probe = probeCandidates,
   now = new Date(),
@@ -361,6 +372,7 @@ async function confirmResearchBackedQueryRows(rows, categories, config, status, 
   }
   const sourceKeywords = sourceKeywordsFromSnapshot(snapshot);
   const stripTokens = Array.isArray(snapshot.dedupStripTokens) ? snapshot.dedupStripTokens : [];
+  const probeConfig = keywordResearchProbeConfig(config);
   const revalidated = validateResearchBackedQueries({
     rows: rows.map((row) => ({ itemId: row.keywordResearchItemId, sequence: row.query })),
     persistedItemIds: rows.map((row) => row.keywordResearchItemId),
@@ -389,7 +401,7 @@ async function confirmResearchBackedQueryRows(rows, categories, config, status, 
       continue;
     }
     const query = normalized.sequence;
-    const fingerprint = queryProbeFingerprint(query, category, config);
+    const fingerprint = queryProbeFingerprint(query, category, probeConfig);
     const item = { ...row, query, probeFingerprint: fingerprint };
     if (freshReusableProbe(row, fingerprint, now, freshnessMs)) {
       validation.push({ ...item, reusedProbe: true });
@@ -410,7 +422,7 @@ async function confirmResearchBackedQueryRows(rows, categories, config, status, 
       source_urls: item.sourceUrls || [],
       confidence: 1
     }));
-    const probes = await probe(candidates, config, { searchPage });
+    const probes = await probe(candidates, probeConfig, { searchPage });
     for (const [index, probeResult] of probes.entries()) {
       const { item } = toProbe[index];
       validation.push({

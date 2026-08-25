@@ -1509,7 +1509,8 @@ export function createLeadServer(
     keywordRepository: new PrismaKeywordResearchRepository(repository.prisma),
     runRepository: repository,
     now: () => currentDate(now),
-    dispatchInitialize
+    dispatchInitialize,
+    aiConfig: config
   });
 
   function checkRunConfiguration() {

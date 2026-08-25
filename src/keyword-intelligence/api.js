@@ -9,6 +9,7 @@ import { serializeKeywordsCsv } from "./export.js";
 import { analyzeSelectionConflicts, normalizeSeeds, selectionItemId, validateSelectionDraft } from "./selection.js";
 import { classifyKeywordForSelection } from "./cluster.js";
 import { mapSelectionToQueries } from "./query-mapper.js";
+import { classifySelectedKeywordQueryTypes } from "./query-intent-classifier.js";
 import { keywordResearchResultV1Schema } from "./schemas.js";
 import { newRunId } from "../prisma-run-repository.js";
 
@@ -254,16 +255,22 @@ function canonicalizeSelectionItem(research, item) {
   throw inputInvalid();
 }
 
-function buildRunSnapshot(research, items) {
+async function buildRunSnapshot(research, items, classifyQueryTypes, aiConfig) {
   const selectionFingerprint = fingerprintJson({
     contractVersion: "keyword-selection-v1",
     researchId: research.id,
     selectionRevision: research.selectionRevision,
     items,
   });
-  const mapped = mapSelectionToQueries(items);
+  const classifications = await classifyQueryTypes(items, aiConfig);
+  const productByItemId = new Map(classifications.map((item) => [item.itemId, item.product]));
+  const classifiedItems = items.map((item) => ({
+    ...item,
+    product: productByItemId.get(item.itemId) === true,
+  }));
+  const mapped = mapSelectionToQueries(classifiedItems);
   if (!mapped.ok) throw inputInvalid();
-  const snapshotItems = items.map((item, index) => ({
+  const snapshotItems = classifiedItems.map((item, index) => ({
     ...item,
     initialQuery: mapped.rows[index].sequence,
   }));
@@ -389,6 +396,8 @@ export function createKeywordResearchApi({
   researchIdFactory = newResearchId,
   runIdFactory = newRunId,
   configSnapshot = keywordResearchConfigV1(),
+  classifyQueryTypes = classifySelectedKeywordQueryTypes,
+  aiConfig = {},
 }) {
   async function createResearch(input) {
     const parsed = parseStrict(createResearchInputSchema, input);
@@ -480,7 +489,12 @@ export function createKeywordResearchApi({
     if (!items || items.length < 1 || items.length > MAX_HANDOFF_ITEMS) throw inputInvalid();
     const analysis = analyzeSelectionConflicts(items, research.configSnapshot);
     if (analysis.conflicts.length > 0) throw hasConflicts(analysis.conflicts);
-    const { selectionFingerprint, snapshotItems, snapshot } = buildRunSnapshot(research, items);
+    const { selectionFingerprint, snapshotItems, snapshot } = await buildRunSnapshot(
+      research,
+      items,
+      classifyQueryTypes,
+      aiConfig,
+    );
     const runId = runIdFactory();
     const saved = await keywordRepository.createRun({
       researchId: parsed.researchId,

@@ -62,7 +62,7 @@ export function summarizeProbe(candidate, page, config) {
   if (usable.length < config.minQueryResults) rejectionReason = "insufficient_results";
   else if (uniqueHosts.length < config.minQueryUniqueHosts) {
     rejectionReason = "insufficient_unique_hosts";
-  } else if (relevantResults < (config.minQueryRelevantResults || 2)) {
+  } else if (relevantResults < (config.minQueryRelevantResults ?? 2)) {
     rejectionReason = "irrelevant_probe_results";
   } else if (relevantRatio < (config.minQueryRelevanceRatio ?? 0)) {
     rejectionReason = "insufficient_relevance_ratio";

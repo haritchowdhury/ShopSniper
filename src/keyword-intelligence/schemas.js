@@ -21,7 +21,7 @@ const monthlyHistorySchema = z.array(z.strictObject({
   year: z.number().int(),
   month: z.number().int().min(1).max(12),
   searchVolume: z.number().int(),
-})).min(15).max(102);
+}));
 
 const marketMetricSchema = z.strictObject({
   countryCode: z.string(),
@@ -30,10 +30,10 @@ const marketMetricSchema = z.strictObject({
   languageName: z.string(),
   searchVolume: z.number().int(),
   cpc: z.number().nullable(),
-  competition: z.number(),
-  competitionLevel: z.enum(["LOW", "MEDIUM", "HIGH"]),
+  competition: z.number().nullable(),
+  competitionLevel: z.string().nullable(),
   keywordDifficulty: z.number().int().nullable(),
-  mainIntent: z.enum(["transactional", "commercial", "informational", "navigational"]),
+  mainIntent: z.string().nullable(),
   commercialIntent: z.number(),
   monthlyHistory: monthlyHistorySchema,
   trendSlope: z.number(),
@@ -57,10 +57,10 @@ const keywordRowSchema = z.strictObject({
   sourceSeeds: z.array(z.string()),
   searchVolume: z.number().int(),
   cpc: z.number().nullable(),
-  competition: z.number(),
-  competitionLevel: z.enum(["LOW", "MEDIUM", "HIGH"]).nullable(),
+  competition: z.number().nullable(),
+  competitionLevel: z.string().nullable(),
   keywordDifficulty: z.number().int().nullable(),
-  mainIntent: z.enum(["transactional", "commercial", "informational", "navigational"]),
+  mainIntent: z.string().nullable(),
   commercialIntent: z.number(),
   monthlyHistory: monthlyHistorySchema,
   trendSlope: z.number(),

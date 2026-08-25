@@ -128,24 +128,26 @@ export const overviewRequestSchema = z.object({
 const monthlySearchSchema = z.object({
   year: z.number().int(),
   month: z.number().int().min(1).max(12),
-  search_volume: z.number()
+  search_volume: z.number().nullable()
 });
 
 const rawKeywordInfoSchema = z.object({
-  search_volume: z.number().int().nullable(),
-  cpc: z.number().nullable(),
-  competition: z.number(),
-  competition_level: z.enum(["LOW", "MEDIUM", "HIGH"])
+  search_volume: z.number().int().nullable().optional(),
+  cpc: z.number().nullable().optional(),
+  competition: z.number().nullable().optional(),
+  competition_level: z.string().nullable().optional(),
+  monthly_searches: z.array(monthlySearchSchema).nullable().optional()
 });
 
 const rawOverviewItemSchema = z.object({
-  keyword: z.string().nullable(),
-  keyword_info: rawKeywordInfoSchema,
-  monthly_searches: z.array(monthlySearchSchema).min(15).max(102),
-  keyword_properties: z.object({ keyword_difficulty: z.number().int().nullable() }),
+  keyword: z.string().nullable().optional(),
+  keyword_info: rawKeywordInfoSchema.nullable().optional(),
+  keyword_properties: z.object({
+    keyword_difficulty: z.number().int().nullable().optional()
+  }).nullable().optional(),
   search_intent_info: z.object({
-    main_intent: z.enum(["transactional", "commercial", "informational", "navigational"])
-  })
+    main_intent: z.string().nullable().optional()
+  }).nullable().optional()
 });
 
 export const rootEnvelopeSchema = z.object({
@@ -188,7 +190,7 @@ const overviewTaskSchema = z.object({
   result: z.array(z.object({
     location_code: z.number().int(),
     language_code: z.string(),
-    items: z.array(rawOverviewItemSchema)
+    items: z.array(rawOverviewItemSchema).nullable().optional()
   }))
 });
 
@@ -203,13 +205,17 @@ export const keywordMarketMetricSchema = z.object({
   keyword_info: z.object({
     search_volume: z.number().int().nullable(),
     cpc: z.number().nullable(),
-    competition: z.number(),
-    competition_level: z.enum(["LOW", "MEDIUM", "HIGH"]),
-    monthly_searches: z.array(monthlySearchSchema).min(15).max(102)
+    competition: z.number().nullable(),
+    competition_level: z.string().nullable(),
+    monthly_searches: z.array(z.object({
+      year: z.number().int(),
+      month: z.number().int().min(1).max(12),
+      search_volume: z.number()
+    }))
   }).strict(),
   keyword_properties: z.object({ keyword_difficulty: z.number().int().nullable() }).strict(),
   search_intent_info: z.object({
-    main_intent: z.enum(["transactional", "commercial", "informational", "navigational"])
+    main_intent: z.string().nullable()
   }).strict()
 }).strict();
 
