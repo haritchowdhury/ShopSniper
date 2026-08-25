@@ -4,6 +4,7 @@ data/output.csv
 data/leads.csv
 data/generated-queries.csv
 data/*.tmp
+/data/jina-tests/
 *.log
 .DS_Store
 /My workflow 3.json

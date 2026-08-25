@@ -10,6 +10,7 @@
     "run:once": "node src/run-once.js",
     "test": "node --test",
     "test:integration": "node -r dotenv/config --test --test-concurrency=1 test/*.integration.test.js",
+    "test:jina-leads": "node -r dotenv/config scripts/run-leads-with-jina.js",
     "check:secrets": "node scripts/check-secrets.js",
     "build:lambda": "node scripts/build-lambda.js",
     "measure:lambda": "node scripts/measure-lambda-packages.js",
