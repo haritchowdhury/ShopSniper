@@ -106,8 +106,12 @@ export function createDefaultSelection(rows) {
   if (!Array.isArray(rows)) {
     return { ok: false, error: "rows must be an array", issues: [{ field: "rows", code: "rows_not_array" }] };
   }
-  const active = rows.filter((row) => row.mergedInto === null || row.mergedInto === undefined);
-  const sorted = [...active].sort(sortDefaultCompare);
+  const recommended = rows.filter(
+    (row) =>
+      (row.mergedInto === null || row.mergedInto === undefined) &&
+      row.recommended === true,
+  );
+  const sorted = [...recommended].sort(sortDefaultCompare);
   const items = sorted.slice(0, MAX_DEFAULT_ITEMS).map((row) => ({
     itemId: row.itemId ?? selectionItemId("calculated", row.keyword),
     sourceKind: "calculated",
@@ -119,7 +123,7 @@ export function createDefaultSelection(rows) {
     facets: row.facets ? { ...row.facets } : { audience: [], category: [], channel: [], fit: [], modifier: [] },
     metricsSnapshot: metricsSnapshotOf(row),
   }));
-  const totalRecommended = sorted.filter((row) => row.recommended === true).length;
+  const totalRecommended = sorted.length;
   return {
     ok: true,
     items,

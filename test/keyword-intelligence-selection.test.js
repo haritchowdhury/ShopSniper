@@ -34,7 +34,7 @@ test("normalizeSeeds collapses whitespace, trims, dedupes case-insensitively", (
   assert.equal(normalizeSeeds(["a", "b", "c", "d", "e", "f"]).ok, false);
 });
 
-test("createDefaultSelection sorts by recommended then opportunity then volume", () => {
+test("createDefaultSelection includes only recommended rows and sorts by opportunity then volume", () => {
   const rows = [
     { itemId: "ksi_a", keyword: "low opp", seed: "seed", sourceSeeds: ["seed"], recommended: true, opportunityScore: 40, searchVolume: 500, lane: "category_discovery", facets: { audience: [], category: [], channel: [], fit: [], modifier: [] } },
     { itemId: "ksi_b", keyword: "high opp", seed: "seed", sourceSeeds: ["seed"], recommended: true, opportunityScore: 90, searchVolume: 100, lane: "category_discovery", facets: { audience: [], category: [], channel: [], fit: [], modifier: [] } },
@@ -42,10 +42,10 @@ test("createDefaultSelection sorts by recommended then opportunity then volume",
   ];
   const result = createDefaultSelection(rows);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.items.map((item) => item.keyword), ["high opp", "low opp", "not recommended"]);
+  assert.deepEqual(result.items.map((item) => item.keyword), ["high opp", "low opp"]);
   assert.equal(result.items.every((item) => item.sourceKind === "calculated"), true);
   assert.equal(result.totalRecommended, 2);
-  assert.equal(result.retained, 3);
+  assert.equal(result.retained, 2);
 });
 
 test("createDefaultSelection excludes mergedInto rows and caps at 100", () => {
