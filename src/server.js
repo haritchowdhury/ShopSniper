@@ -615,6 +615,27 @@ function parseRunListPagination(searchParams) {
   return { page, pageSize };
 }
 
+function parseKeywordResearchListPagination(searchParams) {
+  const unknown = [...searchParams.keys()].filter(
+    (name) => !RUN_LIST_PARAMETERS.has(name)
+  );
+  const duplicate = [...RUN_LIST_PARAMETERS].filter(
+    (name) => searchParams.getAll(name).length > 1
+  );
+  const page = parsePositiveInteger(searchParams.get("page"), 1);
+  const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 20, {
+    max: 100
+  });
+  if (unknown.length || duplicate.length || page == null || pageSize == null) {
+    throw new ApiError(
+      400,
+      "INVALID_QUERY_PARAMETERS",
+      "One or more keyword-research list query parameters are invalid."
+    );
+  }
+  return { page, pageSize };
+}
+
 function validateRunRequest(payload, maxShopTypes) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new ApiError(
@@ -2021,6 +2042,12 @@ export function createLeadServer(
     }
 
     if (request.method === "GET") {
+      if (requestUrl.pathname === "/api/keyword-research") {
+        const ownerId = trustedUserId(request);
+        const pagination = parseKeywordResearchListPagination(requestUrl.searchParams);
+        const page = await researchApi.listResearch({ ownerId, ...pagination });
+        return sendJson(response, 200, page);
+      }
       if (requestUrl.pathname === "/api/leads/traffic-overview") {
         const ownerId = trustedUserId(request);
         const filters = parseTrafficOverviewFilters(requestUrl.searchParams);

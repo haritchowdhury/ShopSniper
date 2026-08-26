@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mapSelectionToQueries, validateResearchBackedQueries } from "../src/keyword-intelligence/query-mapper.js";
 
-test("mapSelectionToQueries maps lanes to REQ-KI-011 site prefixes", () => {
+test("mapSelectionToQueries maps product classifications to site prefixes", () => {
   const items = [
-    { itemId: "ksi_a00000000000", keyword: "pickleball paddles", lane: "category_discovery" },
-    { itemId: "ksi_b00000000000", keyword: "pickleball paddles", lane: "store_discovery" },
-    { itemId: "ksi_c00000000000", keyword: "golf tees", lane: "local_discovery" },
-    { itemId: "ksi_d00000000000", keyword: "golf tees", lane: "brand_competitor" },
+    { itemId: "ksi_a00000000000", keyword: "pickleball paddles", lane: "category_discovery", product: true },
+    { itemId: "ksi_b00000000000", keyword: "pickleball paddles", lane: "store_discovery", product: false },
+    { itemId: "ksi_c00000000000", keyword: "golf tees", lane: "local_discovery", product: false },
+    { itemId: "ksi_d00000000000", keyword: "golf tees", lane: "brand_competitor", product: false },
   ];
   const result = mapSelectionToQueries(items);
   assert.equal(result.ok, true);
@@ -19,10 +19,10 @@ test("mapSelectionToQueries maps lanes to REQ-KI-011 site prefixes", () => {
   ]);
 });
 
-test("mapSelectionToQueries defaults lane to category_discovery and rejects duplicates", () => {
+test("mapSelectionToQueries defaults an absent product classification to a store query and rejects duplicates", () => {
   const single = mapSelectionToQueries([{ itemId: "ksi_a00000000000", keyword: "pickleball" }]);
   assert.equal(single.ok, true);
-  assert.equal(single.rows[0].sequence, "site:myshopify.com/products pickleball");
+  assert.equal(single.rows[0].sequence, "site:myshopify.com pickleball");
   const dup = mapSelectionToQueries([
     { itemId: "ksi_a00000000000", keyword: "x" },
     { itemId: "ksi_a00000000000", keyword: "x" },
@@ -81,18 +81,13 @@ test("validateResearchBackedQueries allows edit and reorder within the persisted
   assert.deepEqual(result.rows.map((row) => row.itemId), ["ksi_b00000000000", "ksi_a00000000000"]);
 });
 
-test("validateResearchBackedQueries enforces bounds and punctuation rules (DEC-KI-016)", () => {
+test("validateResearchBackedQueries enforces current bounds, control, emptiness, and duplicate rules", () => {
   const base = { persistedItemIds: ["ksi_a00000000000"], sourceKeywords: {} };
   const cases = [
     { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products " + "a ".repeat(120) }, code: "query_too_long" },
     { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products x\u0001y" }, code: "unsupported_control_character" },
-    { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products \"quoted\"" }, code: "quoted_query" },
     { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products x" }, code: "duplicate_sequence" },
-    { row: { itemId: "ksi_a00000000000", sequence: "http://myshopify.com/products x" }, code: "invalid_query_format" },
-    { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products " + "x".repeat(170) }, code: "phrase_too_long" },
-    { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products " + Array.from({ length: 13 }, () => "x").join(" ") }, code: "phrase_word_count" },
-    { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products site:evil.com" }, code: "unsupported_search_operator" },
-    { row: { itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products -excluded" }, code: "unsupported_search_operator" },
+    { row: { itemId: "ksi_a00000000000", sequence: "   " }, code: "query_empty" },
   ];
   for (const { row, code } of cases) {
     const rows = code === "duplicate_sequence" ? [row, { ...row }] : [row];
@@ -100,17 +95,27 @@ test("validateResearchBackedQueries enforces bounds and punctuation rules (DEC-K
     assert.equal(result.ok, false, `expected rejection for ${code}`);
     assert.ok(result.issues.some((issue) => issue.code === code), `expected issue ${code} got ${JSON.stringify(result.issues)}`);
   }
+
+  for (const sequence of [
+    "site:myshopify.com/products \"quoted\"",
+    "http://myshopify.com/products x",
+    "site:myshopify.com/products " + "x".repeat(170),
+    "site:myshopify.com/products " + Array.from({ length: 13 }, () => "x").join(" "),
+    "site:myshopify.com/products site:evil.com",
+    "site:myshopify.com/products -excluded",
+  ]) {
+    assert.equal(validateResearchBackedQueries({ rows: [{ itemId: "ksi_a00000000000", sequence }], ...base }).ok, true);
+  }
 });
 
-test("validateResearchBackedQueries rejects irrelevant queries against source keywords", () => {
+test("validateResearchBackedQueries allows edited text independent of source-keyword relevance", () => {
   const result = validateResearchBackedQueries({
     rows: [{ itemId: "ksi_a00000000000", sequence: "site:myshopify.com/products golf accessories" }],
     persistedItemIds: ["ksi_a00000000000"],
     sourceKeywords: { "ksi_a00000000000": { keyword: "pickleball paddles", sourceSeeds: ["pickleball"] } },
     stripTokens: [],
   });
-  assert.equal(result.ok, false);
-  assert.ok(result.issues.some((issue) => issue.code === "query_not_relevant"));
+  assert.equal(result.ok, true);
 });
 
 test("validateResearchBackedQueries keeps a relevant query sharing a normalized seed token", () => {

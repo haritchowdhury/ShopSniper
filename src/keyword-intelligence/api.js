@@ -2,7 +2,11 @@ import { z } from "zod";
 
 import { ApiError } from "../api-errors.js";
 import { fingerprintJson } from "../aws-pipeline/core/canonical.js";
-import { serializeKeywordResearch, serializeRun } from "../api-serializer.js";
+import {
+  serializeKeywordResearch,
+  serializeKeywordResearchSummary,
+  serializeRun,
+} from "../api-serializer.js";
 import { newKeywordResearchIntentId, newResearchId } from "./repository.js";
 import { keywordResearchConfigV1, keywordResearchConfigV1Schema } from "./config.js";
 import { serializeKeywordsCsv } from "./export.js";
@@ -66,6 +70,12 @@ const claimIntentInputSchema = z.strictObject({
 const getResearchInputSchema = z.strictObject({
   ownerId: ownerIdSchema,
   researchId: researchIdSchema,
+});
+
+const listResearchInputSchema = z.strictObject({
+  ownerId: ownerIdSchema,
+  page: z.number().int().min(1),
+  pageSize: z.number().int().min(1).max(100),
 });
 
 const saveSelectionInputSchema = z.strictObject({
@@ -510,6 +520,20 @@ export function createKeywordResearchApi({
     return { research: serializeKeywordResearch(view.research) };
   }
 
+  async function listResearch(input) {
+    const parsed = parseStrict(listResearchInputSchema, input);
+    const page = await keywordRepository.listOwnerWorkspaceResearch(parsed);
+    return {
+      pagination: {
+        page: parsed.page,
+        pageSize: parsed.pageSize,
+        totalItems: page.totalItems,
+        totalPages: Math.ceil(page.totalItems / parsed.pageSize),
+      },
+      items: page.items.map(serializeKeywordResearchSummary),
+    };
+  }
+
   async function saveSelection(input) {
     const parsed = parseStrict(saveSelectionInputSchema, input);
     if (parsed.items.length > MAX_SELECTION_ITEMS) throw inputInvalid();
@@ -618,6 +642,7 @@ export function createKeywordResearchApi({
     createResearch,
     createIntent,
     claimIntent,
+    listResearch,
     getResearch,
     saveSelection,
     createRun,

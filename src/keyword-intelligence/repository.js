@@ -120,6 +120,11 @@ function requireGeneration(value) {
   return value;
 }
 
+function requirePage(value, max = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) conflict();
+  return value;
+}
+
 function requireDecimalUsd(value) {
   if (typeof value !== "string" || !DECIMAL_8.test(value)) conflict();
   return value;
@@ -505,6 +510,36 @@ export class PrismaKeywordResearchRepository {
     });
     if (!research) return { outcome: "not_found" };
     return { outcome: "found", research };
+  }
+
+  async listOwnerWorkspaceResearch(input) {
+    const ownerId = requireOwner(input?.ownerId);
+    const page = requirePage(input?.page);
+    const pageSize = requirePage(input?.pageSize, 100);
+    const where = { ownerId, runs: { none: {} } };
+    return this._transaction(async (tx) => {
+      const totalItems = await tx.keywordResearch.count({ where });
+      const items = await tx.keywordResearch.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          seeds: true,
+          state: true,
+          selectionRevision: true,
+          createdAt: true,
+          updatedAt: true,
+          completedAt: true,
+          stages: {
+            orderBy: [{ stage: "asc" }, { generation: "asc" }],
+            select: { stage: true, state: true, generation: true }
+          }
+        }
+      });
+      return { totalItems, items };
+    }, SHORT_TRANSACTION_OPTIONS);
   }
 
   async getWorkerResearch(input) {

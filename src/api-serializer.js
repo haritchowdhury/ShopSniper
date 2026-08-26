@@ -1027,22 +1027,12 @@ export function serializeSelectionItem(item) {
   };
 }
 
-export function serializeKeywordResearch(research) {
+function keywordResearchStage(research) {
   const stages = Array.isArray(research.stages) ? research.stages : [];
   const latestByStage = new Map();
   for (const stage of stages) {
     if (stage && typeof stage.stage === "string") latestByStage.set(stage.stage, stage);
   }
-  const stageCounts = (name) => {
-    const row = latestByStage.get(name);
-    return {
-      expected: row?.expectedCount ?? 0,
-      terminal: row?.terminalCount ?? 0,
-      succeeded: row?.succeededCount ?? 0,
-      skipped: row?.skippedCount ?? 0,
-      failed: row?.failedCount ?? 0
-    };
-  };
   let stage;
   if (research.state === "completed") {
     stage = "completed";
@@ -1060,6 +1050,35 @@ export function serializeKeywordResearch(research) {
       }
     }
   }
+  return { stage, latestByStage };
+}
+
+export function serializeKeywordResearchSummary(research) {
+  const { stage } = keywordResearchStage(research);
+  return {
+    researchId: research.id,
+    seeds: Array.isArray(research.seeds) ? research.seeds : [],
+    state: research.state,
+    stage,
+    selectionRevision: research.selectionRevision ?? 0,
+    createdAt: research.createdAt.toISOString(),
+    updatedAt: research.updatedAt.toISOString(),
+    completedAt: research.completedAt ? research.completedAt.toISOString() : null
+  };
+}
+
+export function serializeKeywordResearch(research) {
+  const { stage, latestByStage } = keywordResearchStage(research);
+  const stageCounts = (name) => {
+    const row = latestByStage.get(name);
+    return {
+      expected: row?.expectedCount ?? 0,
+      terminal: row?.terminalCount ?? 0,
+      succeeded: row?.succeededCount ?? 0,
+      skipped: row?.skippedCount ?? 0,
+      failed: row?.failedCount ?? 0
+    };
+  };
   return {
     id: research.id,
     statusUrl: `/api/keyword-research/${encodeURIComponent(research.id)}`,

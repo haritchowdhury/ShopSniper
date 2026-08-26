@@ -206,8 +206,13 @@ function overviewResponse(keywords) {
     }
     return {
       keyword,
-      keyword_info: { search_volume: 1000 + index * 10, cpc: 1.0, competition: 0.3, competition_level: "MEDIUM" },
-      monthly_searches: monthly,
+      keyword_info: {
+        search_volume: 1000 + index * 10,
+        cpc: 1.0,
+        competition: 0.3,
+        competition_level: "MEDIUM",
+        monthly_searches: monthly,
+      },
       keyword_properties: { keyword_difficulty: 40 + (index % 20) },
       search_intent_info: { main_intent: index % 3 === 0 ? "transactional" : "commercial" }
     };
@@ -512,7 +517,7 @@ function aggMetrics(keywords) {
   const items = overviewResponse(keywords).tasks[0].result[0].items;
   return items.map((item) => ({
     keyword: item.keyword,
-    keyword_info: { ...item.keyword_info, monthly_searches: item.monthly_searches },
+    keyword_info: item.keyword_info,
     keyword_properties: item.keyword_properties,
     search_intent_info: item.search_intent_info
   }));

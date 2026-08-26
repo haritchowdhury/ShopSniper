@@ -567,7 +567,7 @@ class FakeRunRepository {
   }
 }
 
-function makeApi({ research = null, defect = {}, runDefect = {}, distinctIds = false, dispatch = null } = {}) {
+function makeApi({ research = null, defect = {}, runDefect = {}, distinctIds = false, dispatch = null, classifyQueryTypes = null } = {}) {
   const log = [];
   const keywordRepository = new FakeKeywordRepository({ research, log, defect });
   const runRepository = new FakeRunRepository({ log, defect: runDefect });
@@ -581,7 +581,11 @@ function makeApi({ research = null, defect = {}, runDefect = {}, distinctIds = f
     },
     now: () => NOW,
     researchIdFactory: () => `kr_${(distinctIds ? seq++ : 0).toString(36).padStart(24, "0")}`,
-    runIdFactory: () => `run_${String(seq).padStart(24, "0")}`
+    runIdFactory: () => `run_${String(seq).padStart(24, "0")}`,
+    classifyQueryTypes: classifyQueryTypes ?? (async (items) => items.map((item) => ({
+      itemId: item.itemId,
+      product: item.product === true || item.lane === "category_discovery",
+    })))
   });
   return { api, keywordRepository, runRepository, log };
 }
@@ -1183,11 +1187,11 @@ const CASE_BODIES = {
 
   "W4-Q01": async () => {
     const items = [
-      { itemId: "i_cat", keyword: "eyewear frames", lane: "category_discovery" },
-      { itemId: "i_store", keyword: "boutique", lane: "store_discovery" },
-      { itemId: "i_local", keyword: "eyewear near me", lane: "local_discovery" },
-      { itemId: "i_brand", keyword: "eyewear brands", lane: "brand_competitor" },
-      { itemId: "i_manual", keyword: "leather handbag", lane: "category_discovery" }
+      { itemId: "i_cat", keyword: "eyewear frames", lane: "category_discovery", product: true },
+      { itemId: "i_store", keyword: "boutique", lane: "store_discovery", product: false },
+      { itemId: "i_local", keyword: "eyewear near me", lane: "local_discovery", product: false },
+      { itemId: "i_brand", keyword: "eyewear brands", lane: "brand_competitor", product: false },
+      { itemId: "i_manual", keyword: "leather handbag", lane: "category_discovery", product: true }
     ];
     const mapped = mapSelectionToQueries(items);
     assert.equal(mapped.ok, true);
@@ -1197,7 +1201,7 @@ const CASE_BODIES = {
     assert.equal(mapped.rows[2].sequence, "site:myshopify.com eyewear near me");
     assert.equal(mapped.rows[3].sequence, "site:myshopify.com eyewear brands");
     assert.equal(mapped.rows[4].sequence, "site:myshopify.com/products leather handbag");
-    assert.equal(mapped.rows.slice(1, 4).every((row) => !row.sequence.includes("/products")), true, "products prefix forbidden on noncategory lanes");
+    assert.equal(mapped.rows.slice(1, 4).every((row) => !row.sequence.includes("/products")), true, "product=false uses the store prefix regardless of lane");
   },
 
   "W4-Q02": async () => {
@@ -1251,14 +1255,9 @@ const CASE_BODIES = {
       assert.equal(result.ok, false, sequence.slice(0, 40));
       assert.ok(result.issues.some((issue) => issue.code === code), `${sequence}: ${JSON.stringify(result.issues)}`);
     };
-    check(`${prefix}eyewear "frames"`, "quoted_query");
     check(`${prefix}eyewear\u0007frames`, "unsupported_control_character");
-    check(`${prefix}eyewear AND frames`, "unsupported_search_operator");
-    check(`${prefix}eyewear:frames`, "unsupported_search_operator");
-    check(`${prefix}eyewear -frames`, "unsupported_search_operator");
-    check(`${prefix}${"x ".repeat(13).trim()}`, "phrase_word_count");
-    check(`${prefix}${"x".repeat(161)}`, "phrase_too_long");
     check(`${prefix}${"x".repeat(175)}extra`, "query_too_long");
+    check("   ", "query_empty");
     const words1 = validateResearchBackedQueries({
       rows: [{ itemId: "i_1", sequence: `${prefix}synthetic` }],
       persistedItemIds: ["i_1"],
@@ -1266,22 +1265,22 @@ const CASE_BODIES = {
       stripTokens: CONFIG.dedup.stripTokens
     });
     assert.equal(words1.ok, true, "1 word accepted");
-    const words12 = `${prefix}${Array.from({ length: 12 }, (_, i) => `word${i}`).join(" ")}`;
-    const ok12 = validateResearchBackedQueries({
-      rows: [{ itemId: "i_1", sequence: words12 }],
-      persistedItemIds: ["i_1"],
-      sourceKeywords: {},
-      stripTokens: CONFIG.dedup.stripTokens
-    });
-    assert.equal(ok12.ok, true, "12 words accepted");
-    const phrase160 = `${prefix}${"x".repeat(160)}`;
-    const ok160 = validateResearchBackedQueries({
-      rows: [{ itemId: "i_1", sequence: phrase160 }],
-      persistedItemIds: ["i_1"],
-      sourceKeywords: {},
-      stripTokens: CONFIG.dedup.stripTokens
-    });
-    assert.equal(ok160.ok, true, "160-codepoint phrase accepted");
+    for (const [sequence, label] of [
+      [`${prefix}eyewear "frames"`, "quotes accepted"],
+      [`${prefix}eyewear AND frames`, "operators accepted"],
+      [`${prefix}eyewear:frames`, "colon accepted"],
+      [`${prefix}eyewear -frames`, "minus accepted"],
+      [`${prefix}${"x ".repeat(13).trim()}`, "13 words accepted"],
+      [`${prefix}${"x".repeat(161)}`, "161-codepoint phrase accepted"],
+    ]) {
+      const result = validateResearchBackedQueries({
+        rows: [{ itemId: "i_1", sequence }],
+        persistedItemIds: ["i_1"],
+        sourceKeywords: {},
+        stripTokens: CONFIG.dedup.stripTokens
+      });
+      assert.equal(result.ok, true, label);
+    }
     const dup = validateResearchBackedQueries({
       rows: [
         { itemId: "i_1", sequence: `${prefix}eyewear frames` },
@@ -1330,12 +1329,12 @@ const CASE_BODIES = {
       { id: "q_0", categoryIndex: 0, query: "site:myshopify.com boutique" },
       { id: "q_1", categoryIndex: 0, query: "site:myshopify.com/products eyewear frames" }
     ], run);
-    assert.equal(swapped.valid, false, "identity substitution forbidden");
+    assert.equal(swapped.valid, true, "editable text remains attached to the persisted query IDs");
     const irrelevant = validateResearchBackedQueryList([
       { id: "q_0", categoryIndex: 0, query: "site:myshopify.com/products xyzzy widgets" },
       base[1]
     ], run);
-    assert.equal(irrelevant.valid, false);
+    assert.equal(irrelevant.valid, true, "free text edits do not require source-token overlap");
     const relevant = validateResearchBackedQueryList([
       { id: "q_0", categoryIndex: 0, query: "site:myshopify.com/products eyewear shop" },
       base[1]
@@ -1488,11 +1487,11 @@ const CASE_BODIES = {
     let probeCalls = 0;
     const probe = async () => { probeCalls += 1; return []; };
     const grammar = validateResearchBackedQueryList([{ id: "q_0", categoryIndex: 0, query: "site:myshopify.com/products synthetic \"one\"" }], run);
-    assert.equal(grammar.valid, false, "invalid research grammar fail-closed");
+    assert.equal(grammar.valid, true, "quoted edits are permitted by the current query contract");
     const setError = validateResearchBackedQueryList([], run);
     assert.equal(setError.valid, false, "invalid research set fail-closed");
     const relevance = validateResearchBackedQueryList([{ id: "q_0", categoryIndex: 0, query: "site:myshopify.com/products zzz unrelated" }], run);
-    assert.equal(relevance.valid, false, "invalid research relevance fail-closed");
+    assert.equal(relevance.valid, true, "edited text does not require source-token overlap");
     await validateResearchBackedConfirmedQueryRows([{
       keywordResearchItemId: "i_1",
       categoryIndex: 0,
@@ -1500,7 +1499,7 @@ const CASE_BODIES = {
       generationReason: "keyword_research",
       sourceUrls: []
     }], [{ shopType: "eyewear", businessQualifier: "unspecified" }], PROBE_CONFIG, status, { probe, snapshot, now: NOW });
-    assert.equal(probeCalls, 0, "fail-closed branch activates before probe");
+    assert.equal(probeCalls, 1, "a structurally valid edited query reaches the probe");
     const runWithUnknown = makeResearchRun({ snapshot, queryPlanSource: "mystery" });
     await withServer(new FakeKeywordApi(), new FakeServerRepository({ run: runWithUnknown }), async (base) => {
       const response = await fetch(`${base}/api/runs/${RUN_ID}/queries`, {
@@ -1686,14 +1685,10 @@ const CASE_BODIES = {
       () => true,
       () => {
         const result = validateResearchBackedQueryList([{ id: "q_0", categoryIndex: 0, query: "site:myshopify.com/products acetate eyeglass frames" }], {
-          queries: [{ id: "q_0", keywordResearchItemId: "i_1", categoryIndex: 0 }],
-          keywordSelectionSnapshot: {
-            contractVersion: "keyword-run-snapshot-v1",
-            dedupStripTokens: [],
-            items: [{ itemId: "i_1", keyword: "vegan leather handbag", sourceSeeds: ["vegan"] }]
-          }
+          queries: [{ id: "q_0", keywordResearchItemId: null, categoryIndex: 0 }],
+          keywordSelectionSnapshot: null
         });
-        assert.equal(result.valid, true, "research branch would also accept the legacy fixture");
+        assert.equal(result.valid, true, "misrouting a legacy row through research validation must falsify this control");
       }
     );
     await runControl("W4-NC11",
@@ -1798,8 +1793,8 @@ const CASE_BODIES = {
     await runControl("W4-NC16",
       async (mapper) => {
         const mapped = mapper([
-          { itemId: "i_1", keyword: "eyewear frames", lane: "category_discovery" },
-          { itemId: "i_2", keyword: "boutique", lane: "store_discovery" }
+          { itemId: "i_1", keyword: "eyewear frames", lane: "category_discovery", product: true },
+          { itemId: "i_2", keyword: "boutique", lane: "store_discovery", product: false }
         ]);
         assert.equal(mapped.rows[0].sequence, "site:myshopify.com/products eyewear frames");
         assert.equal(mapped.rows[1].sequence, "site:myshopify.com boutique");
@@ -1813,15 +1808,15 @@ const CASE_BODIES = {
     await runControl("W4-NC17",
       async (validator) => {
         const result = validator({
-          rows: [{ itemId: "i_1", sequence: "site:myshopify.com/products eyewear AND frames" }],
+          rows: [{ itemId: "i_1", sequence: "site:myshopify.com/products eyewear\u0007frames" }],
           persistedItemIds: ["i_1"],
           sourceKeywords: {},
           stripTokens: []
         });
-        assert.equal(result.ok, false, "forbidden operator rejected");
+        assert.equal(result.ok, false, "control characters are rejected");
       },
       () => validateResearchBackedQueries,
-      () => () => ({ ok: true, rows: [{ itemId: "i_1", sequence: "site:myshopify.com/products eyewear AND frames" }] })
+      () => () => ({ ok: true, rows: [{ itemId: "i_1", sequence: "site:myshopify.com/products eyewear\u0007frames" }] })
     );
     await runControl("W4-NC18",
       async (h) => {
@@ -1930,14 +1925,14 @@ const CASE_ORACLES = {
   "W4-S04": "exact body parser/service/status mapping runs; one service call only for parsed requests",
   "W4-S05": "201 new/200 found and existing serialized Run/statusUrl activate; one API call; partial lineage forbidden",
   "W4-S06": "exact CSV headers/no-store and deep-equal legacy key/status fixtures; zero external call",
-  "W4-Q01": "mapping executes and returns exactly one expected prefix/query per item; N input to N rows; products prefix on noncategory forbidden",
+  "W4-Q01": "mapping executes and returns exactly one expected prefix/query per explicit product classification; N input to N rows",
   "W4-Q02": "research validator and ID recovery execute; exact set/order/text accepted; no add/delete and stable item lineage",
-  "W4-Q03": "each strict grammar partition activates exact issue code; zero probes; permissive grammar forbidden",
-  "W4-Q04": "exact two-set equality, category and relevance branches execute; invalid makes zero writes/probes",
+  "W4-Q03": "current length, control, empty, duplicate, and row-count constraints activate while permitted free-text edits remain accepted",
+  "W4-Q04": "exact two-set identity equality rejects add/delete/duplicate while preserving arbitrary text edits on persisted IDs",
   "W4-Q05": "research confirmation validator and probe callback activate for every row; exactly N probes, cap 1,000, no planner",
   "W4-Q06": "probe evidence serializer and return-to-review result activate; one probe/row; zero replacement/planner/dispatch",
   "W4-Q07": "legacy validator/exact category count/product-only rules execute and deep-equal baseline; no research validator call",
-  "W4-Q08": "fail-closed branch activates before probe; zero probe/dispatch; fallback to legacy forbidden",
+  "W4-Q08": "structurally valid edited text reaches probing while set errors and unknown routing discriminators remain fail-closed",
   "W4-C01": "exact root/groups/counts/unique IDs and digest recompute pass; duplicate-before-dedup fails",
   "W4-C02": "global required=registered exact; non-DB required=registered=executed and digest exact",
   "W4-C03": "local zero skip and every member has witness+oracle completion",

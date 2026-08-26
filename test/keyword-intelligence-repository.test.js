@@ -180,12 +180,12 @@ test("KI-R2 heartbeat and heartbeatAggregator validate inputs fail-closed before
 });
 
 const SCN_KI_043_SOURCE_URL = new URL("../src/keyword-intelligence/repository.js", import.meta.url);
-const SCN_KI_043_SOURCE_SHA256 = "8b03ac265f8f67cc502684fa382e5ff253fb7ed20bd587f0d8e9973c4c101b0a";
+const SCN_KI_043_SOURCE_SHA256 = "58c2602f71f17cc2f567e87b0031195c40afb318229df359a6c7ba1609fce52a";
 const SCN_KI_043_REQUIRED_CASES = ["W6-DB-01", "W6-DB-02"];
 const SCN_KI_043_CONTROL_CASES = ["W6-NC-15"];
 const SCN_KI_043_CASE_SET_DIGEST = "bdac823dcc377ac262913efa9e3cb91c22f09f893efc3d812107c948a83dfea6";
 const SCN_KI_043_SHORT_PARTITION = ["claimIntent", "claim", "deferTask", "scheduleRetry", "claimAggregator", "failStage",
-  "saveSelection", "createRun#2", "claimThrottle"];
+  "saveSelection", "createRun#2", "claimThrottle", "listOwnerWorkspaceResearch"];
 const SCN_KI_043_SCALE_PARTITION = ["initialize", "recordAttempt", "settleAttempt", "markAttemptAmbiguous",
   "terminalize", "publishCandidateManifest", "publishShortlist", "publishResearchResult", "createRun", "recover"];
 const SCN_KI_043_FORBIDDEN_CALLBACK_SYMBOLS = /\b(?:dataforseo|fetch|http|s3|putobject|sqs|sendmessage)\b/iu;
@@ -323,7 +323,7 @@ function scnKi043ProfileOracle(sourceText, label) {
     assert.ok(Number.isInteger(call.closeIndex) && call.closeIndex > call.openParenIndex,
       `${label}: ${call.site} did not parse`);
   }
-  assert.equal(calls.length, 19, `${label}: expected exactly 19 this._transaction call sites`);
+  assert.equal(calls.length, 20, `${label}: expected exactly 20 this._transaction call sites`);
   const shortSites = [];
   const scaleSites = [];
   for (const call of calls) {
@@ -337,7 +337,7 @@ function scnKi043ProfileOracle(sourceText, label) {
     assert.doesNotMatch(call.argumentTexts[0], SCN_KI_043_FORBIDDEN_CALLBACK_SYMBOLS,
       `${label}: ${call.site} callback contains a forbidden provider/S3/SQS symbol`);
   }
-  assert.equal(shortSites.length, 9, `${label}: short profile must cover exactly 9 sites`);
+  assert.equal(shortSites.length, 10, `${label}: short profile must cover exactly 10 sites`);
   assert.equal(scaleSites.length, 10, `${label}: scale profile must cover exactly 10 sites`);
   assert.deepEqual([...shortSites].sort(), [...SCN_KI_043_SHORT_PARTITION].sort(),
     `${label}: short-profile partition mismatch`);
@@ -826,7 +826,7 @@ test("SCN-KI-043 unit: explicit transaction profiles and consolidated contexts",
   const [optionFrom, optionTo] = claimCall.argumentSpans[1];
   const mutatedSource = sourceText.slice(0, optionFrom - 1) + sourceText.slice(optionTo);
   assert.notEqual(mutatedSource, sourceText);
-  assert.equal((mutatedSource.match(/this\._transaction\(/g) ?? []).length, 19,
+  assert.equal((mutatedSource.match(/this\._transaction\(/g) ?? []).length, 20,
     "W6-NC-15: the mutation removes exactly one options argument, not a call site");
   assert.throws(() => scnKi043ProfileOracle(mutatedSource, "W6-NC-15 mutated copy"), /options/,
     "W6-NC-15: the unchanged profile oracle must fail on the mutated in-memory copy");
