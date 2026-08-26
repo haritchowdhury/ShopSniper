@@ -67,6 +67,7 @@ import { searchGooglePage } from "./search.js";
 
 export const RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{16,80}$/u;
 export const RUN_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
+export const KEYWORD_RESEARCH_INTENT_ID_PATTERN = /^intent_[A-Za-z0-9_-]{32}$/u;
 const KEYWORD_RESEARCH_ID_PATTERN = /^kr_[A-Za-z0-9_-]{24}$/u;
 const RUN_LIST_PARAMETERS = new Set(["page", "pageSize"]);
 const RESULT_PARAMETERS = new Set([
@@ -519,6 +520,43 @@ function requestedIntentId(pathname) {
     throw new ApiError(400, "INVALID_RUN_INTENT_ID", "The run intent ID is invalid.");
   }
   return identifier;
+}
+
+function requestedKeywordResearchIntentId(pathname) {
+  const match = pathname.match(/^\/api\/keyword-research-intents\/([^/]+)\/claim$/u);
+  if (!match) return null;
+  let identifier;
+  try {
+    identifier = decodeURIComponent(match[1]);
+  } catch {
+    throw new ApiError(
+      400,
+      "KEYWORD_RESEARCH_INPUT_INVALID",
+      "The keyword research intent ID is invalid."
+    );
+  }
+  if (!KEYWORD_RESEARCH_INTENT_ID_PATTERN.test(identifier)) {
+    throw new ApiError(
+      400,
+      "KEYWORD_RESEARCH_INPUT_INVALID",
+      "The keyword research intent ID is invalid."
+    );
+  }
+  return identifier;
+}
+
+async function requireEmptyKeywordResearchIntentClaimBody(request) {
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 0) {
+      throw new ApiError(
+        400,
+        "KEYWORD_RESEARCH_INPUT_INVALID",
+        "The keyword research intent claim body must be empty."
+      );
+    }
+  }
 }
 
 function requestedKeywordResearchId(pathname, suffix = "") {
@@ -1686,13 +1724,39 @@ export function createLeadServer(
     if (request.method === "POST" && requestUrl.pathname === "/api/run-intents") {
       const payload = await readJsonBody(request);
       const categories = validateRunRequest(payload, config.maxShopTypes || 100);
-      const expiresAt = new Date(now() + 60 * 60 * 1000);
+      const timestamp = currentDate(now);
+      const expiresAt = new Date(timestamp.getTime() + 3_600_000);
       const intent = await repository.createRunIntent(categories, expiresAt);
-      void repository.deleteExpiredRunIntents?.(new Date(now())).catch(() => {});
+      void repository.deleteExpiredRunIntents?.(timestamp).catch(() => {});
       return sendJson(response, 201, {
         intentId: intent.id,
         expiresAt: safeDate(intent.expiresAt)
       });
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/keyword-research-intents") {
+      const payload = await readJsonBody(request);
+      const created = await researchApi.createIntent(
+        keywordResearchBody(payload, KEYWORD_RESEARCH_CREATE_BODY_KEYS)
+      );
+      return sendJson(response, 201, created);
+    }
+
+    if (request.method === "POST") {
+      const keywordIntentIdentifier = requestedKeywordResearchIntentId(requestUrl.pathname);
+      if (keywordIntentIdentifier) {
+        const ownerId = trustedUserId(request);
+        await requireEmptyKeywordResearchIntentClaimBody(request);
+        const claimed = await researchApi.claimIntent({
+          ownerId,
+          intentId: keywordIntentIdentifier,
+        });
+        return sendJson(
+          response,
+          claimed.created ? 201 : 200,
+          { research: claimed.research }
+        );
+      }
     }
 
     if (request.method === "POST") {

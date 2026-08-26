@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ApiError } from "../api-errors.js";
 import { fingerprintJson } from "../aws-pipeline/core/canonical.js";
 import { serializeKeywordResearch, serializeRun } from "../api-serializer.js";
-import { newResearchId } from "./repository.js";
+import { newKeywordResearchIntentId, newResearchId } from "./repository.js";
 import { keywordResearchConfigV1, keywordResearchConfigV1Schema } from "./config.js";
 import { serializeKeywordsCsv } from "./export.js";
 import { analyzeSelectionConflicts, normalizeSeeds, selectionItemId, validateSelectionDraft } from "./selection.js";
@@ -20,6 +20,7 @@ const CODE_NOT_COMPLETED = "KEYWORD_RESEARCH_NOT_COMPLETED";
 const CODE_HAS_CONFLICTS = "KEYWORD_SELECTION_HAS_CONFLICTS";
 const CODE_REVISION_CONFLICT = "KEYWORD_SELECTION_REVISION_CONFLICT";
 const CODE_HANDOFF_CONFLICT = "KEYWORD_RUN_HANDOFF_CONFLICT";
+const CODE_INTENT_NOT_FOUND = "KEYWORD_RESEARCH_INTENT_NOT_FOUND";
 
 const MAX_SEED_CODEPOINTS = 100;
 const MAX_KEYWORD_CODEPOINTS = 160;
@@ -28,6 +29,7 @@ const MAX_HANDOFF_ITEMS = 100;
 const MAX_FLAG_COUNT = 20;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/u;
 const RESEARCH_ID = /^kr_[A-Za-z0-9_-]{24}$/u;
+const INTENT_ID = /^intent_[A-Za-z0-9_-]{32}$/u;
 const CLIENT_REQUEST_ID = /^[A-Za-z0-9_-]{16,80}$/u;
 const CLUSTER_ID = /^c_[a-f0-9]{12}$/u;
 const LANES = ["category_discovery", "store_discovery", "local_discovery", "brand_competitor"];
@@ -50,6 +52,15 @@ const researchIdSchema = z.string().regex(RESEARCH_ID);
 const createResearchInputSchema = z.strictObject({
   ownerId: ownerIdSchema,
   seeds: z.array(z.unknown()),
+});
+
+const createIntentInputSchema = z.strictObject({
+  seeds: z.array(z.unknown()),
+});
+
+const claimIntentInputSchema = z.strictObject({
+  ownerId: ownerIdSchema,
+  intentId: z.string().regex(INTENT_ID),
 });
 
 const getResearchInputSchema = z.strictObject({
@@ -131,6 +142,14 @@ function revisionConflict() {
 
 function handoffConflict() {
   return new ApiError(409, CODE_HANDOFF_CONFLICT, "Keyword run handoff conflict");
+}
+
+function intentNotFound() {
+  return new ApiError(
+    404,
+    CODE_INTENT_NOT_FOUND,
+    "Pending keyword research was not found or has expired"
+  );
 }
 
 function parseStrict(schema, value) {
@@ -394,11 +413,25 @@ export function createKeywordResearchApi({
   dispatchInitialize,
   now = () => new Date(),
   researchIdFactory = newResearchId,
+  intentIdFactory = newKeywordResearchIntentId,
   runIdFactory = newRunId,
   configSnapshot = keywordResearchConfigV1(),
   classifyQueryTypes = classifySelectedKeywordQueryTypes,
   aiConfig = {},
 }) {
+  async function dispatchCreatedResearch(research) {
+    try {
+      await dispatchInitialize({
+        contractVersion: 1,
+        type: "keyword.initialize.v1",
+        researchId: research.id,
+        generation: 1,
+      });
+    } catch {
+      // Swallowed after the durable commit; queued-row recovery is the retry authority.
+    }
+  }
+
   async function createResearch(input) {
     const parsed = parseStrict(createResearchInputSchema, input);
     const normalized = normalizeSeeds(parsed.seeds);
@@ -417,18 +450,53 @@ export function createKeywordResearchApi({
     }, now());
     if (created.outcome === "conflict") throw contractMismatch();
     if (created.outcome === "created") {
-      try {
-        await dispatchInitialize({
-          contractVersion: 1,
-          type: "keyword.initialize.v1",
-          researchId,
-          generation: 1,
-        });
-      } catch {
-        // Swallowed after the durable commit; queued-row recovery is the retry authority.
-      }
+      await dispatchCreatedResearch(created.research);
     }
     return { research: serializeKeywordResearch(created.research) };
+  }
+
+  async function createIntent(input) {
+    const parsed = parseStrict(createIntentInputSchema, input);
+    const normalized = normalizeSeeds(parsed.seeds);
+    if (!normalized.ok) {
+      throw inputInvalid({ issues: normalized.issues });
+    }
+    const timestamp = now();
+    const intentId = intentIdFactory();
+    const expiresAt = new Date(timestamp.getTime() + 3_600_000);
+    const created = await keywordRepository.createIntent({
+      intentId,
+      seeds: normalized.seeds,
+      expiresAt,
+    }, timestamp);
+    if (created.outcome === "conflict") throw contractMismatch();
+    void keywordRepository.deleteExpiredIntents(timestamp).catch(() => {});
+    return {
+      intentId: created.intent.id,
+      expiresAt: created.intent.expiresAt.toISOString(),
+    };
+  }
+
+  async function claimIntent(input) {
+    const parsed = parseStrict(claimIntentInputSchema, input);
+    const timestamp = now();
+    const claimed = await keywordRepository.claimIntent({
+      intentId: parsed.intentId,
+      ownerId: parsed.ownerId,
+      researchId: researchIdFactory(),
+      configSnapshot,
+      configFingerprint: fingerprintJson(configSnapshot),
+      markets: configSnapshot.markets,
+    }, timestamp);
+    if (claimed.outcome === "not_found") throw intentNotFound();
+    if (claimed.outcome === "conflict") throw contractMismatch();
+    if (claimed.outcome === "created") {
+      await dispatchCreatedResearch(claimed.research);
+    }
+    return {
+      created: claimed.outcome === "created",
+      research: serializeKeywordResearch(claimed.research),
+    };
   }
 
   async function getResearch(input) {
@@ -548,6 +616,8 @@ export function createKeywordResearchApi({
 
   return {
     createResearch,
+    createIntent,
+    claimIntent,
     getResearch,
     saveSelection,
     createRun,

@@ -590,6 +590,19 @@ enum RunQueryPlanSource {
   keyword_research
 }
 
+model KeywordResearchIntent {
+  id                String           @id
+  seeds             Json
+  createdAt         DateTime         @default(now())
+  expiresAt         DateTime
+  claimedAt         DateTime?
+  claimedByUserId   String?
+  claimedResearchId String?          @unique
+  claimedResearch   KeywordResearch? @relation(fields: [claimedResearchId], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+}
+
 model KeywordResearch {
   id                String                @id
   ownerId           String
@@ -614,6 +627,7 @@ model KeywordResearch {
   stages            KeywordResearchStage[]
   runs              Run[]
   handoffs          KeywordResearchHandoff[]
+  intent            KeywordResearchIntent?
 
   @@index([ownerId, createdAt])
   @@index([state, createdAt])

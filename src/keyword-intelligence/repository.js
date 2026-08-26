@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { blake2s } from "@noble/hashes/blake2.js";
 import { prismaSchemaForClient } from "../prisma-client.js";
-import { createDefaultSelection } from "./selection.js";
+import { createDefaultSelection, normalizeSeeds } from "./selection.js";
 
 const RESEARCH_ID = /^kr_[A-Za-z0-9_-]{24}$/u;
+const KEYWORD_RESEARCH_INTENT_ID = /^intent_[A-Za-z0-9_-]{32}$/u;
 const RUN_ID = /^run_[A-Za-z0-9_-]{16,80}$/u;
 const ITEM_KEY = /^[A-Za-z0-9_.:-]{1,128}$/u;
 const FINGERPRINT = /^[a-f0-9]{64}$/u;
@@ -32,6 +33,7 @@ const CODE_THROTTLED = "KEYWORD_PROVIDER_THROTTLED";
 const CODE_BUDGET_EXHAUSTED = "KEYWORD_PROVIDER_BUDGET_EXHAUSTED";
 const CODE_RETRY_NOT_SCHEDULED = "KEYWORD_PROVIDER_RETRY_NOT_SCHEDULED";
 const CODE_RESULT_TOO_LARGE = "KEYWORD_RESULT_TOO_LARGE";
+const KEYWORD_RESEARCH_INTENT_TTL_MS = 3_600_000;
 
 export class KeywordRepositoryError extends Error {
   constructor(code = "KEYWORD_INPUT_CONFLICT") {
@@ -51,12 +53,19 @@ class FinalPublicationAbort extends Error {
 
 class RunHandoffAbort extends Error {}
 
+class ClaimIntentAbort extends Error {}
+
 function conflict(code = "KEYWORD_INPUT_CONFLICT") {
   throw new KeywordRepositoryError(code);
 }
 
 function requireResearchId(value) {
   if (typeof value !== "string" || !RESEARCH_ID.test(value)) conflict();
+  return value;
+}
+
+function requireKeywordResearchIntentId(value) {
+  if (typeof value !== "string" || !KEYWORD_RESEARCH_INTENT_ID.test(value)) conflict();
   return value;
 }
 
@@ -92,6 +101,13 @@ function requireOwner(value) {
 function requireNow(value) {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) conflict();
   return value;
+}
+
+function requireNormalizedSeeds(value) {
+  const normalized = normalizeSeeds(value);
+  if (!normalized.ok || normalized.seeds.length !== value.length ||
+      normalized.seeds.some((seed, index) => seed !== value[index])) conflict();
+  return normalized.seeds;
 }
 
 function requireStage(value) {
@@ -135,6 +151,10 @@ function derivedId(prefix, parts) {
 
 export function newResearchId() {
   return `kr_${randomBytes(18).toString("base64url")}`;
+}
+
+export function newKeywordResearchIntentId() {
+  return `intent_${randomBytes(24).toString("base64url")}`;
 }
 
 export function newLeaseToken() {
@@ -356,6 +376,116 @@ export class PrismaKeywordResearchRepository {
       selectionRevision: 0, createdAt: now
     } });
     return { outcome: "created", research };
+  }
+
+  async createIntent(input, now) {
+    requireNow(now);
+    const intentId = requireKeywordResearchIntentId(input?.intentId);
+    const seeds = requireNormalizedSeeds(input?.seeds);
+    const expiresAt = requireNow(input?.expiresAt);
+    if (expiresAt.getTime() !== now.getTime() + KEYWORD_RESEARCH_INTENT_TTL_MS) conflict();
+
+    const existing = await this.client.keywordResearchIntent.findUnique({ where: { id: intentId } });
+    if (existing) return { outcome: "conflict" };
+
+    try {
+      const intent = await this.client.keywordResearchIntent.create({ data: {
+        id: intentId,
+        seeds,
+        createdAt: now,
+        expiresAt
+      } });
+      return { outcome: "created", intent };
+    } catch (error) {
+      if (error?.code === "P2002") return { outcome: "conflict" };
+      throw error;
+    }
+  }
+
+  async claimIntent(input, now) {
+    requireNow(now);
+    const intentId = requireKeywordResearchIntentId(input?.intentId);
+    const ownerId = requireOwner(input?.ownerId);
+    const researchId = requireResearchId(input?.researchId);
+    requireFingerprint(input?.configFingerprint);
+    if (input?.configSnapshot === null || typeof input?.configSnapshot !== "object") conflict();
+    if (!Array.isArray(input?.markets) || input.markets.length !== 9) conflict();
+
+    try {
+      return await this._transaction(async (tx) => {
+        const intent = await tx.keywordResearchIntent.findUnique({ where: { id: intentId } });
+        if (!intent) return { outcome: "not_found" };
+
+        if (intent.claimedResearchId !== null) {
+          if (intent.claimedByUserId !== ownerId) return { outcome: "not_found" };
+          const research = await tx.keywordResearch.findUnique({ where: { id: intent.claimedResearchId } });
+          if (!research || research.ownerId !== ownerId) return { outcome: "conflict" };
+          return { outcome: "found", research };
+        }
+        if (intent.expiresAt.getTime() <= now.getTime()) return { outcome: "not_found" };
+
+        const seeds = requireNormalizedSeeds(intent.seeds);
+        const research = await tx.keywordResearch.create({ data: {
+          id: researchId,
+          ownerId,
+          state: "queued",
+          generation: 1,
+          contractVersion: 1,
+          configSnapshot: input.configSnapshot,
+          configFingerprint: input.configFingerprint,
+          seeds,
+          markets: input.markets,
+          progress: { stages: {} },
+          selectionRevision: 0,
+          createdAt: now
+        } });
+
+        const claimed = await tx.keywordResearchIntent.updateMany({
+          where: {
+            id: intentId,
+            claimedResearchId: null,
+            claimedByUserId: null,
+            claimedAt: null,
+            expiresAt: { gt: now }
+          },
+          data: {
+            claimedAt: now,
+            claimedByUserId: ownerId,
+            claimedResearchId: researchId,
+            seeds: []
+          }
+        });
+
+        if (claimed.count === 1) return { outcome: "created", research };
+        if (claimed.count !== 0) throw new ClaimIntentAbort();
+
+        await tx.keywordResearch.delete({ where: { id: researchId } });
+        const current = await tx.keywordResearchIntent.findUnique({ where: { id: intentId } });
+        if (!current || current.expiresAt.getTime() <= now.getTime()) return { outcome: "not_found" };
+        if (current.claimedResearchId !== null) {
+          if (current.claimedByUserId !== ownerId) return { outcome: "not_found" };
+          const found = await tx.keywordResearch.findUnique({ where: { id: current.claimedResearchId } });
+          if (!found || found.ownerId !== ownerId) return { outcome: "conflict" };
+          return { outcome: "found", research: found };
+        }
+        return { outcome: "conflict" };
+      }, SHORT_TRANSACTION_OPTIONS);
+    } catch (error) {
+      if (error instanceof ClaimIntentAbort || error?.code === "P2002") {
+        return { outcome: "conflict" };
+      }
+      throw error;
+    }
+  }
+
+  async deleteExpiredIntents(now) {
+    requireNow(now);
+    return this.client.keywordResearchIntent.deleteMany({ where: {
+      expiresAt: { lte: now },
+      claimedAt: null,
+      claimedByUserId: null,
+      claimedResearchId: null
+    } });
   }
 
   async getOwned(input) {

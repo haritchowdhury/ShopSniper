@@ -1,0 +1,340 @@
+{
+  "contractVersion": "landing-keyword-auth-intent-v1",
+  "valid": {
+    "createRequests": {
+      "oneSeed": {
+        "seeds": [
+          "independent eyewear"
+        ]
+      },
+      "fiveSeeds": {
+        "seeds": [
+          "independent eyewear",
+          "sustainable clothing",
+          "handmade jewelry",
+          "specialty coffee",
+          "natural skincare"
+        ]
+      },
+      "normalized": {
+        "input": {
+          "seeds": [
+            "  Independent   Eyewear  ",
+            "sustainable clothing"
+          ]
+        },
+        "output": [
+          "Independent Eyewear",
+          "sustainable clothing"
+        ]
+      }
+    },
+    "createResponse": {
+      "intentId": "intent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expiresAt": "2026-08-26T13:00:00.000Z"
+    },
+    "claimCreatedResponse": {
+      "research": {
+        "id": "kr_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "statusUrl": "/api/keyword-research/kr_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "queued",
+        "generation": 1,
+        "contractVersion": 1,
+        "seeds": [
+          "independent eyewear"
+        ],
+        "markets": [
+          {
+            "code": "US",
+            "name": "United States",
+            "locationCode": 2840,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "GB",
+            "name": "United Kingdom",
+            "locationCode": 2826,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "CA",
+            "name": "Canada",
+            "locationCode": 2124,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "AU",
+            "name": "Australia",
+            "locationCode": 2036,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "NZ",
+            "name": "New Zealand",
+            "locationCode": 2554,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "DE",
+            "name": "Germany",
+            "locationCode": 2276,
+            "languageCode": "de",
+            "languageName": "German"
+          },
+          {
+            "code": "FR",
+            "name": "France",
+            "locationCode": 2250,
+            "languageCode": "fr",
+            "languageName": "French"
+          },
+          {
+            "code": "IN",
+            "name": "India",
+            "locationCode": 2356,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "AE",
+            "name": "United Arab Emirates",
+            "locationCode": 2784,
+            "languageCode": "en",
+            "languageName": "English"
+          }
+        ],
+        "progress": {
+          "stage": "queued",
+          "expansion": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          },
+          "anchorScreen": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          },
+          "marketOverview": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          }
+        },
+        "result": null,
+        "selection": [],
+        "selectionRevision": 0,
+        "selectionConflicts": [],
+        "safeError": null,
+        "createdAt": "2026-08-26T12:00:00.000Z",
+        "startedAt": null,
+        "completedAt": null,
+        "updatedAt": "2026-08-26T12:00:00.000Z"
+      }
+    },
+    "claimReplayResponse": {
+      "research": {
+        "id": "kr_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "statusUrl": "/api/keyword-research/kr_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "queued",
+        "generation": 1,
+        "contractVersion": 1,
+        "seeds": [
+          "independent eyewear"
+        ],
+        "markets": [
+          {
+            "code": "US",
+            "name": "United States",
+            "locationCode": 2840,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "GB",
+            "name": "United Kingdom",
+            "locationCode": 2826,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "CA",
+            "name": "Canada",
+            "locationCode": 2124,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "AU",
+            "name": "Australia",
+            "locationCode": 2036,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "NZ",
+            "name": "New Zealand",
+            "locationCode": 2554,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "DE",
+            "name": "Germany",
+            "locationCode": 2276,
+            "languageCode": "de",
+            "languageName": "German"
+          },
+          {
+            "code": "FR",
+            "name": "France",
+            "locationCode": 2250,
+            "languageCode": "fr",
+            "languageName": "French"
+          },
+          {
+            "code": "IN",
+            "name": "India",
+            "locationCode": 2356,
+            "languageCode": "en",
+            "languageName": "English"
+          },
+          {
+            "code": "AE",
+            "name": "United Arab Emirates",
+            "locationCode": 2784,
+            "languageCode": "en",
+            "languageName": "English"
+          }
+        ],
+        "progress": {
+          "stage": "queued",
+          "expansion": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          },
+          "anchorScreen": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          },
+          "marketOverview": {
+            "expected": 0,
+            "terminal": 0,
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0
+          }
+        },
+        "result": null,
+        "selection": [],
+        "selectionRevision": 0,
+        "selectionConflicts": [],
+        "safeError": null,
+        "createdAt": "2026-08-26T12:00:00.000Z",
+        "startedAt": null,
+        "completedAt": null,
+        "updatedAt": "2026-08-26T12:00:00.000Z"
+      }
+    }
+  },
+  "invalid": {
+    "createRequests": [
+      {
+        "name": "zero seeds",
+        "body": {
+          "seeds": []
+        }
+      },
+      {
+        "name": "six seeds",
+        "body": {
+          "seeds": [
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six"
+          ]
+        }
+      },
+      {
+        "name": "over 100 code points",
+        "body": {
+          "seeds": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ]
+        }
+      },
+      {
+        "name": "normalized duplicate",
+        "body": {
+          "seeds": [
+            "Independent Eyewear",
+            " independent   eyewear "
+          ]
+        }
+      },
+      {
+        "name": "control character",
+        "body": {
+          "seeds": [
+            "eyewear\u0000shops"
+          ]
+        }
+      },
+      {
+        "name": "unknown key",
+        "body": {
+          "seeds": [
+            "independent eyewear"
+          ],
+          "ownerId": "untrusted-body-owner"
+        }
+      }
+    ],
+    "claimIntentIds": [
+      "not-an-intent",
+      "intent_short",
+      "intent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%2Fextra",
+      "intent_%E0%A4%A"
+    ]
+  },
+  "errors": {
+    "inputInvalid": {
+      "error": {
+        "code": "KEYWORD_RESEARCH_INPUT_INVALID",
+        "message": "Invalid keyword research request"
+      }
+    },
+    "intentNotFound": {
+      "error": {
+        "code": "KEYWORD_RESEARCH_INTENT_NOT_FOUND",
+        "message": "Pending keyword research was not found or has expired"
+      }
+    },
+    "userContextRequired": {
+      "error": {
+        "code": "USER_CONTEXT_REQUIRED",
+        "message": "Authenticated user context is required."
+      }
+    }
+  }
+}

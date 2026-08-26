@@ -192,6 +192,9 @@ browser must never call this service directly or supply its own user identity.
 | `GET` | `/api/health` | Database-backed health check |
 | `POST` | `/api/run-intents` | Validate categories and create an unowned one-hour intent |
 | `POST` | `/api/run-intents/{intentId}/claim` | Atomically claim/replay an intent for the authenticated user |
+| `POST` | `/api/keyword-research-intents` | Validate 1–5 normalized seeds and create an unowned one-hour keyword intent; never creates research or dispatches work |
+| `POST` | `/api/keyword-research-intents/{intentId}/claim` | Atomically claim a live keyword intent and create one owner-scoped queued research; same-owner replay returns the same research |
+| `POST` | `/api/keyword-research` | Create owner-scoped keyword research directly for an authenticated user and return `202` |
 | `POST` | `/api/runs` | Create an owned queued run and return `202` |
 | `GET` | `/api/runs` | Paginated owned run history |
 | `GET` | `/api/runs/{runId}` | Owned status, phase, stage, progress, and safe errors |
@@ -210,11 +213,21 @@ The detailed historical JSON contract is retained at
 but this table and the current serializers/routes take precedence where that old
 specification describes an earlier state.
 
+Keyword-intent creation is deliberately pre-authentication and cost-free. It
+stores only normalized seeds and a one-hour expiry in PostgreSQL. It does not
+create `KeywordResearch`, send `keyword.initialize.v1`, or call a worker or
+provider. The authenticated claim inserts the research and records the intent
+mapping in one transaction, scrubs the intent seeds, and only after that commit
+attempts the initialize dispatch. A same-owner retry returns the mapped research
+without another immediate dispatch; queued-research recovery remains responsible
+for a send lost after commit. Missing, expired, and different-owner claims all
+return the same safe `404 KEYWORD_RESEARCH_INTENT_NOT_FOUND` response.
+
 ## Persistence model
 
-The ten forward migrations lead to these active groups:
+The forward-only migrations lead to these active groups:
 
-- **Run lifecycle:** `Run`, `RunQuery`, `RunIntent`, `QueryAudit`, and
+- **Run lifecycle:** `Run`, `RunQuery`, `RunIntent`, `KeywordResearchIntent`, `QueryAudit`, and
   `RunDiagnostic`.
 - **Historical results:** `Lead`, including run-specific evidence, versions,
   qualification, score state, discovery occurrences, and traffic snapshots.

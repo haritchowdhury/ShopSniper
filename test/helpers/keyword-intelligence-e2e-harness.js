@@ -46,6 +46,9 @@ const BACKEND_CONFIG = Object.freeze({
   port: 0,
   host: "127.0.0.1",
   backendApiToken: "kiw6-backend-token",
+  googleApiKey: "kiw6-google-api-key",
+  googleSearchEngineId: "kiw6-search-engine",
+  openaiApiKey: "kiw6-openai-api-key",
   runExecutionBackend: "aws",
   runRateLimitWindowMs: 60000,
   runRateLimitMax: 1000,
@@ -414,6 +417,9 @@ export async function createKeywordIntelligenceE2eHarness({
     get(target, property) {
       const value = target[property];
       if (typeof value !== "function") return value;
+      if (property === "createRunIntent") {
+        return (...args) => value.apply(target, args);
+      }
       return (...args) => value.apply(target, withClock(args));
     }
   });
@@ -1004,6 +1010,29 @@ export async function createKeywordIntelligenceE2eHarness({
   ]);
   let keywordFaultPreparationSendStart = null;
   const injectCapturedDefect = async (faultId) => {
+    if (faultId === "expire-latest-unclaimed-keyword-intent") {
+      const intent = await state.prisma.keywordResearchIntent.findFirst({
+        where: {
+          claimedAt: null,
+          claimedByUserId: null,
+          claimedResearchId: null
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        select: { id: true }
+      });
+      if (!intent) throw new preflightError("no unclaimed keyword intent is available to expire");
+      const updated = await state.prisma.keywordResearchIntent.updateMany({
+        where: {
+          id: intent.id,
+          claimedAt: null,
+          claimedByUserId: null,
+          claimedResearchId: null
+        },
+        data: { expiresAt: new Date(nowBox.current.getTime() - 1) }
+      });
+      if (updated.count !== 1) throw new preflightError("keyword intent expiry fixture did not update exactly one row");
+      return { faultId, updatedCount: 1 };
+    }
     const faultQueueUrl = faultQueues.get(faultId);
     if (faultQueueUrl) {
       if (faultQueueUrl === keywordQueueUrl && queueHead(faultQueueUrl)?.message.type === "keyword.initialize.v1") {
