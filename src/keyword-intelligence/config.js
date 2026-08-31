@@ -168,4 +168,141 @@ export function keywordResearchConfigV1() {
   return KEYWORD_RESEARCH_CONFIG_V1;
 }
 
-export { keywordResearchConfigV1Schema, marketConfigSchema, MARKET_TUPLE, KEYWORD_RESEARCH_CONFIG_V1 };
+export const LEAD_FINDING_LOCAL_PHRASES = Object.freeze([
+  "near me", "close to me", "closest to me", "closest", "nearest", "nearby",
+]);
+
+export const LEAD_FINDING_STORE_TOKENS = Object.freeze([
+  "shop", "shops", "store", "stores", "boutique", "boutiques",
+  "outlet", "outlets", "retailer", "retailers",
+]);
+
+export const LEAD_FINDING_RETAILER_TOKENS = Object.freeze([
+  "amazon", "walmart", "target", "ebay", "etsy", "aliexpress", "alibaba",
+  "shein", "temu", "costco", "ikea", "bestbuy", "macys", "kohls",
+  "nordstrom", "wayfair", "wish", "overstock", "rakuten", "flipkart",
+  "homedepot", "lowes",
+]);
+
+export const LEAD_FINDING_CLUSTER_KEY_STRIP = Object.freeze([
+  "buy", "buying", "bought", "order", "ordering", "purchase",
+  "cheap", "cheapest", "affordable", "sale", "sales", "discount", "discounts",
+  "deal", "deals", "clearance", "best", "top", "new", "arrivals", "arrival",
+  "online", "price", "prices", "cost", "under", "review", "reviews", "vs",
+  "comparison", "shopping", "retail", "shipping",
+]);
+
+const keywordResearchConfigV2Schema = z.strictObject({
+  contractVersion: z.literal(2),
+  schemaVersion: z.literal("keyword-research-config-v2"),
+  markets: z.array(marketConfigSchema).length(9),
+  expansionAnchor: marketConfigSchema,
+  expansionPerSeedLimit: z.literal(60),
+  screenCandidateLimit: z.literal(300),
+  shortlistLimit: z.literal(200),
+  overviewBatchLimit: z.literal(700),
+  maxCostPerResearchUsd: z.literal("3.00000000"),
+  api: keywordResearchConfigV1Schema.shape.api,
+  search: keywordResearchConfigV1Schema.shape.search,
+  expansion: keywordResearchConfigV1Schema.shape.expansion,
+  intent: z.strictObject({
+    commercialLabels: z.array(z.enum(["transactional", "commercial"])),
+    informationalLabels: z.array(z.literal("informational")),
+    keepNavigational: z.literal(true),
+    commercialModifiers: z.array(z.string()),
+    informationalModifiers: z.array(z.string()),
+  }),
+  filters: keywordResearchConfigV1Schema.shape.filters,
+  dedup: keywordResearchConfigV1Schema.shape.dedup,
+  classification: z.strictObject({
+    localPhrases: z.array(z.string()),
+    storeTokens: z.array(z.string()),
+    retailerTokens: z.array(z.string()),
+    clusterKeyStripTokens: z.array(z.string()),
+  }),
+  clustering: z.strictObject({
+    method: z.literal("concept_key"),
+    similarityThreshold: z.literal(0.8),
+    minClusterSize: z.literal(1),
+    clusterLabelStrategy: z.literal("representative_keyword"),
+  }),
+  scoring: z.strictObject({
+    weights: z.strictObject({
+      volume: z.literal(0.30),
+      commercialIntent: z.literal(0.25),
+      trend: z.literal(0.15),
+      seedOverlap: z.literal(0.10),
+      cpc: z.literal(0.20),
+    }),
+    difficultyMax: z.literal(100),
+    competitionMax: z.literal(1.0),
+    volumeLogBase: z.literal(10),
+    volumeLogCap: z.literal(1_000_000),
+    cpcCap: z.literal(20),
+    clusterRecommendThreshold: z.literal(60),
+  }),
+});
+
+const KEYWORD_RESEARCH_CONFIG_V2 = Object.freeze({
+  ...KEYWORD_RESEARCH_CONFIG_V1,
+  contractVersion: 2,
+  schemaVersion: "keyword-research-config-v2",
+  intent: {
+    ...KEYWORD_RESEARCH_CONFIG_V1.intent,
+    commercialModifiers: KEYWORD_RESEARCH_CONFIG_V1.intent.commercialModifiers.filter(
+      (term) => term !== "near me",
+    ),
+  },
+  classification: {
+    localPhrases: [...LEAD_FINDING_LOCAL_PHRASES],
+    storeTokens: [...LEAD_FINDING_STORE_TOKENS],
+    retailerTokens: [...LEAD_FINDING_RETAILER_TOKENS],
+    clusterKeyStripTokens: [...LEAD_FINDING_CLUSTER_KEY_STRIP],
+  },
+  clustering: {
+    method: "concept_key",
+    similarityThreshold: 0.8,
+    minClusterSize: 1,
+    clusterLabelStrategy: "representative_keyword",
+  },
+  scoring: {
+    weights: {
+      volume: 0.30,
+      commercialIntent: 0.25,
+      trend: 0.15,
+      seedOverlap: 0.10,
+      cpc: 0.20,
+    },
+    difficultyMax: 100,
+    competitionMax: 1.0,
+    volumeLogBase: 10,
+    volumeLogCap: 1_000_000,
+    cpcCap: 20,
+    clusterRecommendThreshold: 60,
+  },
+});
+
+export function keywordResearchConfigV2() {
+  return KEYWORD_RESEARCH_CONFIG_V2;
+}
+
+export function isLeadFindingConfig(config) {
+  return config?.schemaVersion === "keyword-research-config-v2";
+}
+
+export function parseKeywordResearchConfig(snapshot) {
+  const v2 = keywordResearchConfigV2Schema.safeParse(snapshot);
+  if (v2.success) return { ok: true, data: v2.data, version: 2 };
+  const v1 = keywordResearchConfigV1Schema.safeParse(snapshot);
+  if (v1.success) return { ok: true, data: v1.data, version: 1 };
+  return { ok: false, data: null, version: null };
+}
+
+export {
+  keywordResearchConfigV1Schema,
+  keywordResearchConfigV2Schema,
+  marketConfigSchema,
+  MARKET_TUPLE,
+  KEYWORD_RESEARCH_CONFIG_V1,
+  KEYWORD_RESEARCH_CONFIG_V2,
+};

@@ -1,8 +1,35 @@
 import { normalizeVolume, pyRound, trendToZeroOne } from "./normalize.js";
+import { isLeadFindingConfig } from "./config.js";
+import { jaccard, signature, tokenize } from "./dedup.js";
 
 export const BLOCKING_FLAGS = new Set([
   "too_little_traffic", "too_broad", "declining_traffic", "brand_competitor", "informational_dropped",
 ]);
+
+export const LEAD_FINDING_BLOCKING_FLAGS = new Set([
+  ...BLOCKING_FLAGS, "local_intent", "junk_quality",
+]);
+
+function unusualPunctuationCount(keyword) {
+  const matches = String(keyword || "").match(/[^\p{L}\p{N}\s'’-]/gu);
+  return matches ? matches.length : 0;
+}
+
+function hasConsecutiveDuplicateTokens(keyword) {
+  const raw = tokenize(keyword, []);
+  for (let i = 1; i < raw.length; i++) {
+    if (raw[i] === raw[i - 1]) return true;
+  }
+  return false;
+}
+
+export function isJunkQuality(keyword) {
+  const text = String(keyword || "");
+  if (/^\s*\d/u.test(text)) return true;
+  if (hasConsecutiveDuplicateTokens(text)) return true;
+  if (unusualPunctuationCount(text) > 2) return true;
+  return false;
+}
 
 export function flagRecord(rec, config) {
   rec.flags = [];
@@ -16,6 +43,10 @@ export function flagRecord(rec, config) {
   }
   if (rec.lane === "brand_competitor") rec.flags.push("brand_competitor");
   if ((rec.mainIntent || "").toLowerCase() === "informational") rec.flags.push("informational_dropped");
+  if (isLeadFindingConfig(config)) {
+    if (rec.lane === "local_discovery") rec.flags.push("local_intent");
+    if (isJunkQuality(rec.keyword)) rec.flags.push("junk_quality");
+  }
 }
 
 export function populationStats(records) {
@@ -28,6 +59,10 @@ export function populationStats(records) {
 }
 
 export function scoreRecord(rec, stats, config) {
+  if (isLeadFindingConfig(config)) {
+    scoreRecordLeadFinding(rec, config);
+    return;
+  }
   const weights = config.scoring.weights;
   const scfg = config.scoring;
 
@@ -56,6 +91,44 @@ export function scoreRecord(rec, stats, config) {
 
   const blocking = new Set(rec.flags).intersection(BLOCKING_FLAGS);
   rec.recommended = rec.opportunityScore >= config.scoring.recommendThreshold && blocking.size === 0;
+}
+
+function stableVolumeNorm(volume, cap, logBase) {
+  if (!volume || volume <= 0) return 0.0;
+  const denom = Math.log(Math.max(cap, 1.0) + 1.0) / Math.log(logBase);
+  if (denom <= 0) return 0.0;
+  return Math.max(0.0, Math.min(1.0, (Math.log(volume + 1.0) / Math.log(logBase)) / denom));
+}
+
+function seedOverlapScore(rec, config) {
+  const strip = [
+    ...(config.dedup?.stripTokens || []),
+    ...(config.classification?.clusterKeyStripTokens || []),
+  ];
+  const keywordTokens = signature(rec.keyword, strip);
+  const seeds = rec.sourceSeeds && rec.sourceSeeds.length ? rec.sourceSeeds : [rec.seed].filter(Boolean);
+  const seedTokens = new Set();
+  for (const seed of seeds) {
+    for (const token of signature(seed, strip)) seedTokens.add(token);
+  }
+  return jaccard(keywordTokens, seedTokens);
+}
+
+function scoreRecordLeadFinding(rec, config) {
+  const weights = config.scoring.weights;
+  const scfg = config.scoring;
+  const volNorm = stableVolumeNorm(rec.searchVolume, scfg.volumeLogCap, scfg.volumeLogBase);
+  const cpcNorm = Math.max(0.0, Math.min(1.0, (rec.cpc || 0.0) / Math.max(scfg.cpcCap, 0.01)));
+  const trendNorm = trendToZeroOne(rec.trendSlope);
+  const overlap = seedOverlapScore(rec, config);
+  const raw = weights.volume * volNorm
+    + weights.commercialIntent * rec.commercialIntent
+    + weights.trend * trendNorm
+    + weights.seedOverlap * overlap
+    + weights.cpc * cpcNorm;
+  const totalW = Object.values(weights).reduce((a, b) => a + b, 0) || 1.0;
+  rec.opportunityScore = pyRound(Math.max(0.0, Math.min(1.0, raw / totalW)) * 100);
+  rec.recommended = false;
 }
 
 export function scoreAndFlagAll(records, config, options = {}) {
@@ -94,6 +167,23 @@ export function scoreCluster(cluster, config, stats = null) {
   const members = cluster.records;
   if (!members || members.length === 0) return;
   const blockingShare = aggregateCluster(cluster);
+
+  if (isLeadFindingConfig(config)) {
+    const scfg = config.scoring;
+    const weights = scfg.weights;
+    const volNorm = stableVolumeNorm(cluster.adjustedClusterVolume, scfg.volumeLogCap, scfg.volumeLogBase);
+    const cpcNorm = Math.max(0.0, Math.min(1.0, (cluster.avgCpc || 0.0) / Math.max(scfg.cpcCap, 0.01)));
+    const overlapMean = members.reduce((sum, rec) => sum + seedOverlapScore(rec, config), 0) / members.length;
+    const raw = weights.volume * volNorm
+      + weights.commercialIntent * cluster.avgCommercialIntent
+      + weights.trend * cluster.trendScore
+      + weights.seedOverlap * overlapMean
+      + weights.cpc * cpcNorm;
+    const totalW = Object.values(weights).reduce((a, b) => a + b, 0) || 1.0;
+    cluster.opportunityScore = pyRound(Math.max(0.0, Math.min(1.0, raw / totalW)) * 100);
+    cluster.recommended = false;
+    return;
+  }
 
   const weights = config.scoring.weights;
   const scfg = config.scoring;

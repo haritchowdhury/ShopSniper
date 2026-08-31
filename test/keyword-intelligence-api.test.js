@@ -582,6 +582,7 @@ function makeApi({ research = null, defect = {}, runDefect = {}, distinctIds = f
     now: () => NOW,
     researchIdFactory: () => `kr_${(distinctIds ? seq++ : 0).toString(36).padStart(24, "0")}`,
     runIdFactory: () => `run_${String(seq).padStart(24, "0")}`,
+    configSnapshot: CONFIG,
     classifyQueryTypes: classifyQueryTypes ?? (async (items) => items.map((item) => ({
       itemId: item.itemId,
       product: item.product === true || item.lane === "category_discovery",

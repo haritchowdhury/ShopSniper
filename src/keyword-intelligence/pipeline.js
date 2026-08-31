@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { attachVariants, clusterKeywords } from "./cluster.js";
+import { isLeadFindingConfig } from "./config.js";
 import { dedupVariants } from "./dedup.js";
 import { isInformational } from "./intent.js";
 import { hasMetrics, normalizeItem, computeTrendSlope, pyRound } from "./normalize.js";
-import { scoreAllClusters, scoreAndFlagAll } from "./score.js";
-import { selectionItemId } from "./selection.js";
+import { LEAD_FINDING_BLOCKING_FLAGS, scoreAllClusters, scoreAndFlagAll } from "./score.js";
+import { createDefaultSelection, selectionItemId } from "./selection.js";
 
 function emptyFacets() {
   return { audience: [], category: [], channel: [], fit: [], modifier: [] };
@@ -367,13 +368,34 @@ export function computeResearchResult(input) {
   scoreAllClusters(clusters, config);
   scoreMarkets(deduped, markets, config);
 
+  const leadFinding = isLeadFindingConfig(config);
+  if (leadFinding) {
+    for (const record of deduped) record.recommended = false;
+    const selection = createDefaultSelection(active, {
+      onePerCluster: true,
+      blockingFlags: LEAD_FINDING_BLOCKING_FLAGS,
+    });
+    const recommendedIds = new Set(selection.items.map((item) => item.itemId));
+    for (const record of active) {
+      record.recommended = recommendedIds.has(selectionItemId("calculated", record.keyword));
+    }
+    for (const cluster of clusters) {
+      cluster.recommended = cluster.records.some((member) => member.recommended);
+    }
+    informationalDropped = new Set(
+      active
+        .filter((record) => record.flags.includes("informational_dropped"))
+        .map((record) => record.keyword.trim().toLowerCase()),
+    ).size;
+  }
+
   const activeCount = active.length;
   const recommendedKeywords = active.filter((r) => r.recommended).length;
   const recommendedClusters = clusters.filter((c) => c.recommended).length;
   const variantGroups = clusters.reduce((sum, c) => sum + c.variantGroups.length, 0);
 
   return {
-    contractVersion: 1,
+    contractVersion: leadFinding ? 2 : 1,
     researchId: input.researchId ?? "",
     generation: input.generation ?? 1,
     configFingerprint: input.configFingerprint ?? "",

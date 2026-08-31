@@ -102,16 +102,35 @@ function metricsSnapshotOf(row) {
   return snapshot;
 }
 
-export function createDefaultSelection(rows) {
+export function createDefaultSelection(rows, options = {}) {
   if (!Array.isArray(rows)) {
     return { ok: false, error: "rows must be an array", issues: [{ field: "rows", code: "rows_not_array" }] };
   }
-  const recommended = rows.filter(
-    (row) =>
-      (row.mergedInto === null || row.mergedInto === undefined) &&
-      row.recommended === true,
-  );
-  const sorted = [...recommended].sort(sortDefaultCompare);
+  const onePerCluster = options.onePerCluster === true;
+  const blockingFlags = options.blockingFlags instanceof Set ? options.blockingFlags : null;
+  const eligible = rows.filter((row) => {
+    if (row.mergedInto !== null && row.mergedInto !== undefined) return false;
+    if (blockingFlags) {
+      const flags = Array.isArray(row.flags) ? row.flags : (row.metricsSnapshot?.flags ?? []);
+      if (flags.some((flag) => blockingFlags.has(flag))) return false;
+    } else if (row.recommended !== true) {
+      return false;
+    }
+    return true;
+  });
+  let chosen = eligible;
+  if (onePerCluster) {
+    const groups = new Map();
+    for (const row of eligible) {
+      const clusterId = row.clusterId
+        || row.metricsSnapshot?.clusterId
+        || selectionItemId("calculated", row.keyword);
+      if (!groups.has(clusterId)) groups.set(clusterId, []);
+      groups.get(clusterId).push(row);
+    }
+    chosen = [...groups.values()].map((members) => [...members].sort(sortDefaultCompare)[0]);
+  }
+  const sorted = [...chosen].sort(sortDefaultCompare);
   const items = sorted.slice(0, MAX_DEFAULT_ITEMS).map((row) => ({
     itemId: row.itemId ?? selectionItemId("calculated", row.keyword),
     sourceKind: "calculated",
@@ -285,9 +304,12 @@ function canonicalItem(members) {
   return [...members].sort((a, b) => {
     const ra = rank(a);
     const rb = rank(b);
-    for (let i = 0; i < ra.length; i++) {
-      if (ra[i] !== rb[i]) return ra[i] < rb[i] ? -1 : 1;
-    }
+    if (ra[0] !== rb[0]) return ra[0] - rb[0];
+    if (ra[1] !== rb[1]) return rb[1] - ra[1];
+    if (ra[2] !== rb[2]) return rb[2] - ra[2];
+    if (ra[3] !== rb[3]) return ra[3] - rb[3];
+    if (ra[4] !== rb[4]) return ra[4] < rb[4] ? -1 : 1;
+    if (ra[5] !== rb[5]) return ra[5] < rb[5] ? -1 : 1;
     return 0;
   })[0];
 }

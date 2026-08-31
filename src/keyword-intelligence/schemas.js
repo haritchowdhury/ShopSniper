@@ -148,6 +148,15 @@ const keywordResearchResultV1Schema = z.strictObject({
   clusters: z.array(clusterRowSchema),
 });
 
+const keywordResearchResultV2Schema = keywordResearchResultV1Schema.extend({
+  contractVersion: z.literal(2),
+});
+
+const keywordResearchResultSchema = z.discriminatedUnion("contractVersion", [
+  keywordResearchResultV1Schema,
+  keywordResearchResultV2Schema,
+]);
+
 export {
   marketSchema,
   marketTupleSchema,
@@ -158,5 +167,7 @@ export {
   clusterRowSchema,
   summarySchema,
   keywordResearchResultV1Schema,
+  keywordResearchResultV2Schema,
+  keywordResearchResultSchema,
   lanes,
 };

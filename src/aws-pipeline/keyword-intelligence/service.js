@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { PipelineInvariantError } from "../contracts/errors.js";
 import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
-import { keywordResearchConfigV1Schema } from "../../keyword-intelligence/config.js";
+import { isLeadFindingConfig, parseKeywordResearchConfig } from "../../keyword-intelligence/config.js";
 import { isInformational } from "../../keyword-intelligence/intent.js";
 import { computeResearchResult, resultFingerprint } from "../../keyword-intelligence/pipeline.js";
 import { createDefaultSelection } from "../../keyword-intelligence/selection.js";
@@ -137,8 +137,8 @@ function queueUrlOf(runtime) {
 }
 
 function configOf(research) {
-  const result = keywordResearchConfigV1Schema.safeParse(research.configSnapshot);
-  if (!result.success) invariant();
+  const result = parseKeywordResearchConfig(research.configSnapshot);
+  if (!result.ok) invariant();
   return result.data;
 }
 
@@ -902,8 +902,18 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime,
     researchId: research.id, generation: stage.generation, configFingerprint: research.configFingerprint
   });
   const active = usResult.keywords.filter((entry) => entry.mergedInto === null);
-  const usable = active.filter((entry) => !isInformational(entry.keyword, entry.mainIntent, config));
-  const sorted = [...usable].sort(shortlistComparator);
+  const leadFinding = isLeadFindingConfig(config);
+  const usable = leadFinding
+    ? active
+    : active.filter((entry) => !isInformational(entry.keyword, entry.mainIntent, config));
+  const sorted = [...usable].sort((left, right) => {
+    if (leadFinding) {
+      const li = (left.flags || []).includes("informational_dropped") ? 1 : 0;
+      const ri = (right.flags || []).includes("informational_dropped") ? 1 : 0;
+      if (li !== ri) return li - ri;
+    }
+    return shortlistComparator(left, right);
+  });
   const shortlist = sorted.slice(0, config.shortlistLimit).map((entry) => entry.keyword);
   if (!shortlist.length) {
     await prepareTerminalLease(monitor);

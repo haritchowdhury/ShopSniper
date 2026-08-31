@@ -8,13 +8,13 @@ import {
   serializeRun,
 } from "../api-serializer.js";
 import { newKeywordResearchIntentId, newResearchId } from "./repository.js";
-import { keywordResearchConfigV1, keywordResearchConfigV1Schema } from "./config.js";
+import { keywordResearchConfigV2, parseKeywordResearchConfig } from "./config.js";
 import { serializeKeywordsCsv } from "./export.js";
 import { analyzeSelectionConflicts, normalizeSeeds, selectionItemId, validateSelectionDraft } from "./selection.js";
 import { classifyKeywordForSelection } from "./cluster.js";
 import { mapSelectionToQueries } from "./query-mapper.js";
 import { classifySelectedKeywordQueryTypes } from "./query-intent-classifier.js";
-import { keywordResearchResultV1Schema } from "./schemas.js";
+import { keywordResearchResultSchema } from "./schemas.js";
 import { newRunId } from "../prisma-run-repository.js";
 
 const CODE_INPUT_INVALID = "KEYWORD_RESEARCH_INPUT_INVALID";
@@ -228,11 +228,11 @@ function metricsSnapshotOf(row) {
 
 function assertResearchContract(research) {
   if (!research || research.contractVersion !== 1) throw contractMismatch();
-  const config = keywordResearchConfigV1Schema.safeParse(research.configSnapshot);
-  if (!config.success) throw contractMismatch();
+  const config = parseKeywordResearchConfig(research.configSnapshot);
+  if (!config.ok) throw contractMismatch();
   if (fingerprintJson(research.configSnapshot) !== research.configFingerprint) throw contractMismatch();
   if (research.state === "completed") {
-    const result = keywordResearchResultV1Schema.safeParse(research.result);
+    const result = keywordResearchResultSchema.safeParse(research.result);
     if (!result.success) throw contractMismatch();
   }
 }
@@ -251,7 +251,11 @@ function canonicalizeSelectionItem(research, item) {
     const row = findResultRow(research, item.sourceKeywordId);
     if (!row) throw inputInvalid();
     const keyword = normalizeKeyword(item.keyword);
-    const classified = classifyKeywordForSelection(keyword, { mainIntent: row.mainIntent, stripTokens });
+    const classified = classifyKeywordForSelection(keyword, {
+      mainIntent: row.mainIntent,
+      stripTokens,
+      classification: research.configSnapshot?.classification ?? null,
+    });
     return {
       itemId: row.itemId,
       sourceKind: "calculated",
@@ -268,7 +272,11 @@ function canonicalizeSelectionItem(research, item) {
     const keyword = normalizeKeyword(item.keyword);
     const firstSeed = research.seeds?.[0];
     if (typeof firstSeed !== "string" || firstSeed.length === 0) throw inputInvalid();
-    const classified = classifyKeywordForSelection(keyword, { mainIntent: null, stripTokens });
+    const classified = classifyKeywordForSelection(keyword, {
+      mainIntent: null,
+      stripTokens,
+      classification: research.configSnapshot?.classification ?? null,
+    });
     return {
       itemId: selectionItemId("manual", keyword),
       sourceKind: "manual",
@@ -425,7 +433,7 @@ export function createKeywordResearchApi({
   researchIdFactory = newResearchId,
   intentIdFactory = newKeywordResearchIntentId,
   runIdFactory = newRunId,
-  configSnapshot = keywordResearchConfigV1(),
+  configSnapshot = keywordResearchConfigV2(),
   classifyQueryTypes = classifySelectedKeywordQueryTypes,
   aiConfig = {},
 }) {

@@ -1,4 +1,5 @@
-import { signature, stableId } from "./dedup.js";
+import { jaccard, signature, stableId } from "./dedup.js";
+import { isLeadFindingConfig } from "./config.js";
 
 export const AUDIENCE = new Set(["women", "men", "kid", "kids", "baby", "unisex", "family"]);
 export const CHANNEL = new Set(["online", "store", "boutique", "outlet", "retail", "shopping", "shipping"]);
@@ -226,6 +227,13 @@ function aggregateMetadata(cluster, records) {
 }
 
 export function clusterKeywords(records, config, operations = {}) {
+  if (isLeadFindingConfig(config)) {
+    return clusterKeywordsV2(records, config, operations);
+  }
+  return clusterKeywordsV1(records, config, operations);
+}
+
+function clusterKeywordsV1(records, config, operations = {}) {
   const threshold = config.clustering.similarityThreshold;
   const strip = config.dedup.stripTokens || [];
   operations.pairComparisons = 0;
@@ -345,7 +353,212 @@ export function attachVariants(clusters, allRecords) {
   }
 }
 
-export function classifyKeywordForSelection(keyword, { mainIntent = null, stripTokens = [] } = {}) {
+export function classifyKeywordForSelection(keyword, {
+  mainIntent = null, stripTokens = [], classification = null,
+} = {}) {
+  if (classification) {
+    return classifyLeadFinding({ keyword, mainIntent }, classification, stripTokens);
+  }
   const toks = tokens(keyword, stripTokens);
   return { lane: lane({ keyword, mainIntent }, toks), facets: facets(toks, keyword) };
+}
+
+function hasLocalPhrase(keyword, phrases) {
+  const low = String(keyword || "").toLowerCase();
+  return phrases.some((phrase) => new RegExp(`\\b${escapeRegExp(phrase)}\\b`, "u").test(low));
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function emptyFacetsV2(keyword, storeTokens, localPhrases, toks) {
+  const channels = [];
+  if (toks.has("online")) channels.push("online");
+  if ([...toks].some((t) => storeTokens.has(t) || t === "store")) channels.push("store");
+  if (hasLocalPhrase(keyword, localPhrases)) channels.push("local");
+  return {
+    audience: [],
+    category: [],
+    channel: [...new Set(channels)].sort(),
+    fit: [],
+    modifier: [],
+  };
+}
+
+export function classifyLeadFinding(record, classification, stripTokens) {
+  const toks = signature(record.keyword, stripTokens);
+  const storeTokens = new Set(classification.storeTokens || []);
+  const retailerTokens = new Set(classification.retailerTokens || []);
+  const localPhrases = classification.localPhrases || [];
+  const laneName = leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhrases });
+  return {
+    lane: laneName,
+    facets: emptyFacetsV2(record.keyword, storeTokens, localPhrases, toks),
+  };
+}
+
+function leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhrases }) {
+  if (hasLocalPhrase(record.keyword, localPhrases)) return "local_discovery";
+  if ([...toks].some((t) => retailerTokens.has(t))) return "brand_competitor";
+  const hasStore = [...toks].some((t) => storeTokens.has(t) || t === "store");
+  if ((record.mainIntent || "").toLowerCase() === "navigational" && !hasStore) {
+    return "brand_competitor";
+  }
+  if (hasStore) return "store_discovery";
+  return "category_discovery";
+}
+
+const LOCAL_OPERATOR_TOKENS = new Set(["near", "me", "close", "closest", "nearest", "nearby"]);
+
+export function conceptKeyFor(record, classification, stripTokens) {
+  const toks = signature(record.keyword, stripTokens);
+  const storeTokens = new Set(classification.storeTokens || []);
+  const extraStrip = new Set(classification.clusterKeyStripTokens || []);
+  const content = new Set();
+  for (const t of toks) {
+    if (storeTokens.has(t) || t === "store") continue;
+    if (extraStrip.has(t)) continue;
+    if (LOCAL_OPERATOR_TOKENS.has(t)) continue;
+    content.add(t);
+  }
+  const laneName = record.lane || "category_discovery";
+  return {
+    content,
+    key: `${laneName}\u0000${[...content].sort().join(" ")}`,
+  };
+}
+
+function leadFindingRepresentative(members) {
+  return [...members].sort((a, b) => {
+    const av = a.searchVolume || 0;
+    const bv = b.searchVolume || 0;
+    if (av !== bv) return bv - av;
+    if (a.keyword.length !== b.keyword.length) return a.keyword.length - b.keyword.length;
+    const ak = a.keyword.toLowerCase();
+    const bk = b.keyword.toLowerCase();
+    if (ak !== bk) return ak < bk ? -1 : 1;
+    return 0;
+  })[0];
+}
+
+function clusterKeywordsV2(records, config, operations = {}) {
+  const strip = config.dedup.stripTokens || [];
+  const classification = config.classification;
+  const threshold = config.clustering.similarityThreshold;
+  operations.pairComparisons = 0;
+  const active = records.filter((r) => r.is_active);
+  const contents = new Map();
+  for (const record of active) {
+    const classified = classifyLeadFinding(record, classification, strip);
+    record.lane = classified.lane;
+    record.facets = classified.facets;
+    const concept = conceptKeyFor(record, classification, strip);
+    contents.set(record, concept);
+  }
+
+  const parent = new Map();
+  for (const record of active) parent.set(record, record);
+  function find(x) {
+    let root = x;
+    while (parent.get(root) !== root) {
+      parent.set(root, parent.get(parent.get(root)));
+      root = parent.get(root);
+    }
+    return root;
+  }
+  function union(a, b) {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  }
+
+  const byKey = new Map();
+  for (const record of active) {
+    const key = contents.get(record).key;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(record);
+  }
+  for (const members of byKey.values()) {
+    for (let i = 1; i < members.length; i++) union(members[0], members[i]);
+  }
+
+  for (let i = 0; i < active.length; i++) {
+    for (let j = i + 1; j < active.length; j++) {
+      const left = active[i];
+      const right = active[j];
+      if (left.lane !== right.lane) continue;
+      if (contents.get(left).key === contents.get(right).key) continue;
+      operations.pairComparisons += 1;
+      const score = jaccard(contents.get(left).content, contents.get(right).content);
+      if (score >= threshold) union(left, right);
+    }
+  }
+
+  const grouped = new Map();
+  for (const record of active) {
+    const root = find(record);
+    if (!grouped.has(root)) grouped.set(root, []);
+    grouped.get(root).push(record);
+  }
+
+  const clusters = [];
+  for (const members of grouped.values()) {
+    const complete = [];
+    const remaining = [...members];
+    while (remaining.length) {
+      const seed = remaining.shift();
+      const group = [seed];
+      for (let i = remaining.length - 1; i >= 0; i--) {
+        const candidate = remaining[i];
+        if (candidate.lane !== seed.lane) continue;
+        const ok = group.every((m) => {
+          operations.pairComparisons += 1;
+          return jaccard(contents.get(m).content, contents.get(candidate).content) >= threshold
+            || contents.get(m).key === contents.get(candidate).key;
+        });
+        if (ok) {
+          group.push(candidate);
+          remaining.splice(i, 1);
+        }
+      }
+      complete.push(group);
+    }
+    for (const group of complete) {
+      const labelRec = leadFindingRepresentative(group);
+      const label = labelRec.keyword;
+      const concept = contents.get(labelRec);
+      const cid = stableId("c", concept.key || `${label.toLowerCase()}|${labelRec.lane}`);
+      for (const member of group) {
+        member.clusterId = cid;
+        member.clusterLabel = label;
+      }
+      const cluster = {
+        label,
+        records: group,
+        clusterId: cid,
+        combinedVolume: 0,
+        avgCpc: 0.0,
+        avgCommercialIntent: 0.0,
+        trendScore: 0.0,
+        opportunityScore: 0,
+        recommended: false,
+        headlineVolume: 0,
+        adjustedClusterVolume: 0,
+        rawVariantVolume: 0,
+        variantGroups: [],
+        sourceSeeds: [],
+        laneCounts: {},
+        facets: { audience: [], category: [], channel: [], fit: [], modifier: [] },
+      };
+      aggregateMetadata(cluster, group);
+      clusters.push(cluster);
+    }
+  }
+  clusters.sort((a, b) => {
+    const d = b.adjustedClusterVolume - a.adjustedClusterVolume;
+    if (d !== 0) return d;
+    return a.label.toLowerCase() < b.label.toLowerCase() ? -1 : a.label.toLowerCase() > b.label.toLowerCase() ? 1 : 0;
+  });
+  return clusters;
 }

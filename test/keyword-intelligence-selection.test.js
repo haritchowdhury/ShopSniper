@@ -171,3 +171,70 @@ test("conflictId is deterministic ksc_ plus 16 hex", () => {
   const again = analyzeSelectionConflicts(FIXTURE.cases.near.items, CONFLICT_CONFIG);
   assert.equal(conflicts.conflicts[0].conflictId, again.conflicts[0].conflictId);
 });
+
+test("createDefaultSelection onePerCluster keeps the higher-score member and skips blocking flags", () => {
+  const rows = [
+    {
+      itemId: "ksi_a00000000000",
+      keyword: "pickleball paddles",
+      seed: "pickleball",
+      sourceSeeds: ["pickleball"],
+      clusterId: "c_same",
+      opportunityScore: 80,
+      searchVolume: 4000,
+      flags: [],
+      lane: "category_discovery",
+      facets: { audience: [], category: [], channel: [], fit: [], modifier: [] },
+    },
+    {
+      itemId: "ksi_b00000000000",
+      keyword: "buy pickleball paddles online",
+      seed: "pickleball",
+      sourceSeeds: ["pickleball"],
+      clusterId: "c_same",
+      opportunityScore: 70,
+      searchVolume: 1200,
+      flags: [],
+      lane: "category_discovery",
+      facets: { audience: [], category: [], channel: [], fit: [], modifier: [] },
+    },
+    {
+      itemId: "ksi_c00000000000",
+      keyword: "walmart pickleball",
+      seed: "pickleball",
+      sourceSeeds: ["pickleball"],
+      clusterId: "c_other",
+      opportunityScore: 90,
+      searchVolume: 5000,
+      flags: ["brand_competitor"],
+      lane: "brand_competitor",
+      facets: { audience: [], category: [], channel: [], fit: [], modifier: [] },
+    },
+  ];
+  const result = createDefaultSelection(rows, {
+    onePerCluster: true,
+    blockingFlags: new Set(["brand_competitor"]),
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.items.map((item) => item.keyword), ["pickleball paddles"]);
+});
+
+test("analyzeSelectionConflicts canonical keeps the higher opportunity score", () => {
+  const items = [
+    {
+      itemId: "ksi_aaaaaaaaaaaa",
+      sourceKind: "calculated",
+      keyword: "leather handbags",
+      metricsSnapshot: { opportunityScore: 10, searchVolume: 100 },
+    },
+    {
+      itemId: "ksi_bbbbbbbbbbbb",
+      sourceKind: "calculated",
+      keyword: "leather handbag",
+      metricsSnapshot: { opportunityScore: 90, searchVolume: 1000 },
+    },
+  ];
+  const analysis = analyzeSelectionConflicts(items, CONFLICT_CONFIG);
+  assert.equal(analysis.conflicts.length, 1);
+  assert.equal(analysis.conflicts[0].canonicalItemId, "ksi_bbbbbbbbbbbb");
+});

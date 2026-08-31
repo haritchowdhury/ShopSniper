@@ -211,6 +211,7 @@ function makeApi({ repository = new IntentRepositoryFake(), dispatch } = {}) {
     now: () => NOW,
     intentIdFactory: () => INTENT_ID,
     researchIdFactory: () => RESEARCH_ID,
+    configSnapshot: CONFIG,
     dispatchInitialize
   });
   return { api, repository, sent };
