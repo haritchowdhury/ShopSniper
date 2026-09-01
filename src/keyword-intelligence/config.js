@@ -183,6 +183,7 @@ export const LEAD_FINDING_RETAILER_TOKENS = Object.freeze([
   "nordstrom", "wayfair", "wish", "overstock", "rakuten", "flipkart",
   "homedepot", "lowes",
 ]);
+// Phrase/misspelling matching for this closed list lives in retailer-match.js.
 
 export const LEAD_FINDING_CLUSTER_KEY_STRIP = Object.freeze([
   "buy", "buying", "bought", "order", "ordering", "purchase",

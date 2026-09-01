@@ -12,7 +12,7 @@ import {
   keywordResearchConfigV2Schema,
 } from "../src/keyword-intelligence/config.js";
 import { computeResearchResult } from "../src/keyword-intelligence/pipeline.js";
-import { LEAD_FINDING_BLOCKING_FLAGS, flagRecord, scoreRecord } from "../src/keyword-intelligence/score.js";
+import { LEAD_FINDING_BLOCKING_FLAGS, compareLeadFindingShortlist, flagRecord, leadFindingShortlistGroup, scoreRecord } from "../src/keyword-intelligence/score.js";
 import {
   analyzeSelectionConflicts,
   createDefaultSelection,
@@ -201,4 +201,110 @@ test("CASE-KR-L-010 v1 golden computeResearchResult stays on the v1 path", () =>
   assert.equal(result.contractVersion, 1);
   assert.equal(result.summary.recommendedKeywords, golden.summary.recommendedKeywords);
   assert.equal(keywordResearchConfigV1().schemaVersion, "keyword-research-config-v1");
+});
+
+const RETAILER_CLASSIFY = {
+  stripTokens: CONFIG.dedup.stripTokens,
+  classification: CONFIG.classification,
+};
+
+test("CASE-KR-L-011 retailer folds, aliases, and edit-distance 1 are brand_competitor", () => {
+  const phrases = [
+    "walmart women's clothes clearance",
+    "wal-mart clothes",
+    "wal mart clothes",
+    "wallmart clothes",
+    "amazom shoes",
+    "home depot paint supplies",
+    "best buy headphones",
+    "macys dresses",
+  ];
+  for (const keyword of phrases) {
+    const classified = classifyKeywordForSelection(keyword, RETAILER_CLASSIFY);
+    assert.equal(classified.lane, "brand_competitor", keyword);
+  }
+});
+
+test("CASE-KR-L-012 short retailer tokens do not match lookalikes", () => {
+  const phrases = [
+    ["wishlist clothing", "category_discovery"],
+    ["idea clothes", "category_discovery"],
+    ["fish store", "store_discovery"],
+    ["pickleball store", "store_discovery"],
+    ["best ceramic mugs online", "category_discovery"],
+    ["targeted ads clothing", "category_discovery"],
+  ];
+  for (const [keyword, lane] of phrases) {
+    const classified = classifyKeywordForSelection(keyword, RETAILER_CLASSIFY);
+    assert.equal(classified.lane, lane, keyword);
+  }
+});
+
+test("CASE-KR-L-013 v2 shortlist spends overview slots on clean phrases first", () => {
+  const cleanLow = {
+    keyword: "pickleball paddles",
+    recommended: false,
+    opportunityScore: 20,
+    searchVolume: 200,
+    itemId: "kw_clean",
+    flags: [],
+  };
+  const retailerHigh = {
+    keyword: "wallmart clothes",
+    recommended: false,
+    opportunityScore: 90,
+    searchVolume: 80000,
+    itemId: "kw_retailer",
+    flags: ["brand_competitor"],
+  };
+  const localHigh = {
+    keyword: "clothing store near me",
+    recommended: false,
+    opportunityScore: 80,
+    searchVolume: 50000,
+    itemId: "kw_local",
+    flags: ["local_intent"],
+  };
+  const junkHigh = {
+    keyword: "4.12 4 clothing store",
+    recommended: false,
+    opportunityScore: 70,
+    searchVolume: 40000,
+    itemId: "kw_junk",
+    flags: ["junk_quality"],
+  };
+  const informational = {
+    keyword: "how to start a clothing brand",
+    recommended: false,
+    opportunityScore: 95,
+    searchVolume: 90000,
+    itemId: "kw_info",
+    flags: ["informational_dropped"],
+  };
+  const rows = [informational, retailerHigh, junkHigh, localHigh, cleanLow];
+  const sorted = [...rows].sort((left, right) => compareLeadFindingShortlist(left, right, (a, b) => {
+    if (a.opportunityScore !== b.opportunityScore) return b.opportunityScore - a.opportunityScore;
+    return String(a.itemId).localeCompare(String(b.itemId));
+  }));
+  assert.deepEqual(sorted.map((row) => row.itemId), [
+    "kw_clean", "kw_retailer", "kw_local", "kw_junk", "kw_info",
+  ]);
+  assert.equal(leadFindingShortlistGroup(cleanLow), 0);
+  assert.equal(leadFindingShortlistGroup(retailerHigh), 1);
+  assert.equal(leadFindingShortlistGroup(informational), 2);
+});
+
+test("CASE-KR-L-014 v2 shortlist demotion is wired in the anchor aggregator; v1 comparator stays bare", () => {
+  const service = readFileSync(new URL("../src/aws-pipeline/keyword-intelligence/service.js", import.meta.url), "utf8");
+  assert.match(service, /compareLeadFindingShortlist\(left, right, shortlistComparator\)/);
+  assert.match(service, /leadFinding[\s\S]{0,80}\? compareLeadFindingShortlist/);
+  assert.match(service, /: shortlistComparator\(left, right\)/);
+});
+
+test("CASE-KR-L-015 frontend retailer matcher literals stay locked to backend", () => {
+  const frontend = readFileSync(new URL("../../frontend/lib/keyword-intelligence-view-model.ts", import.meta.url), "utf8");
+  assert.match(frontend, /RETAILER_ALIASES = \["wallmart", "amazom"\]/);
+  assert.match(frontend, /minCompactSubstringLength: 7/);
+  assert.match(frontend, /minEditDistanceLength: 6/);
+  assert.match(frontend, /maxEditDistance: 1/);
 });

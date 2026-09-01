@@ -10,6 +10,24 @@ export const LEAD_FINDING_BLOCKING_FLAGS = new Set([
   ...BLOCKING_FLAGS, "local_intent", "junk_quality",
 ]);
 
+export const LEAD_FINDING_SHORTLIST_PENALTY_FLAGS = Object.freeze([
+  "brand_competitor", "local_intent", "junk_quality",
+]);
+
+export function leadFindingShortlistGroup(entry) {
+  const flags = entry?.flags || [];
+  if (flags.includes("informational_dropped")) return 2;
+  if (LEAD_FINDING_SHORTLIST_PENALTY_FLAGS.some((flag) => flags.includes(flag))) return 1;
+  return 0;
+}
+
+export function compareLeadFindingShortlist(left, right, fallback) {
+  const leftGroup = leadFindingShortlistGroup(left);
+  const rightGroup = leadFindingShortlistGroup(right);
+  if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+  return fallback(left, right);
+}
+
 function unusualPunctuationCount(keyword) {
   const matches = String(keyword || "").match(/[^\p{L}\p{N}\s'’-]/gu);
   return matches ? matches.length : 0;

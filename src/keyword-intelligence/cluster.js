@@ -1,5 +1,6 @@
 import { jaccard, signature, stableId } from "./dedup.js";
 import { isLeadFindingConfig } from "./config.js";
+import { keywordMatchesRetailer } from "./retailer-match.js";
 
 export const AUDIENCE = new Set(["women", "men", "kid", "kids", "baby", "unisex", "family"]);
 export const CHANNEL = new Set(["online", "store", "boutique", "outlet", "retail", "shopping", "shipping"]);
@@ -389,18 +390,20 @@ function emptyFacetsV2(keyword, storeTokens, localPhrases, toks) {
 export function classifyLeadFinding(record, classification, stripTokens) {
   const toks = signature(record.keyword, stripTokens);
   const storeTokens = new Set(classification.storeTokens || []);
-  const retailerTokens = new Set(classification.retailerTokens || []);
+  const retailerTokens = classification.retailerTokens || [];
   const localPhrases = classification.localPhrases || [];
-  const laneName = leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhrases });
+  const laneName = leadFindingLane(record, toks, {
+    storeTokens, retailerTokens, localPhrases, stripTokens,
+  });
   return {
     lane: laneName,
     facets: emptyFacetsV2(record.keyword, storeTokens, localPhrases, toks),
   };
 }
 
-function leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhrases }) {
+function leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhrases, stripTokens }) {
   if (hasLocalPhrase(record.keyword, localPhrases)) return "local_discovery";
-  if ([...toks].some((t) => retailerTokens.has(t))) return "brand_competitor";
+  if (keywordMatchesRetailer(record.keyword, retailerTokens, stripTokens)) return "brand_competitor";
   const hasStore = [...toks].some((t) => storeTokens.has(t) || t === "store");
   if ((record.mainIntent || "").toLowerCase() === "navigational" && !hasStore) {
     return "brand_competitor";

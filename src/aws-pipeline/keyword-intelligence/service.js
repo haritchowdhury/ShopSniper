@@ -4,6 +4,7 @@ import { createPipelineLeaseMonitor } from "../core/lease-monitor.js";
 import { isLeadFindingConfig, parseKeywordResearchConfig } from "../../keyword-intelligence/config.js";
 import { isInformational } from "../../keyword-intelligence/intent.js";
 import { computeResearchResult, resultFingerprint } from "../../keyword-intelligence/pipeline.js";
+import { compareLeadFindingShortlist } from "../../keyword-intelligence/score.js";
 import { createDefaultSelection } from "../../keyword-intelligence/selection.js";
 import { executeProviderAttempt } from "./dataforseo-labs-adapter.js";
 import {
@@ -906,14 +907,11 @@ async function aggregateAnchor({ research, stage, config, tasks, token, runtime,
   const usable = leadFinding
     ? active
     : active.filter((entry) => !isInformational(entry.keyword, entry.mainIntent, config));
-  const sorted = [...usable].sort((left, right) => {
-    if (leadFinding) {
-      const li = (left.flags || []).includes("informational_dropped") ? 1 : 0;
-      const ri = (right.flags || []).includes("informational_dropped") ? 1 : 0;
-      if (li !== ri) return li - ri;
-    }
-    return shortlistComparator(left, right);
-  });
+  const sorted = [...usable].sort((left, right) => (
+    leadFinding
+      ? compareLeadFindingShortlist(left, right, shortlistComparator)
+      : shortlistComparator(left, right)
+  ));
   const shortlist = sorted.slice(0, config.shortlistLimit).map((entry) => entry.keyword);
   if (!shortlist.length) {
     await prepareTerminalLease(monitor);
