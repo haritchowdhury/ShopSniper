@@ -1,6 +1,7 @@
 import { normalizeVolume, pyRound, trendToZeroOne } from "./normalize.js";
 import { isLeadFindingConfig } from "./config.js";
 import { jaccard, signature, tokenize } from "./dedup.js";
+import { containsAny } from "./intent.js";
 
 export const BLOCKING_FLAGS = new Set([
   "too_little_traffic", "too_broad", "declining_traffic", "brand_competitor", "informational_dropped",
@@ -13,6 +14,20 @@ export const LEAD_FINDING_BLOCKING_FLAGS = new Set([
 export const LEAD_FINDING_SHORTLIST_PENALTY_FLAGS = Object.freeze([
   "brand_competitor", "local_intent", "junk_quality",
 ]);
+
+export const LEAD_FINDING_INFORMATIONAL_BLOCK_PHRASES = Object.freeze([
+  "how to", "what is", "wiki",
+]);
+
+export const LEAD_FINDING_INFORMATIONAL_RESCUE_PHRASES = Object.freeze([
+  "best", "review", "reviews", "vs", "comparison",
+]);
+
+export function leadFindingInformationalDropped(keyword, mainIntent) {
+  if (containsAny(keyword, LEAD_FINDING_INFORMATIONAL_BLOCK_PHRASES)) return true;
+  if ((mainIntent || "").toLowerCase() !== "informational") return false;
+  return !containsAny(keyword, LEAD_FINDING_INFORMATIONAL_RESCUE_PHRASES);
+}
 
 export function leadFindingShortlistGroup(entry) {
   const flags = entry?.flags || [];
@@ -60,10 +75,12 @@ export function flagRecord(rec, config) {
     rec.flags.push("declining_traffic");
   }
   if (rec.lane === "brand_competitor") rec.flags.push("brand_competitor");
-  if ((rec.mainIntent || "").toLowerCase() === "informational") rec.flags.push("informational_dropped");
   if (isLeadFindingConfig(config)) {
+    if (leadFindingInformationalDropped(rec.keyword, rec.mainIntent)) rec.flags.push("informational_dropped");
     if (rec.lane === "local_discovery") rec.flags.push("local_intent");
     if (isJunkQuality(rec.keyword)) rec.flags.push("junk_quality");
+  } else if ((rec.mainIntent || "").toLowerCase() === "informational") {
+    rec.flags.push("informational_dropped");
   }
 }
 

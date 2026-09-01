@@ -414,6 +414,27 @@ function leadFindingLane(record, toks, { storeTokens, retailerTokens, localPhras
 
 const LOCAL_OPERATOR_TOKENS = new Set(["near", "me", "close", "closest", "nearest", "nearby"]);
 
+export const LEAD_FINDING_JACCARD = Object.freeze({
+  shortMaxTokens: 3,
+  shortThreshold: 0.5,
+  longThreshold: 0.6,
+});
+
+export function leadFindingJaccardThreshold(leftSize, rightSize) {
+  const n = Math.min(Number(leftSize) || 0, Number(rightSize) || 0);
+  return n <= LEAD_FINDING_JACCARD.shortMaxTokens
+    ? LEAD_FINDING_JACCARD.shortThreshold
+    : LEAD_FINDING_JACCARD.longThreshold;
+}
+
+function leadFindingSimilar(left, right, contents) {
+  const leftConcept = contents.get(left);
+  const rightConcept = contents.get(right);
+  if (leftConcept.key === rightConcept.key) return true;
+  const need = leadFindingJaccardThreshold(leftConcept.content.size, rightConcept.content.size);
+  return jaccard(leftConcept.content, rightConcept.content) >= need;
+}
+
 export function conceptKeyFor(record, classification, stripTokens) {
   const toks = signature(record.keyword, stripTokens);
   const storeTokens = new Set(classification.storeTokens || []);
@@ -448,7 +469,6 @@ function leadFindingRepresentative(members) {
 function clusterKeywordsV2(records, config, operations = {}) {
   const strip = config.dedup.stripTokens || [];
   const classification = config.classification;
-  const threshold = config.clustering.similarityThreshold;
   operations.pairComparisons = 0;
   const active = records.filter((r) => r.is_active);
   const contents = new Map();
@@ -493,8 +513,7 @@ function clusterKeywordsV2(records, config, operations = {}) {
       if (left.lane !== right.lane) continue;
       if (contents.get(left).key === contents.get(right).key) continue;
       operations.pairComparisons += 1;
-      const score = jaccard(contents.get(left).content, contents.get(right).content);
-      if (score >= threshold) union(left, right);
+      if (leadFindingSimilar(left, right, contents)) union(left, right);
     }
   }
 
@@ -517,8 +536,7 @@ function clusterKeywordsV2(records, config, operations = {}) {
         if (candidate.lane !== seed.lane) continue;
         const ok = group.every((m) => {
           operations.pairComparisons += 1;
-          return jaccard(contents.get(m).content, contents.get(candidate).content) >= threshold
-            || contents.get(m).key === contents.get(candidate).key;
+          return leadFindingSimilar(m, candidate, contents);
         });
         if (ok) {
           group.push(candidate);

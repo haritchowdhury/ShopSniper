@@ -9,7 +9,7 @@ function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function containsAny(text, terms) {
+export function containsAny(text, terms) {
   const low = text.toLowerCase();
   return terms.some((term) => new RegExp(`\\b${escapeRegExp(term)}\\b`, "u").test(low));
 }

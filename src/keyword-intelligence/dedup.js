@@ -15,7 +15,14 @@ export const TOKEN_ALIASES = Object.freeze({
   shoes: "shoe", paddles: "paddle",
 });
 
+export const INVARIANT_S_TOKENS = Object.freeze([
+  "tennis", "canvas", "always", "news", "species", "series", "business", "circus", "atlas",
+]);
+
+const INVARIANT_S_TOKEN_SET = new Set(INVARIANT_S_TOKENS);
+
 export function singularPluralAlias(t) {
+  if (INVARIANT_S_TOKEN_SET.has(t)) return t;
   if (t.endsWith("s") && t.length > 4 && !t.endsWith("ss") && !t.endsWith("us") && !t.endsWith("is")) {
     return t.slice(0, -1);
   }

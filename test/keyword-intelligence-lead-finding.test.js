@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   classifyKeywordForSelection,
   clusterKeywords,
+  leadFindingJaccardThreshold,
 } from "../src/keyword-intelligence/cluster.js";
-import { readFileSync } from "node:fs";
+import {
+  INVARIANT_S_TOKENS,
+  signature,
+  singularPluralAlias,
+} from "../src/keyword-intelligence/dedup.js";
 import {
   keywordResearchConfigV1,
   keywordResearchConfigV2,
@@ -307,4 +313,64 @@ test("CASE-KR-L-015 frontend retailer matcher literals stay locked to backend", 
   assert.match(frontend, /minCompactSubstringLength: 7/);
   assert.match(frontend, /minEditDistanceLength: 6/);
   assert.match(frontend, /maxEditDistance: 1/);
+});
+
+test("CASE-KR-L-016 best/review/vs/comparison informational can default; how to cannot", () => {
+  const rescued = [
+    activeRecord("best ceramic mugs", { mainIntent: "informational", seed: "ceramic mugs", searchVolume: 4000 }),
+    activeRecord("mug reviews", { mainIntent: "informational", seed: "ceramic mugs", searchVolume: 2500 }),
+    activeRecord("ceramic mug vs tumbler", { mainIntent: "informational", seed: "ceramic mugs", searchVolume: 1800 }),
+    activeRecord("mug comparison", { mainIntent: "informational", seed: "ceramic mugs", searchVolume: 1200 }),
+  ];
+  for (const row of rescued) {
+    flagRecord(row, CONFIG);
+    assert.equal(row.flags.includes("informational_dropped"), false, row.keyword);
+  }
+  const howTo = activeRecord("how to start a clothing brand", {
+    mainIntent: "commercial", seed: "clothing", searchVolume: 9000, opportunityScore: 90,
+  });
+  flagRecord(howTo, CONFIG);
+  assert.ok(howTo.flags.includes("informational_dropped"));
+  const wiki = activeRecord("wiki clothing", { mainIntent: "commercial", seed: "clothing" });
+  flagRecord(wiki, CONFIG);
+  assert.ok(wiki.flags.includes("informational_dropped"));
+});
+
+test("CASE-KR-L-017 invariant s-tokens are not stemmed", () => {
+  for (const token of INVARIANT_S_TOKENS) {
+    assert.equal(singularPluralAlias(token), token, token);
+  }
+  assert.equal(singularPluralAlias("stores"), "store");
+  assert.equal(singularPluralAlias("paddles"), "paddle");
+  const tennis = signature("tennis shoes", CONFIG.dedup.stripTokens);
+  assert.ok(tennis.has("tennis"));
+  assert.equal(tennis.has("tenni"), false);
+  const canvas = signature("canvas tote", CONFIG.dedup.stripTokens);
+  assert.ok(canvas.has("canvas"));
+  assert.equal(canvas.has("canva"), false);
+});
+
+test("CASE-KR-L-018 size-dependent Jaccard bars and baby-clothes merge", () => {
+  assert.equal(leadFindingJaccardThreshold(3, 3), 0.5);
+  assert.equal(leadFindingJaccardThreshold(2, 4), 0.5);
+  assert.equal(leadFindingJaccardThreshold(4, 4), 0.6);
+  assert.equal(leadFindingJaccardThreshold(5, 4), 0.6);
+  const long = [
+    activeRecord("organic cotton baby clothes", { seed: "organic cotton", searchVolume: 3000 }),
+    activeRecord("organic cotton baby onesies", { seed: "organic cotton", searchVolume: 2200 }),
+  ];
+  clusterKeywords(long, CONFIG);
+  assert.equal(long[0].clusterId, long[1].clusterId);
+  const short = [
+    activeRecord("cotton baby clothes", { seed: "cotton", searchVolume: 2800 }),
+    activeRecord("cotton baby onesies", { seed: "cotton", searchVolume: 1900 }),
+  ];
+  clusterKeywords(short, CONFIG);
+  assert.equal(short[0].clusterId, short[1].clusterId);
+  const apart = [
+    activeRecord("leather bags", { seed: "bags", searchVolume: 4000 }),
+    activeRecord("canvas tote", { seed: "bags", searchVolume: 1500 }),
+  ];
+  clusterKeywords(apart, CONFIG);
+  assert.notEqual(apart[0].clusterId, apart[1].clusterId);
 });
