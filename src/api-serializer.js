@@ -925,12 +925,37 @@ export function runResultsAvailable(run) {
   return !requiresV3 || run.scoringVersion === 3;
 }
 
+function overlayLeadSummary(progress, leadSummary) {
+  if (!leadSummary || typeof leadSummary !== "object" || Array.isArray(leadSummary)) {
+    return progress;
+  }
+  const total = Number(leadSummary.total);
+  const qualified = Number(leadSummary.qualified);
+  const rejected = Number(leadSummary.rejected);
+  const failed = Number(leadSummary.failed);
+  if (Number.isFinite(total) && total >= 0) {
+    progress.storesDiscovered = Math.max(progress.storesDiscovered, total);
+    progress.outputRows = Math.max(progress.outputRows, total);
+  }
+  if (Number.isFinite(qualified) && qualified >= 0) {
+    progress.storesQualified = Math.max(progress.storesQualified, qualified);
+  }
+  if (Number.isFinite(rejected) && rejected >= 0) {
+    progress.storesRejected = Math.max(progress.storesRejected, rejected);
+  }
+  if (Number.isFinite(failed) && failed >= 0) {
+    progress.storeProcessingFailures = Math.max(progress.storeProcessingFailures, failed);
+  }
+  return progress;
+}
+
 export function serializeRun(run) {
   const progress = createInitialProgress();
   for (const key of Object.keys(progress)) {
     const value = Number(run.progress?.[key]);
     progress[key] = Number.isFinite(value) && value >= 0 ? value : 0;
   }
+  overlayLeadSummary(progress, run.leadSummary);
   const queryRows = Array.isArray(run.queries) ? run.queries : null;
   const invalidQueryCount = queryRows
     ? queryRows.filter(({ validationState }) => validationState === "invalid").length

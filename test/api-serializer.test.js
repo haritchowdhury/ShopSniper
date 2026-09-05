@@ -95,6 +95,28 @@ test("run serialization fills the complete progress contract", () => {
   }).resultsAvailable, false);
 });
 
+test("run serialization surfaces leadSummary counts when progress counters stayed at zero", () => {
+  const serialized = serializeRun({
+    id: "run_abcdefghijklmnop",
+    state: "completed",
+    stage: "completed",
+    createdAt: new Date("2026-07-31T00:00:00.000Z"),
+    startedAt: null,
+    completedAt: new Date("2026-07-31T01:00:00.000Z"),
+    normalizedShopTypes: [],
+    progress: { storesDiscovered: 0, storesQualified: 0, storesRejected: 0, storeProcessingFailures: 0 },
+    leadSummary: { total: 12, qualified: 7, rejected: 4, failed: 1 },
+    resultsAvailable: true,
+    safeErrorCode: null,
+    safeErrorMessage: null
+  });
+
+  assert.equal(serialized.progress.storesDiscovered, 12);
+  assert.equal(serialized.progress.storesQualified, 7);
+  assert.equal(serialized.progress.storesRejected, 4);
+  assert.equal(serialized.progress.storeProcessingFailures, 1);
+});
+
 test("traffic persistence accepts normalized contracts and rejects raw or secret-shaped envelopes", () => {
   const value = {
     contractVersion: "dataforseo-traffic-v1",
